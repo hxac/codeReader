@@ -1,781 +1,668 @@
-# u4-l4 暂停、继续、删除与最大并发调度
+# 暂停、继续、删除与最大并发调度
 
 ## 1. 本讲目标
 
-前两讲（u4-l2、u4-l3）我们走通了「建任务 → 启动 → watch 收尾」的正向链路。但一个真实的下载器还必须回答四个反向问题：
-
-- 用户点「暂停」，正在跑的 goroutine 怎么被安全地按住？
-- 用户点「继续」，而 `MaxRunning` 名额已满，调度器怎么腾位置？
-- 用户点「删除」，任务怎么从列表、队列、磁盘三处一起消失？
-- 「暂停」和「下载完成」恰好同时发生时，谁来保证任务不会既不是 pause 又不是 done？
-
 学完本讲，你应该能够：
 
-1. 解释 `TaskFilter` 的批量操作模型：`Pause`/`Continue`/`Delete` 三个入口如何用同一个过滤器选出目标任务集合。
-2. 理解 `waitTasks` 等待队列与 `notifyRunning` 的唤醒机制，以及 `Continue` 在 `MaxRunning` 满载时的「腾挪算法」。
-3. 掌握 `runGeneration` 代数机制：为什么 `doStart` 的异步 handler 需要「三次核对」，`markTaskDone`/`markTaskError` 的 running 守卫如何防止旧协程覆盖新状态。
-4. 会写测试复现「暂停与完成同时发生」的竞态，并亲手观察 8 个任务在 `MaxRunning=2` 下的排队与切换时序。
+1. 解释 `TaskFilter` 的「过滤批量」操作模型，以及组 ID 如何经 `expandGroupTaskIDs` 展开为成员任务 ID，使「暂停一个分组」变成「暂停组内全部任务」。
+2. 读懂 wait 队列的完整生命周期：任务如何入队（`doCreate`）、如何被唤醒（`notifyRunning`）、暂停/删除时如何被同步清理。
+3. 掌握 `Continue` 的「腾位算法」：`MaxRunning` 满员时 `doPauseForScheduling` 如何把正在运行的任务物理暂停并压回 wait 队列。
+4. 理解 `runGeneration` 代数机制如何防护「暂停与完成同时发生」的竞态，以及 `preparePause`/`runPauseHandler` 两段式设计。
+5. 解释重写后的 `Delete` 全流程：`deletingTasks` 标记、`doDelete` 的删除顺序、删除失败时任务被重新写回 `bucketTask` 与 `d.tasks` 的恢复路径，以及空组清理。
+
+本讲是第四单元的高潮：前三讲讲的是任务如何被创建和驱动，本讲讲的是任务如何被**调度、打断和销毁**——这些操作全部并发地发生在运行中的下载器身上，是全项目竞态最密集的区域。
 
 ## 2. 前置知识
 
-本讲是第四单元最「并发」的一讲，先把要用的旧知识对齐，再补两个新概念。
+- **六态状态机**（u2-l2）：`ready → wait → running → pause/error → done`。`wait` 是纯调度概念（排队中），`done` 是唯一终态。状态的唯一写入者是 Downloader，Fetcher 只通过 `Wait()` 返回值汇报结果。
+- **两把关键的锁**：`d.lock` 保护 Downloader 级数据（`d.tasks`、`d.waitTasks`、`d.groups` 等）；`task.statusLock` 保护单个任务的 `Status` 与 `runGeneration`。此外还有 `task.lock` 保护任务整体（含 fetcher）。本讲会反复在这三把锁之间切换。
+- **wait 队列**（u4-l2）：`d.waitTasks` 是 FIFO 切片，`MaxRunning` 满员时新任务被置为 `wait` 状态入队，空位出现后由 `notifyRunning` 唤醒队首。
+- **TaskGroup 与 ParentID**（u2-l1/u4-l1）：批量下载可以建组，组有独立 ID 并持久化在 `task_group` 桶；每个成员任务的 `Task.ParentID` 指向组。对外的批量 API 接受任务 ID **或** 组 ID。
+- **事件必须在锁外发射**（u4-l3）：`d.emit` 的监听器可能回调 Downloader 方法重新抢锁，因此在持锁路径上先把要发的事件收集起来，解锁后再发——本讲的 `Continue` 和 `doPauseForScheduling` 都遵守这条纪律。
 
-**旧知识速查：**
-
-- **Task 状态机**（u2-l2）：六种状态 `ready/wait/running/pause/error/done`，定义在 [pkg/base/constants.go:L5-L12](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/constants.go#L5-L12)。其中 `wait` 是**纯调度概念**（任务没问题，只是没名额），`done` 是唯一终态；**状态的唯一写入者是 Downloader**，Fetcher 只能通过 `Wait()` 的返回值「汇报」。
-- **doStart 两段式**（u4-l2）：同步段在 `statusMut`（拿 `task.statusLock`）里改状态、递增 `runGeneration`；真正的 `fetcher.Start()` 在异步 handler goroutine 里执行。这个「同步改状态、异步做 IO」的结构是本讲全部竞态的来源。
-- **watch 守夜人**（u4-l3）：每个运行中任务一个 watch goroutine，阻塞在 `fetcher.Wait()`；返回 `nil` 走 `markTaskDone`，返回错误走 `handleOnError` → `markTaskError`。
-- **锁的层次**（u4-l1）：任务列表与 `waitTasks` 归主锁 `d.lock`；任务状态归 `task.statusLock`；任务整体（含 fetcher 操作）归 `task.lock`；拿锁顺序永远是「先 `d.lock` 后任务锁」，反过来拿会死锁。
-- **MaxRunning**：最大同时运行任务数，配置字段在 [pkg/base/model.go:L217](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L217)，默认值 5 由 `Init()` 补齐（[pkg/base/model.go:L234-L235](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L234-L235)）。
-
-**新概念一：批量操作的「过滤器」模型。**
-
-`Pause`/`Continue`/`Delete` 的入参不是任务 ID，而是一个 `TaskFilter`——用「ID 集合 + 状态白名单 + 状态黑名单」三个维度描述「我要操作哪些任务」。空过滤器等价于「全部任务」。这套模型让 REST API 能用一行查询参数表达「暂停所有 running 任务」这样的批量意图。
-
-**新概念二：代数（generation）防竞态。**
-
-`Task` 里有一个不序列化的字段 `runGeneration`（[pkg/download/model.go:L71](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/model.go#L71)）。它是一个单调递增计数器：**任务每次状态被「重启类」操作改写（进入 running、被暂停、被标记 done/error）时代数 +1**。每个异步协程在动手前记下当时的代数，写回前核对「任务当前代数是否还等于我记下的那个」——不相等就说明「我已经不是本轮运行的负责人了」，主动放弃。这相当于给每个并发协程发了一张一次性门票。
+一个贯穿全讲的直觉：**暂停/继续/删除都是「先改内存调度态，再做物理动作，最后补持久化」的三段式**，而任何一段都可能与其他操作交错，防御手段就是「状态守卫 + 代数校验」。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 | 本讲关注点 |
-| --- | --- | --- |
-| [pkg/download/downloader.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go) | 下载引擎中枢 | `Pause`/`Continue`/`Delete`、`notifyRunning`、`remainRunningCount`、`doPauseForScheduling`、`preparePause`/`runPauseHandler`、`markTaskDone`/`markTaskError`、`doStart` 的代数核对 |
-| [pkg/download/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/model.go) | Task/配置模型 | `TaskFilter` 结构、`runGeneration` 字段、`updateStatus` |
-| [pkg/base/constants.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/constants.go) | 状态常量 | 六种 `Status` |
-| [pkg/api/service.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/api/service.go) | REST 服务层 | 过滤器如何从 HTTP 查询参数构造 |
-| [pkg/download/downloader_test.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go) | 引擎测试 | `generationTestManager` 测试替身与三个官方竞态测试 |
-
-本讲 95% 的内容在 `downloader.go` 一个文件里，但跨越了它的三个区域：对外操作入口（L760-L989）、任务收尾区（L1517-L1747）、状态写入核心区（L2001-L2278）。建议按这个顺序读。
+| 文件 | 作用 |
+| --- | --- |
+| [pkg/download/downloader.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go) | 本讲主战场：`Pause`/`Continue`/`Delete`、wait 队列调度、`runGeneration`、删除恢复全部在此 |
+| [pkg/download/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go) | `Task` 结构（含 `runGeneration` 私有字段）、`updateStatus`、`TaskFilter` |
+| [pkg/base/constants.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/constants.go) | 六个下载状态常量定义 |
+| [pkg/api/service.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/api/service.go) | REST 层如何把 URL 参数包装成 `TaskFilter` 调用本讲的三个方法 |
+| [pkg/download/downloader_test.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go) | 本讲的「证据库」：代数竞态、调度暂停、删除恢复均有专门测试 |
+| [pkg/download/storage.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/storage.go) | `Storage` 接口；实践环节用包装存储注入失败 |
 
 ## 4. 核心概念与源码讲解
 
-四个最小模块的关系：
-
-> **4.1 批量入口**用 `TaskFilter` 选出任务集合；**4.2 调度器**决定谁 running、谁 wait（`Continue` 满载时用 `doPauseForScheduling` 腾位置）；**4.3 代数机制**保证「同步改状态、异步做 IO」结构下旧协程不覆盖新状态；**4.4 终态守门人** `markTaskDone`/`markTaskError` 用 running 守卫 + 代数递增把 done/error 变成一次性写入。
-
-### 4.1 Pause/Continue/Delete：TaskFilter 的批量操作模型
+### 4.1 过滤器批量模型：TaskFilter 与组 ID 展开
 
 #### 4.1.1 概念说明
 
-`TaskFilter` 是三个批量操作的统一「选人」语言：
+暂停、继续、删除面对的不是单个任务，而是「一批任务」。Gopeed 用一个极简的 `TaskFilter` 表达「选中哪些任务」：按 ID 列表、按状态白名单、按状态黑名单三个维度做交集。所有批量操作都是同一个套路：
 
-```go
-type TaskFilter struct {
-	IDs         []string      // 命中任一 ID
-	Statuses    []base.Status // 状态白名单：命中任一状态
-	NotStatuses []base.Status // 状态黑名单：命中任一状态即排除
-}
-```
+1. 过滤器为空/为 nil → 作用于**全部**任务；
+2. 否则先把 ID 列表里的**组 ID 展开成成员任务 ID**；
+3. 再叠加状态黑名单（比如暂停时跳过已经是 pause/error/done 的任务）；
+4. 最后对匹配到的每个任务执行动作。
 
-三个条件是 **AND** 关系；同一条件内部是 **OR**。空切片表示「不限制」，全空（`IsEmpty()`）表示「全部任务」。
-
-值得注意的是 `Pause` 和 `Continue` 会在过滤器上**追加自己的默认黑名单**：`Pause` 排除 `pause/error/done`（暂停一个已暂停的任务没有意义），`Continue` 排除 `running/done`（继续一个运行中的任务也没有意义）。这意味着 API 层不必传状态参数，语义已经内建在核心层。
-
-`Delete` 则不做状态排除——任何状态的任务都可以删除，并额外带一个 `force` 参数决定是否连磁盘上的文件一起删。
+组 ID 展开是本讲义所在版本（`1e36599` 引入任务分组）带来的新语义：用户在前端对着一个「文件夹下载」卡片点暂停，传上来的是组 ID，Downloader 必须把它翻译成组内全部成员任务。
 
 #### 4.1.2 核心流程
 
-三个入口的统一形态是「**先选人，再逐个执行，最后唤醒队列**」：
-
 ```text
-Pause(filter)
-  ├─ filter 为空？→ pauseAll()：清空 waitTasks 队列 + 逐个 doPause
-  ├─ 注入 NotStatuses = {pause, error, done}
-  ├─ GetTasksByFilter(filter) 选出 pauseTasks（空则返回 ErrTaskNotFound）
-  ├─ for 每个 task → doPause(task)
-  └─ notifyRunning()            ← 暂停腾出了名额，唤醒队首
-
-Continue(filter)   （详见 4.2）
-  ├─ filter 为空？→ continueAll()
-  ├─ 注入 NotStatuses = {running, done}
-  └─ 调度算法：可能先暂停别人，再启动选中的任务
-
-Delete(filter, force)
-  ├─ filter 为空？→ deleteAll()
-  ├─ GetTasksByFilter 选出 deleteTasks（空则静默返回 nil，注意与 Pause/Continue 不同）
-  ├─ 【d.lock 内】从 d.tasks 和 d.waitTasks 里移除这些任务
-  ├─ 【锁外】逐个 doDelete：删三个存储桶 → fetcher.Close → force 则删文件 → emit(delete)
-  └─ notifyRunning()            ← 删除也腾出了名额
+Pause/Continue/ContinueBatch(filter)
+  ├─ filter == nil 或 IsEmpty() → 全量分支（pauseAll / continueAll）
+  ├─ len(filter.IDs) > 0
+  │    ├─ expandGroupTaskIDs(IDs)：持 d.lock，扫描 d.tasks
+  │    │    保留直接命中的任务 ID + ParentID 命中组的成员 ID
+  │    └─ 展开结果为空 → 返回 ErrTaskNotFound
+  ├─ 叠加 NotStatuses（排除不可操作的状态）
+  ├─ GetTasksByFilter(filter) → 目标任务列表（为空则 ErrTaskNotFound）
+  └─ 逐个执行动作
 ```
+
+ID 匹配是「命中即真」的并集，状态匹配是交集：
+
+\[ \text{match}(t) = \text{idMatch}(t) \wedge \text{statusMatch}(t) \wedge \text{notStatusMatch}(t) \]
+
+其中任一维度为空即视为该维度恒真。
 
 #### 4.1.3 源码精读
 
-**过滤器本体**：
+过滤器本体只有三个字段：
 
-[pkg/download/model.go:L201-L209](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/model.go#L201-L209) —— `TaskFilter` 三个字段与 `IsEmpty()`。匹配算法在 [pkg/download/downloader.go:L1333-L1382](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1333-L1382) 的 `GetTasksByFilter`：三个闭包 `idMatch`/`statusMatch`/`notStatusMatch` 依次 AND，遍历 `d.tasks`（持 `d.lock`）收集结果。注意它拿的是**任务列表的快照引用**，匹配基于当时的 `task.Status` 快照——后面逐个 `doPause` 时状态可能又变了，所以每个执行函数内部还有第二道状态守卫（见 4.3）。
+[pkg/download/model.go:L221-L229](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L221-L229) —— `TaskFilter` 定义与 `IsEmpty()`：三个维度全空时表示「全部任务」。
 
-**Pause 入口**：
+组 ID 展开的实现是一个纯内存扫描，注意它**同时保留**了直接命中的任务 ID 和通过 `ParentID` 命中的成员 ID：
 
-[pkg/download/downloader.go:L760-L779](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L760-L779) —— 注意三个细节：① 空过滤器走 `pauseAll`；② `filter.NotStatuses = ...` 是对**调用方过滤器对象的直接改写**（副作用）；③ 循环结束后调用 `notifyRunning()`——暂停一个 running 任务等于释放一个名额，队列里的候补任务应立即顶上。
+[pkg/download/downloader.go:L830-L848](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L830-L848) —— `expandGroupTaskIDsLocked` 在持有 `d.lock` 时遍历 `d.tasks`，条件是「任务 ID 被选中，或任务的 `ParentID` 被选中」；外层包装 `expandGroupTaskIDs` 负责加锁。注释点明设计意图：即使组的元数据暂不可用，也能凭 `parentId` 关系完成展开。
 
-**pauseAll**：
+`Pause` 的入口展示了完整的过滤流程，包括状态黑名单的叠加：
 
-[pkg/download/downloader.go:L781-L797](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L781-L797) —— 先在 `d.lock` 内把 `waitTasks` 整体清空（`d.waitTasks[:0]`，复用底层数组），再对每个任务 `doPause`。**清队列是关键**：批量暂停后不允许任何候补再被拉起。对比一下——带过滤器的 `Pause` **不会**动 `waitTasks`，这个差异会在 4.1.5 的练习里考察。
+[pkg/download/downloader.go:L962-L1000](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L962-L1000) —— 空过滤器走 `pauseAll`；否则展开组 ID、把 `NotStatuses` 设为 `{pause, error, done}`（这些状态的任务暂停无意义），再取出目标任务依次 `doPause`，最后 `notifyRunning` 让出空位。注意一个细节：`Pause` 直接改写了调用方传入的 `filter`（`filter.IDs = ...`、`filter.NotStatuses = ...`），而后面将看到的 `Delete` 会先拷贝过滤器——同一份代码里两种风格并存，读源码时要留意这种「过滤器被污染」的副作用。
 
-**Delete 入口与 doDelete**：
+过滤器的求值逻辑：
 
-[pkg/download/downloader.go:L923-L968](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L923-L968) —— `Delete` 的两段式：先在 `d.lock` 内把任务从 `d.tasks` 与 `d.waitTasks` 两个列表里摘除（对 `waitTasks` 是 O(n) 的切片拼接删除），然后在**锁外**逐个 `doDelete`。存储 IO 和文件删除放锁外，是为了不让慢速磁盘操作阻塞整个任务列表。
+[pkg/download/downloader.go:L1677-L1723](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1677-L1723) —— `getTasksByFilter` 的三个内嵌匹配函数。关键陷阱：`len(filter.IDs) == 0` 时 `idMatch` 对**所有**任务返回真——「空 ID 列表」等价于「不过滤」。这解释了后文 `Delete` 里为何要用一个哨兵 ID 防止语义反转。
 
-[pkg/download/downloader.go:L1184-L1222](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1184-L1222) —— `doDelete` 的清理清单：`defer releaseBlobTask` 释放 Blob 引用（u9 内容）；依次删除 `bucketTask`/`bucketSave`/`bucketTaskStats` 三个存储桶中该任务的键（u4-l1 讲过删任务三桶同删）；若 fetcher 已加载则 `fetcher.Close()`（注意：**删除直接 Close，不先 Pause**）；`force=true` 时按资源形态删整个目录（`Res.Name != ""` 是文件夹资源）或单个文件；最后 `emit(EventKeyDelete)`。
+REST 层如何构造过滤器：
 
-**API 层如何构造过滤器**：
+[pkg/api/service.go:L208-L230](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/api/service.go#L208-L230) —— `pauseTask`/`continueTask` 把路径参数 `id` 包成 `TaskFilter{IDs: []string{taskID}}`，`applyTaskAction` 统一分发；批量版本（`pauseTasks` 等）则从 query 参数解析过滤器。前端传上来的既可能是任务 ID 也可能是组 ID，Downloader 一律兼容。
 
-[pkg/api/service.go:L57-L62](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/api/service.go#L57-L62) —— REST 路由为每个操作提供「单任务」和「批量」两种形态：`PUT /api/v1/tasks/{id}/pause` 与 `PUT /api/v1/tasks/pause`。
+`Continue` 与 `ContinueBatch` 的过滤入口与 `Pause` 同构，只是黑名单不同：
 
-[pkg/api/service.go:L208-L237](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/api/service.go#L208-L237) —— 单任务版本只是把路径参数包成 `TaskFilter{IDs: []string{taskID}}` 再调同一个 Downloader 方法；批量版本由 [pkg/api/service.go:L450-L459](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/api/service.go#L450-L459) 的 `taskFilterFromQuery` 从查询参数 `id`/`status`/`notStatus`（均可重复）构造。**桥接层不知道批量语义，语义完全收敛在核心层**——这正是 u1-l1 讲的「桥接小而稳定」原则的又一次体现。
+[pkg/download/downloader.go:L1021-L1035](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1021-L1035) —— `Continue` 排除 `{running, done}`，即 pause/error/wait/ready 状态的任务都可以被继续。
 
-#### 4.1.4 代码实践：用 curl 体验批量过滤器
+[pkg/download/downloader.go:L1126-L1144](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1126-L1144) —— `ContinueBatch` 同样展开组 ID 后对每个匹配任务直接 `doStart`，**不做 MaxRunning 仲裁**（它是一条「越过闸门」的通道）。值得注意：该方法目前在仓库内没有任何调用方（含测试），属于预留接口——阅读源码时要能识别「存在但未接线」的代码，不要臆测它的用途。
 
-**实践目标**：验证 `TaskFilter` 的三个维度（`id`/`status`/`notStatus`）在 REST 层的真实行为。
+#### 4.1.4 代码实践
 
-**操作步骤**（需要 u1-l2 构建的服务端，如 `go run ./cmd/api` 或 docker 启动的 Web 版；假设监听 `localhost:9999`，token 为空）：
+**实践目标**：用 REST API 直观感受「组 ID 展开」的批量语义。
+
+**操作步骤**（需要能访问网络的目标 URL，若无可先做源码阅读部分）：
+
+1. 参考 u1-l2 启动开发 API 服务：`go run ./cmd/api`（默认监听 `localhost:9999`，无 token）。
+2. 提交一个分组批量任务（示例代码，可用 `curl` 或 REST 客户端）：
 
 ```bash
-# 1. 建两个慢速任务（找一个限速的大文件 URL，或重复用同一个）
-curl -X POST localhost:9999/api/v1/tasks -H 'Content-Type: application/json' \
-  -d '{"req":{"url":"https://example.com/big-file.iso"}}'
-curl -X POST localhost:9999/api/v1/tasks -H 'Content-Type: application/json' \
-  -d '{"req":{"url":"https://example.com/another-file.zip"}}'
-
-# 2. 批量暂停所有 running 任务（状态白名单）
-curl -X PUT 'localhost:9999/api/v1/tasks/pause?status=running'
-
-# 3. 批量继续所有 pause 任务
-curl -X PUT 'localhost:9999/api/v1/tasks/continue?status=pause'
-
-# 4. 用黑名单表达同一意图：notStatus=done & notStatus=error
-curl -X PUT 'localhost:9999/api/v1/tasks/pause?notStatus=done&notStatus=error&notStatus=pause'
-
-# 5. 查看任务列表确认状态
-curl 'localhost:9999/api/v1/tasks'
-
-# 6. 单任务删除（force=true 连文件一起删）
-curl -X DELETE 'localhost:9999/api/v1/tasks/{taskId}?force=true'
+curl -X POST http://localhost:9999/api/v1/tasks/batch \
+  -H 'Content-Type: application/json' \
+  -d '{"group":true,"groupName":"demo","reqs":[{"req":{"url":"https://example.com/a.zip"}},{"req":{"url":"https://example.com/b.zip"}}]}'
 ```
 
-**需要观察的现象**：第 2 步后两个任务都变 `pause`；第 3 步后变回 `running`（若 `MaxRunning` 足够）；第 4 步与第 2 步效果相同（因为核心层还会再注入自己的黑名单）。
+3. 记下响应里的 `parentId` 与两个 `taskIds`。
+4. 用**组 ID** 暂停：`curl -X PUT "http://localhost:9999/api/v1/tasks/pause?id=<parentId>"`（查询参数是可重复的 `id`，由 `taskFilterFromQuery` 收集为数组），然后 `GET /api/v1/tasks` 查看两个成员任务的状态。
+5. 阅读上面的 `expandGroupTaskIDsLocked` 源码，确认第 4 步的效果正是它造成的。
 
-**预期结果**：批量接口与单任务接口最终调用的都是 `Downloader.Pause/Continue/Delete`，行为一致；删除后任务从列表消失，`force=true` 时下载目录中的文件也被移除。
+**需要观察的现象**：一次调用后**两个**成员任务同时变为 `pause`，而不是只暂停了某个不存在的「组任务」——组本身不是任务，只是一份共享目录元数据。
 
-**待本地验证**：本沙箱环境无法启动服务，以上命令未实际运行；尤其第 4 步与第 2 步的等价性请以实际响应为准。
+**预期结果**：两个成员任务状态均为 `pause`。命令执行效果「待本地验证」（取决于网络与目标 URL 可达性）；源码层面可确认：`expandGroupTaskIDsLocked` 会把 `parentId` 翻译成两个成员 ID。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`Pause(nil)` 和 `Pause(&TaskFilter{IDs: []string{id}})` 对一个正在 `wait` 排队的任务分别有什么效果？
+**练习 1**：`Pause` 里如果把 `NotStatuses` 设为 `{running, wait}` 会发生什么？
 
-**参考答案**：`Pause(nil)` 走 `pauseAll`，会先把 `waitTasks` 整队清空再暂停所有任务，该任务最终为 `pause` 且**不在任何队列里**；带过滤器的 `Pause` 不修改 `waitTasks`，该任务被置为 `pause` 但**仍留在队列中**。随后两者都会调 `notifyRunning()`——而 `doStart` 的同步段只拒绝 `running/done`（见 4.3.3），所以「过滤暂停一个 wait 任务后，它可能仍会在名额空出时被调度器重新拉起」。这是代码字面行为，是否构成实际可观察的怪异表现，待本地验证（见 4.3.4 实践的延伸问题）。
+**答案**：只有 `ready` 状态的任务能被暂停（error/pause/done 未被排除但它们本来就不在可暂停路径上），正在运行与排队的任务全部被过滤器排除，`pauseTasks` 很可能为空从而返回 `ErrTaskNotFound`——这与「暂停」的语义正好相反。`NotStatuses` 排除的是「暂停无意义/不可能」的状态，而不是「要暂停」的状态。
 
-**练习 2**：为什么 `Delete` 匹配不到任务时返回 `nil`，而 `Pause`/`Continue` 匹配不到时返回 `ErrTaskNotFound`（[pkg/download/downloader.go:L57](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L57)）？
+**练习 2**：为什么 `expandGroupTaskIDsLocked` 需要调用方持有 `d.lock`，而 `expandGroupTaskIDs` 又提供了一个加锁版本？
 
-**参考答案**：删除是幂等的终态操作——「要删的东西已经不在了」等于「删除成功」，返回 nil 让重试和并发删除都安全。暂停/继续则不然：找不到任务通常意味着调用方拿到了过期的任务 ID（比如任务刚被别处删除），报错能把问题暴露给上层 UI。这是 API 设计中「幂等操作宽容、状态操作严格」的典型取舍。
+**答案**：展开过程要遍历 `d.tasks` 且读取 `task.ParentID`，必须与 `Delete`/批量创建等修改 `d.tasks` 的路径互斥。已持锁的调用方（如 `Delete`）直接用 Locked 版本避免重复加锁导致死锁；`Pause`/`Continue` 未持锁时用加锁包装版。
 
-**练习 3**：`GetTasksByFilter` 返回的任务集合，到逐个 `doPause` 执行时还准确吗？
+**练习 3**：一个组内只有 2 个成员，其中 1 个已 `done`。用组 ID 调用 `Continue` 后，`done` 的任务会被再次启动吗？
 
-**参考答案**：不一定。选人时读的是状态快照，逐个执行期间其他 goroutine（watch、另一个 API 请求）可能已经改了任务状态。所以批量操作的正确性不靠「选得准」，靠「每个执行函数内部的第二道守卫」：`preparePause` 会检查任务是否已处于 `pause/done/error` 而直接跳过（4.3.3），`doStart` 会检查 `running/done` 而直接返回。过滤器只负责「缩小范围」，不负责「保证」。
+**答案**：不会。展开后的 ID 仍指向全部成员，但 `Continue` 叠加了 `NotStatuses = {running, done}`，`done` 成员在 `GetTasksByFilter` 处被排除；即便漏过，`doStart` 的状态守卫（见 4.3.3）也会对 `done` 任务直接返回。
 
-### 4.2 wait 队列与 doPauseForScheduling：MaxRunning 的守门与腾挪
+### 4.2 调度核心：wait 队列、notifyRunning 与 doPauseForScheduling
 
 #### 4.2.1 概念说明
 
-`MaxRunning` 是一个**软性并发上限**：它不限制 goroutine 数量，只限制同时处于 `running` 状态的任务数。守门的不是某个常驻调度器，而是四个「决策点」上的简单算术：
+`MaxRunning` 是全局最大并发下载数。它由一个「闸门 + 队列」实现：
 
-1. **建任务时**（`doCreate`）：有空位直接 `doStart`，满载则标记 `wait` 进 `waitTasks` FIFO 队列。
-2. **名额释放时**（`notifyRunning`）：完成、出错、暂停、删除都会唤醒队首。
-3. **用户点名继续时**（`Continue`）：这是最复杂的一种——用户说「我要这几个任务现在跑」，如果没有空位，调度器要**现场暂停别的 running 任务腾位置**。
-4. **批量继续全部时**（`continueAll`）：能启动的启动，多余的排队。
+- **闸门**：`remainRunningCount()` 实时计算「还能再跑几个」；
+- **队列**：满员时新任务置为 `wait` 状态进入 `d.waitTasks`（FIFO），空位出现时由 `notifyRunning()` 从队首取一个启动。
 
-`doPauseForScheduling` 就是第 3 种场景的专用武器：**物理暂停一个 running 任务并原子地把它变成 wait 状态塞回队列**。它与普通 `doPause` 的区别在于：不发事件（调用方持 `d.lock`，事件必须延后到锁外发）、成功后把状态从 `pause` 翻转成 `wait`（被腾挪的任务不是「被用户暂停」，而是「还在排队」）。
+三个动作会触发空位释放，它们都调用 `notifyRunning`：任务暂停后（`Pause` 末尾）、任务删除后（`Delete` 末尾）、任务完成或失败后（`watch` 循环与 `handleOnError` 中）。
 
-一个重要的架构事实：**`doStart` 本身不检查 `MaxRunning`**。名额仲裁只发生在上述入队决策点；凡是走到 `doStart` 的任务，都是被决策点「授权越过闸门」的。
+本模块最有趣的是 `Continue` 的**腾位算法**：当用户明确要求「继续」某些任务而闸门已满时，Gopeed 不会简单地拒绝或无限排队，而是**主动暂停一些正在运行的任务**给新任务腾位——被腾位的任务回到 wait 队列**尾部**，稍后自动恢复。这就是 `doPauseForScheduling`（为调度而暂停）与普通 `doPause`（用户暂停）的区别：前者终态是 `wait`（回队列），后者终态是 `pause`（停下来等用户）。
 
 #### 4.2.2 核心流程
 
-先看两个基础设施：
+空位计算：
+
+\[ \text{remainRunningCount} = \text{MaxRunning} - \#\{t \in \text{tasks} \mid t.\text{status} = \text{running}\} \]
+
+`Continue` 的腾位决策（全部在 `d.lock` 内完成）：
+
+\[ \text{needRunningCount} = \min(\text{MaxRunning},\ \text{continueCount}) \]
+\[ \text{needPauseCount} = \text{needRunningCount} - \text{remainRunningCount} \]
 
 ```text
-remainRunningCount():
-    遍历 d.tasks 数 running 状态的任务数 → MaxRunning - runningCount
-    （空闲名额数；running 超过 MaxRunning 时可能为负）
-
-notifyRunning():                        // 异步！go func 起 goroutine
-    持 d.lock →
-      空闲名额 == 0？→ 返回
-      waitTasks 非空？→ 弹出队首 wt → doStart(wt)   // FIFO，一次只拉一个
+Continue(过滤出 continueTasks)
+  持 d.lock：
+    若 needPauseCount > 0：
+      按 d.tasks 顺序遍历 running 任务
+        doPauseForScheduling(task)：
+          物理暂停 fetcher（不 emit 事件！）
+          若仍处于本次暂停的代数 → 置 wait，返回 queued=true
+        queued → 追加到 waitTasks 尾部（腾位成功，计数+1）
+      直到腾够 needPauseCount 个
+    continueTasks 前 needRunningCount 个 → realContinueTasks（即将启动）
+    其余 → 置 wait，追加到 waitTasks 尾部
+  释放 d.lock：
+    对腾位任务补发 EventKeyPause（锁外发射！）
+    对 realContinueTasks 逐个 doStart
 ```
 
-再看 `Continue` 的腾挪算法（全称在 4.2.3 精读）。设 \( M \) 为 `MaxRunning`、\( C \) 为本次要继续的任务数、\( R \) 为当前 running 数、空闲名额 \( F = M - R \)，则：
-
-\[ \text{needRunningCount} = \min(M,\ C) \]
-\[ \text{needPauseCount} = \max\bigl(0,\ \min(M, C) - (M - R)\bigr) \]
-
-即「本次最多实际启动 \( \min(M, C) \) 个，不够的名额靠现场暂停别的任务来凑」。整个决策在一次 `d.lock` 持有中完成：
-
-```text
-Continue(filter)  【d.lock 内】
-  ├─ 计算 needPauseCount > 0？
-  │    └─ 按 d.tasks 创建顺序扫描 running 任务：
-  │         doPauseForScheduling(task)
-  │           ├─ preparePause：状态→pause、代数++（同 doPause）
-  │           ├─ runPauseHandler：物理 fetcher.Pause() + 落盘
-  │           └─ 【statusLock 内】状态仍是 pause 且代数未变？
-  │                是 → 翻转为 wait，返回 queued=true → 调用方 append 到 waitTasks 队尾
-  │                否 → 中途有人插足（完成/出错/重启），放弃入队
-  │         直到腾够 needPauseCount 个
-  ├─ 遍历 continueTasks：前 needRunningCount 个进 realContinueTasks
-  │    其余 → 状态直写 wait + append 到 waitTasks
-  ├─ 【释放 d.lock 后】给被腾挪的任务补发 pause 事件
-  └─ 逐个 doStart(realContinueTasks)
-```
-
-一个具体例子：`MaxRunning=3`，当前 running = {A, B, C}，用户 `Continue` 点名 {D, E}。\( F = 0 \)，`needRunningCount` \( = \min(3,2) = 2 \)，`needPauseCount` \( = 2 \)。调度器按创建顺序暂停 A、B（物理 `fetcher.Pause`、翻回 wait、排到队尾），启动 D、E。最终 running = {C, D, E}，`waitTasks` = [A, B]。A、B 的 `pause` 事件在锁释放后补发。
+`notifyRunning` 则简单得多：异步抢 `d.lock`，若还有空位且队列非空，取队首 `doStart`。
 
 #### 4.2.3 源码精读
 
-**名额计算与唤醒**：
+wait 队列与竞态标记字段在 Downloader 结构体上：
 
-[pkg/download/downloader.go:L595-L603](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L595-L603) —— `remainRunningCount` 用「实时数一遍 running」而不是维护计数器，简单且不会漂移；代价是 O(任务数)，但任务列表通常很短。
+[pkg/download/downloader.go:L120-L131](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L120-L131) —— `d.tasks`（全量）、`d.waitTasks`（排队中）、`d.groups`/`d.creatingGroups`（分组元数据与创建中标记）、`d.deletingTasks`（删除中标记，见 4.4），以及保护它们的 `d.lock`。
 
-[pkg/download/downloader.go:L578-L593](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L578-L593) —— `notifyRunning` 的三个要点：① `go func` 异步执行，调用方（比如 watch 的成功分支）不必等调度完成；② 整个「算名额 → 弹队首 → doStart」持 `d.lock`，多个 `notifyRunning` 并发时串行化，且每次都重算名额，**不会超发**；③ 空闲名额用 `== 0` 判断——若运行时调低 `MaxRunning` 导致名额为负，同样不会启动新任务。调用点共四处：任务完成（[L1595](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1595)）、任务出错（[L1744](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1744)）、`Pause`（[L776](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L776)）、`Delete`（[L966](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L966)）。
+空位计算与队列唤醒：
 
-**建任务时的入队决策**：
+[pkg/download/downloader.go:L617-L625](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L617-L625) —— `remainRunningCount` 用 `taskStatus`（内部抢 `statusLock`）逐个统计 running 数，再减 `MaxRunning`。
 
-[pkg/download/downloader.go:L1856-L1870](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1856-L1870) —— `doCreate` 在 `d.lock` 内：任务先入 `d.tasks`，再算名额；`remainRunningCount == 0` 时状态直写 `wait` 并 append 进 `waitTasks`（注意 `doStart` 的同步段会立刻把状态改成 running，所以这里的 wait 是「跳过启动」的标记）；否则就地 `doStart`。
+[pkg/download/downloader.go:L600-L615](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L600-L615) —— `notifyRunning` 起一个新 goroutine 抢 `d.lock`，切掉队首任务并 `doStart`。注意它是 `go func()` 异步的：调用方（如 `Pause`）不必等队列消费完成即可返回。
 
-**Continue 的腾挪主体**：
+任务入队的入口在 `doCreate`：
 
-[pkg/download/downloader.go:L800-L867](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L800-L867) —— 对照 4.2.2 的伪代码逐行读。几个容易漏看的点：① 被腾挪任务的 `pause` 事件**必须**在 `d.lock` 释放后补发（[L854-L858](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L854-L858) 的注释写明原因：listener 回调可能反过来调用需要 `d.lock` 的 Downloader 方法，锁内 emit 会死锁——这与 u4-l3 讲的「事件必须在锁外 emit」一脉相承）；② 没被选中的多余任务排在**被腾挪任务之后**入队，即队尾顺序是「先腾挪的旧任务，再本次溢出的新任务」；③ `Continue` 的返回错误只来自 `doPauseForScheduling`/`doStart`，选人阶段匹配为空才返回 `ErrTaskNotFound`。
+[pkg/download/downloader.go:L2210-L2217](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2210-L2217) —— 满员时把任务置 `wait` 并追加到 `d.waitTasks`，否则直接 `doStart`。入队发生在 `d.lock` 临界区内，与 `notifyRunning` 的消费端互斥。
 
-**continueAll 与 ContinueBatch**：
+`Pause` 在物理暂停之前会先**同步清理 wait 队列**——这是本讲的必考细节：
 
-[pkg/download/downloader.go:L870-L897](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L870-L897) —— `continueAll` 不腾挪任何人：按空闲名额启动前 `remainCount` 个非 running/done 任务，其余排队。启动策略是「先到先得」（`d.tasks` 创建顺序）。
+[pkg/download/downloader.go:L978-L997](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L978-L997) —— 持 `d.lock` 用原地过滤（`d.waitTasks[:0]` 复用底层数组）把被暂停的任务从队列里剔除，再逐个 `doPause`，最后 `notifyRunning`。如果不先清队列，会发生什么？`doPause` 把任务置为 `pause`，而队列里的同一指针稍后被 `notifyRunning` 取出 `doStart`——暂停瞬间被「复活」。先剔除再暂停，顺序保证了队列里永远只有 wait 状态的任务。
 
-[pkg/download/downloader.go:L899-L911](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L899-L911) —— `ContinueBatch` 对每个匹配任务直接 `doStart`，**不做 `MaxRunning` 仲裁**（它本身就是一个「越过闸门」的通道）。值得注意：该方法目前在仓库内没有任何调用方（含测试），属于预留接口——阅读源码时要能识别「存在但未接线」的代码，不要臆测它的用途。
+`Continue` 的腾位主体：
 
-**doPauseForScheduling 的原子翻转**：
+[pkg/download/downloader.go:L1040-L1093](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1040-L1093) —— 闭包内完成全部计算与状态翻转（注意 `pausedTasks` 的收集），解锁后**先补发 pause 事件再 doStart**。L1081-L1082 的注释解释了为什么必须这样做：监听器允许回调 `Pause`/`Continue` 等会抢 `d.lock` 的方法，持锁发射会死锁。
 
-[pkg/download/downloader.go:L2139-L2157](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2139-L2157) —— 全函数分三步：`preparePause`（改状态、记代数）→ `runPauseHandler`（物理暂停 + 落盘）→ `statusLock` 内**复核**「状态仍是 pause 且代数等于我记下的那个」，双条件都满足才翻转为 `wait` 并返回 `queued=true`。这个复核就是竞态防护：如果两步之间有别的协程插足（任务恰好完成被标成 done、或被标成 error、或被再次启动），代数必然已经变化，`queued=false`，调用方**不会**把它塞进等待队列——插足者的裁决得以保留。被腾挪任务入队的动作由调用方 `Continue` 完成（[L830-L834](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L830-L834)），保持「队列写操作全在 `d.lock` 内」的纪律。
+腾位专用暂停：
 
-顺带一个运行期细节：通过 `PutConfig` 调大 `MaxRunning` 并**不会**触发 `notifyRunning`（[pkg/download/downloader.go:L1399-L1459](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1399-L1459) 全函数无此调用），排队任务要等到下一次「名额释放事件」才会被拉起。
+[pkg/download/downloader.go:L2507-L2525](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2507-L2525) —— `doPauseForScheduling` 的注释直说设计约束：「在调用方持有 d.lock 时物理暂停一个运行中任务且不 emit 事件，然后原子地把它移入 wait 队列状态」。它复用 `preparePause`/`runPauseHandler` 两段式（见 4.3），成功后在 `statusLock` 内检查「是否仍是本次暂停的代数且状态为 pause」，是则翻转为 `wait` 并返回 `queued=true`。
 
-#### 4.2.4 代码实践：8 个任务、MaxRunning=2 的排队时序
+`continueAll`（`Continue(nil)` 的全量分支）则**不做腾位**：
 
-**实践目标**：亲眼观察 `waitTasks` 的 FIFO 纪律与 `notifyRunning` 的逐个唤醒，画出 wait→running 的切换时序。
+[pkg/download/downloader.go:L1097-L1124](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1097-L1124) —— 注释写明「continue 所有任务但**不影响**已在运行的任务」：只填满剩余空位，多出的置 wait 入队。启动策略上 `ContinueOnStartup`（L1149-L1154）复用的正是这一语义。
 
-**操作步骤**：在**你自己的仓库克隆**里新建 `pkg/download/u4l4_practice_test.go`（与现有测试同包，因此可以直接复用 [pkg/download/downloader_test.go:L33-L44](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go#L33-L44) 的 `generationTestManager` 测试替身和 [pkg/download/extension_test.go:L2042-L2061](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/extension_test.go#L2042-L2061) 的 `waitForTaskStatus` 辅助函数），写入以下内容（**示例代码**，非仓库原有代码）：
+#### 4.2.4 代码实践
+
+**实践目标**：创建 8 个任务、`MaxRunning=2`，亲手记录 wait→running 的切换时序，并触发一次腾位调度。
+
+**操作步骤**：仓库测试里有一个专为并发测试设计的 `generation://` 假协议，`holdOpen: true` 时任务**永不完成**，是观察调度的理想工具。在 `pkg/download/` 下新建一个测试文件（如 `schedule_practice_test.go`，练习完成后可删除或保留为本地笔记）：
 
 ```go
+// 示例代码：读者练习用，仿照仓库内既有测试风格编写
 package download
 
 import (
-	"fmt"
-	"sync"
 	"testing"
-	"time"
 
-	"github.com/GopeedLab/gopeed/internal/fetcher"
 	"github.com/GopeedLab/gopeed/pkg/base"
 )
 
-// holdOpen=true：fetcher.Start 后不自动完成，何时完成由测试发信号控制
-func TestU4L4_PracticeScheduleTimeline(t *testing.T) {
-	manager := &generationTestManager{holdOpen: true}
-	downloader := NewDownloader(&DownloaderConfig{
-		FetchManagers: []fetcher.FetcherManager{manager},
-	})
-	if err := downloader.Setup(); err != nil {
-		t.Fatal(err)
-	}
-	defer downloader.Clear()
-	downloader.cfg.MaxRunning = 2
-
-	// 记录事件时间线（emit 可能来自不同 goroutine，加锁保护）
-	var mu sync.Mutex
-	timeline := make([]string, 0)
-	downloader.Listener(func(event *Event) {
-		mu.Lock()
-		defer mu.Unlock()
-		timeline = append(timeline, fmt.Sprintf("%s %-7s %s",
-			time.Now().Format("15:04:05.000"), event.Key, event.Task.ID))
-	})
-
-	// 一次性创建 8 个任务
+func TestPractice_ScheduleTimeline(t *testing.T) {
+	manager := &generationTestManager{holdOpen: true} // 任务永不完成
+	d := newTaskGroupDownloader(t, nil, 2)            // MaxRunning=2，见 downloader_test.go:4048
+	_ = manager
 	ids := make([]string, 0, 8)
 	for i := 0; i < 8; i++ {
-		id, err := downloader.CreateDirect(
-			&base.Request{URL: "generation://slot"},
-			&base.Options{Path: t.TempDir(), Name: "slot.bin"},
-		)
+		id, err := d.CreateDirect(&base.Request{URL: "generation://x"},
+			&base.Options{Path: t.TempDir(), Name: "x.bin"})
 		if err != nil {
 			t.Fatal(err)
 		}
 		ids = append(ids, id)
 	}
-
-	// 断言 1：恰好 2 个 running、6 个 wait
-	running, waiting := 0, 0
-	for _, task := range downloader.GetTasks() {
-		switch downloader.taskStatus(task) {
-		case base.DownloadStatusRunning:
-			running++
-		case base.DownloadStatusWait:
-			waiting++
-		}
-	}
-	if running != 2 || waiting != 6 {
-		t.Fatalf("want 2 running + 6 wait, got %d running + %d wait", running, waiting)
-	}
-
-	// 辅助：给第一个 running 任务的 fetcher 发“完成”信号
-	signalFirstRunningDone := func() {
-		for _, task := range downloader.GetTasks() {
-			if downloader.taskStatus(task) == base.DownloadStatusRunning {
-				task.fetcher.(*generationTestFetcher).done <- nil
-				return
-			}
-		}
-		t.Fatal("no running task to finish")
-	}
-	// 辅助：等待物理 Start 次数达到 want
-	waitStarts := func(want int32) {
-		deadline := time.Now().Add(3 * time.Second)
-		for manager.starts.Load() != want && time.Now().Before(deadline) {
-			time.Sleep(5 * time.Millisecond)
-		}
-		if got := manager.starts.Load(); got != want {
-			t.Fatalf("fetcher.Start called %d times, want %d", got, want)
-		}
-	}
-
-	// 先等前两个任务物理启动，避免把完成信号发给尚未 Start 的 fetcher
-	waitStarts(2)
-
-	// 断言 2：逐个完成任务，候补按 FIFO 顶上（starts: 2→8）
-	for finished := 1; finished <= 8; finished++ {
-		signalFirstRunningDone()
-		if finished <= 6 { // 队列空之前，每完成一个就有候补被拉起
-			waitStarts(int32(finished + 2))
-		}
-	}
-	// 断言 3：最终 8 个任务全部 done
-	for _, id := range ids {
-		waitForTaskStatus(t, downloader, id, base.DownloadStatusDone, 3*time.Second)
-	}
-
-	mu.Lock()
-	defer mu.Unlock()
-	t.Logf("event timeline (%d events):", len(timeline))
-	for _, line := range timeline {
-		t.Log(line)
-	}
+	// TODO(读者)：此处轮询打印 8 个任务的状态快照
 }
 ```
 
-运行：
+说明：`newTaskGroupDownloader` 内部就是注册 `generationTestManager{holdOpen: true}` 并设置 `MaxRunning`（[pkg/download/downloader_test.go:L4048-L4060](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L4048-L4060)），读者也可以完全自己写 `NewDownloader(&DownloaderConfig{FetchManagers: ...})`。然后：
 
-```bash
-go test ./pkg/download/ -run 'TestU4L4_PracticeScheduleTimeline' -v
-```
+1. 创建 8 个任务后立即（轮询 10ms 间隔）打印每个任务状态，直到稳定；
+2. `d.Pause(&TaskFilter{IDs: []string{ids[0]}})`，继续轮询观察谁被 `notifyRunning` 唤醒；
+3. 把 6 个排队任务之一用 `d.Continue(&TaskFilter{IDs: []string{ids[5]}})` 继续，观察腾位：谁被 `doPauseForScheduling` 压回队列、队列顺序如何变化；
+4. 运行：`go test ./pkg/download/ -run TestPractice_ScheduleTimeline -v`。
 
-**需要观察的现象**：创建 8 个任务后立即断言 `2 running + 6 wait` 通过；每完成一个 running 任务，`manager.starts` 计数加一（说明候补被 `notifyRunning` 拉起）；最后 8 个任务全部 `done`；时间线里 `start`/`done` 事件严格交替成对出现。
+**需要观察的现象**：稳定后恰好 2 个 `running`、6 个 `wait`；暂停一个 running 后队首任务自动变 `running`；`Continue(ids[5])` 时**另一个 running 任务**被腾位成 `wait` 并排到队尾，`ids[5]` 变 `running`。
 
-**预期结果**：候补任务被唤醒的顺序与创建顺序一致（`ids[2]`、`ids[3]`、……、`ids[7]` 依次进入 running），验证 `waitTasks` 的 FIFO 语义与「一次唤醒只拉一个」的设计。
-
-**待本地验证**：本沙箱无 Go 工具链，以上测试未实际运行；逻辑模型来自对 `doCreate`/`notifyRunning`/`watch` 的源码推演，与官方测试 `TestDownloader_SchedulingPauseCompletesBeforeReplacementStart`（[pkg/download/downloader_test.go:L697-L765](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go#L697-L765)）使用同一套替身。
+**预期结果**：与 `TestDownloader_SchedulingPauseCompletesBeforeReplacementStart`（[pkg/download/downloader_test.go:L697-L765](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L697-L765)）断言的行为一致：替换任务在物理 Pause 完成之前不得 `Fetcher.Start`（该测试断言 `starts == 1` 不变）。精确的时序数字「待本地验证」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `notifyRunning` 要用 `go func` 异步执行，而不是同步完成调度？
+**练习 1**：`notifyRunning` 为什么用 `go func()` 异步执行，而不是在调用点同步做？
 
-**参考答案**：`notifyRunning` 的调用点都在关键路径上——watch 的收尾分支、`Pause`/`Delete` 的末尾。同步调度意味着这些调用方要等「持 `d.lock` → 算名额 → doStart」整个流程走完（`doStart` 的同步段还可能做 `restoreTask` 的存储读取），把存储 IO 的延迟传染给每一个事件链路。异步化后调用方立即返回；代价是「任务完成到候补启动」之间有微小延迟，以及并发 `notifyRunning` 需要靠 `d.lock` 串行化——这两点都被设计接受了。
+**答案**：一是调用方（`Pause`/`Delete`/`watch`）不应被队列消费阻塞——`doStart` 可能包含耗时的恢复与文件准备；二是把「取队首 + 启动」整体放进一个抢 `d.lock` 的原子段，天然与入队、腾位等路径互斥，避免队列被并发消费出双份启动。
 
-**练习 2**：`Continue` 点名继续的任务，最多能同时启动几个？被腾挪的任务最后排在队列什么位置？
+**练习 2**：`Pause` 时为什么先清 `waitTasks` 再 `doPause`，反过来行不行？
 
-**参考答案**：最多 \( \min(M, C) \) 个——既受 `MaxRunning` 约束，也受本次点名数量约束。被腾挪的任务由 `doPauseForScheduling` 翻成 wait 后 append 到 `waitTasks` **队尾**，且它们先于本次溢出的点名任务入队；也就是说被抢占者不会丢掉排队资格，只是让出了当前名额。
+**答案**：不行。若先 `doPause` 再清队列，`doPause` 把任务置为 `pause` 后到清理完成之间，`notifyRunning`（由其他任务的完成事件触发）可能取走队列里这个「已是 pause 状态」的任务并 `doStart`，产生「用户暂停的任务又被启动」的竞态。先剔除使队列中永远只有待启动任务。（当然，即便顺序颠倒，`doStart` 的代数守卫也会兜底拒绝过期启动，但正确顺序让语义在队列层面就保持一致。）
 
-**练习 3**：如果把 `doPauseForScheduling` 里「翻转为 wait」的复核条件从「状态是 pause **且** 代数未变」改成「状态是 pause」，会有什么风险？
+**练习 3**：`continueAll` 与 `Continue(指定任务)` 对「正在运行任务」的处理差异是什么？
 
-**参考答案**：复核的代数条件防的是「`preparePause` 与翻转之间有第三方插足」。设想 watch 恰在此间把任务标成 done（`markTaskDone` 会置 done 并递增代数）：只查状态的话……实际上 `markTaskDone` 成功时状态已不是 pause，只查状态也能拦住。真正的差异在更刁钻的交错——比如任务被插足者再次启动（状态经历 pause→running）。总之代数复核是**防御性冗余**：状态检查依赖「每个写状态的人都会改状态」这一约定，代数检查则直接验证「从我来过之后没有任何人动过」，后者对未来代码演进更稳健。这类「双保险」在并发代码里值得留意，但也说明此处不变量微妙、改动需格外小心。
+**答案**：`continueAll` 完全不动 running 任务，只填空位；`Continue(指定任务)` 在空位不足时会主动 `doPauseForScheduling` 一批 running 任务腾位。前者用于启动时全量续跑等「补位」场景，后者保证用户点「继续」的任务**一定**跑起来。
 
-### 4.3 runGeneration 代数：与异步协程的竞态防护
+### 4.3 runGeneration 代数：preparePause 与 runPauseHandler 的竞态防护
 
 #### 4.3.1 概念说明
 
-本讲的竞态都源于同一个结构（u4-l2 讲过）：`doStart` 同步段改状态、异步 handler 做 IO。想象这条时间线：
+设想这个场景：任务即将下载完，`watch` 协程正要把 `fetcher.Wait()` 的 nil 结果翻译成 `done`；同一瞬间用户点了暂停，`doPause` 正要把状态翻成 `pause`。两个写者，谁赢？
 
-```text
-协程甲（doStart 的异步 handler，代数 gen=5）    协程乙（用户点了暂停）
-  ├─ 正在做启动准备（回填 Meta、prepareTask…）
-  │                                              ├─ preparePause：status=pause，gen→6
-  │                                              └─ runPauseHandler：fetcher.Pause()
-  ├─ 准备完成，调 fetcher.Start()   ← 灾难！任务已暂停却又被物理启动
-  └─ watch 收到完成信号 → markTaskDone？
-```
+再想一个更刁钻的：`doStart` 的异步 handler 还在跑（尚未调用 `fetcher.Start`），此时用户先 `Pause` 再 `Continue`——**第一次启动**的 handler 拿到锁后应该继续启动吗？如果不加防护，这个「过期的启动」会把用户刚暂停的任务又拉起来。
 
-没有防护的话，最终状态取决于两个协程谁后写入——这是典型的数据竞争。Gopeed 的解法不是给整个过程加一把大锁（那样 IO 期间整个调度器都被卡住），而是**代数核对**：
+Gopeed 的答案是给每个任务装一个**单调递增的代数计数器** `task.runGeneration`（`uint64`）：每次成功的状态迁移（start、pause、done、error）都 `++`。任何异步操作在真正产生副作用之前，都会核对「当前代数是否还是我出发时记录的那一代」——不是，就 silently 放弃。这本质上是乐观并发控制：**状态迁移是「票据」，代数是「票据编号」，编号过期作废**。
 
-- 同步段改状态前 `task.runGeneration++`，把新代数**抄写**给将要启动的异步协程；
-- 异步协程在每个「有副作用的步骤」前核对 `taskIsRunningGeneration(task, gen)`——「任务现在仍是 running 且代数还是我记下的那个吗？」；
-- 任何其他状态写入者（`preparePause`、`markTaskDone`、`markTaskError`）改状态时也 `runGeneration++`，**自动作废**所有在途旧代数协程的门票。
+两段式暂停是代数机制的第一个应用：
 
-于是「谁该写状态」不再依赖锁的时序，而是依赖一个逻辑判断：**只有本轮运行的负责人才能收尾**。
+- **`preparePause`（第一段）**：在 `statusLock` 内检查状态可暂停 → 置 `pause`、`runGeneration++`、暂停计时器，返回新代数。这一段是**原子的状态声明**：「从现在起，这个任务由我这次暂停负责」。
+- **`runPauseHandler`（第二段）**：在 `task.lock` 内做物理动作（`fetcher.Pause()`、统计快照、`saveTask` 落盘），每个动作前核对代数仍是第一段返回的那一代。
+
+为什么拆开？因为第一段必须快（抢 `statusLock` 即得），让「谁赢得了暂停」立刻有定论；第二段慢（fetcher 暂停、磁盘 IO），必须允许与新的 `Continue` 并发——而新 `Continue` 会再次 `runGeneration++`，使第二段的代数核对失败、放弃剩余动作。
 
 #### 4.3.2 核心流程
 
-`runGeneration` 的全部读写点（可用 `grep -n "runGeneration" pkg/download/downloader.go` 验证）：
-
 ```text
-递增点（4 处，全部在状态写入的关键函数里）：
-  doStart        L2015  进入 running   → 本轮运行的代数诞生
-  preparePause   L2167  进入 pause     → 作废所有在途 start/watch
-  markTaskDone   L2262  进入 done      → 作废所有在途协程（终态封版）
-  markTaskError  L2276  进入 error     → 同上
-
-核对点：
-  taskIsRunningGeneration  L2209  status==running && gen 匹配
-  taskIsPausedGeneration   L2218  (status==pause || status==wait) && gen 匹配
-                             ↑ 注意接受 wait：doPauseForScheduling 翻转成 wait 后代数不变，
-                               runPauseHandler 的复核仍要认账
-  doPauseForScheduling      L2151  queued 的判定条件之一
+doPause(task)                         doStart(task)
+  preparePause:                          statusMut(持 statusLock):
+    持 statusLock:                         非 running/done 可启动
+    状态 ∈ {pause,done,error} → 返回        restoreTask
+    置 pause, runGeneration++ (记为 G)      置 running, runGeneration++ (记为 G')
+    timer.Pause()                          （记下 G'）
+  runPauseHandler(G):                   异步 handler（持 task.lock）:
+    持 task.lock:                          核对 running 代数 == G'？
+    taskIsPausedGeneration(G)? ──否→ 放弃    否 → 直接 return（过期启动作废）
+    fetcher.Pause()                        …prepareTask / fetcher.Start…
+    captureTaskStats(快照)                再核对一次（Start 前最后防线）
+    saveTask(落盘)
+  handled → emit(EventKeyPause)         成功 → emit(EventKeyStart) + go watch(task)
 ```
 
-`doStart` 异步 handler 内部的三次核对位置：
+watch 循环的终态裁决也靠守卫函数完成：`markTaskDone`/`markTaskError` 只在状态为 `running` 时才允许写入终态（见 4.5），配合代数递增，任何「过期协程」都只能空手而归。
 
-```text
-handler()（持有 task.lock）:
-  ① 拿到锁后立即核对        ← 防止「排队等锁期间被暂停」
-  ② triggerOnStart 后核对    ← 扩展钩子（u9）执行期间可能耗时，期间可能被暂停
-  ③ timer.Start 前核对       ← 最后一道闸，过了它就 fetcher.Start()
-外层 goroutine wrapper:
-  ④ handler 出错 → doOnError 前          核对（旧代数的错误不许标记新任务）
-  ⑤ started 且成功 → emit(start) 前核对  （旧代数不许发 start 事件）
-```
+代数防护覆盖的三类经典竞态：
 
-暂停侧的对应结构是 `doPause` = `preparePause`（同步改状态、记代数）+ `runPauseHandler`（核对 `taskIsPausedGeneration` 后物理 `fetcher.Pause()` + 落盘）——和 `doStart` 完全镜像。
+| 竞态场景 | 防护点 |
+| --- | --- |
+| 暂停 vs 完成：`watch` 想标 done，`doPause` 想标 pause | `markTaskDone` 要求状态仍是 running；`preparePause` 先到则 `watch` 落败静默退出 |
+| 过期启动：连续 Pause→Continue，第一次 `doStart` 的 handler 晚到 | handler 内两次 `taskIsRunningGeneration(G')` 核对 |
+| 过期暂停动作：Pause 后被 Continue，`runPauseHandler` 才拿到 `task.lock` | `taskIsPausedGeneration(G)` 核对失败 → 放弃 |
 
 #### 4.3.3 源码精读
 
-**doStart 的同步段：代数的诞生**：
+代数字段是 Task 的私有运行时字段（不序列化，重启后由 `initTask` 重建，从 0 开始）：
 
-[pkg/download/downloader.go:L2001-L2026](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2001-L2026) —— `statusMut`（[L1933-L1938](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1933-L1938)，即 `task.statusLock` 的语法糖）内：`running/done` 直接返回（第一道守卫）；`restoreTask` 恢复 fetcher；`updateStatus(running)` 与 `runGeneration++` 在同一临界区**原子地**发生，`generation = task.runGeneration` 把新代数抄给外层闭包。这一步的原子性是整个机制的地基：状态与代数要么一起变、要么都不变。
+[pkg/download/model.go:L79-L91](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L79-L91) —— `runGeneration uint64` 位于运行时层字段区，与 `statusLock`、`speedArr` 等并列（分层概念见 u2-l2）。
 
-**handler 的三次核对**：
+`doStart` 的两段结构与代数记录：
 
-[pkg/download/downloader.go:L2029-L2044](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2029-L2044) —— 第 ① 次核对在拿到 `task.lock` 后（[L2032](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2032)）：handler 可能在 goroutine 队列里等了很久才轮到执行，先确认「我这一轮还有效」。第 ② 次在 `triggerOnStart`（扩展 onStart 钩子，可能执行任意 JS）之后（[L2042](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2042)）。
+[pkg/download/downloader.go:L2368-L2393](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2368-L2393) —— 同步段在 `statusMut` 内完成「可启动检查 + 置 running + 代数自增」，把新代数捕获进局部变量 `generation`。
 
-[pkg/download/downloader.go:L2083-L2093](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2083-L2093) —— 第 ③ 次核对在 `fetcher.Start()` 前一刻（[L2086](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2086)）：清零速度、启动计时器，然后 `started = true` 标记「物理启动已发生」——这个布尔值决定外层是否发 `start` 事件、是否启动 watch。
+[pkg/download/downloader.go:L2396-L2411](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2396-L2411) —— 异步 handler 一进来就核对 `taskIsRunningGeneration(task, generation)`，失败直接 return；`triggerOnStart`（扩展钩子可能耗时）之后**再核对一次**——扩展回调期间状态可能已被并发修改。
 
-[pkg/download/downloader.go:L2104-L2117](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2104-L2117) —— 外层 wrapper 的第 ④⑤ 次核对：handler 失败时只有「仍是本代运行」才调 `doOnError`——**旧代数的启动失败不允许把新任务标成 error**；成功时只有本代才 `emit(start)` 并 `go d.watch(task)`。
+[pkg/download/downloader.go:L2450-L2461](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2450-L2461) —— 调用 `fetcher.Start()` 前的最后一道防线：在 `statusLock` 内检查 `Status == running && runGeneration == generation`，通过才启动并把 `started` 置 true。
 
-**暂停侧的镜像结构**：
+[pkg/download/downloader.go:L2472-L2485](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2472-L2485) —— goroutine 收尾：handler 失败时也只在「代数仍有效」时才 `doOnError`；`started` 且代数有效才发 `EventKeyStart` 并启动 `watch`。
 
-[pkg/download/downloader.go:L2122-L2137](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2122-L2137) —— `doPause` = `preparePause` + `runPauseHandler`，成功后发 `pause` 事件与 webhook。它被 `Pause`（用户暂停）调用。
+两个守卫函数（代数核对的原语）：
 
-[pkg/download/downloader.go:L2159-L2176](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2159-L2176) —— `preparePause` 在 `statusMut` 内：`pause/done/error` 直接跳过（对已暂停任务重复暂停是 no-op）；否则 `updateStatus(pause)` + `runGeneration++` + `timer.Pause()`（净用时计时器停表，u4-l3）。注意它**不等**物理暂停完成就返回了代数——物理动作交给 `runPauseHandler`。
+[pkg/download/downloader.go:L2577-L2593](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2577-L2593) —— `taskIsRunningGeneration` 要求「running 且代数一致」；`taskIsPausedGeneration` 放宽为「pause **或** wait 且代数一致」——后者兼容 `doPauseForScheduling`（它会把 pause 翻成 wait，见 4.2）。两者都防御 `statusLock == nil`（任务尚未 `initTask` 或来自反序列化快照）。
 
-[pkg/download/downloader.go:L2178-L2207](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2178-L2207) —— `runPauseHandler` 持 `task.lock`：先 `taskIsPausedGeneration` 核对（[L2181](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2181)）——若从 `preparePause` 到这里之间任务被别人动了（比如又启动了），直接放弃；然后 `fetcher.Pause()` 物理暂停、`captureTaskStats` 存统计快照（失败仅告警，注释说明「fetcher 已停，生命周期不能被可选的统计失败拖垮」）、`saveTask` 落盘（无 fetcher 时退化为直接写 `bucketTask` 的任务克隆）。返回 `handled=true` 表示「这次暂停完整落地了」，`doPause` 才会发 `pause` 事件。
+两段式暂停本体：
 
-[pkg/download/downloader.go:L2209-L2225](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2209-L2225) —— 两个核对函数本体。`taskIsPausedGeneration` 接受 `pause` **或** `wait`：`doPauseForScheduling` 把状态翻成 wait 时不递增代数，核对仍须通过——这是「代数标识一次裁决，状态可随后微调」的体现。
+[pkg/download/downloader.go:L2527-L2544](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2527-L2544) —— `preparePause` 全部逻辑在 `statusMut` 闭包内：pause/done/error 状态直接短路返回（幂等），否则置 pause、`runGeneration++`、`timer.Pause()`（停止净用时计时，见 u4-l3 的速度与时间统计）。
 
-**官方竞态测试（必读三连）**：
+[pkg/download/downloader.go:L2546-L2575](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2546-L2575) —— `runPauseHandler` 持 `task.lock`：先核对暂停代数，再依次 `fetcher.Pause()` → 统计快照（失败仅告警，注释说明「fetcher 已暂停，生命周期不能被可选的统计失败打断」）→ `saveTask` 落盘（无 fetcherManager 时退化为直接写 `bucketTask`）。返回 `handled` 表示这次暂停真正生效。
 
-[pkg/download/downloader_test.go:L577-L633](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go#L577-L633) —— `TestDownloader_StaleStartGenerationCannotRestartTask`：用 `task.lock.Lock()` 把「第一次 Continue 的 handler、Pause、第二次 Continue」全部排在锁外候着，制造「旧 start handler 在暂停之后才恢复执行」的极端交错，断言 `fetcher.Start` 只被调用 1 次（旧代数的 handler 被第 ① 次核对拦下）。
+[pkg/download/downloader.go:L2490-L2505](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2490-L2505) —— `doPause` 把两段串起来，`handled` 为真才 emit `EventKeyPause` 并触发 `WebhookEventDownloadPause`。对比 `doPauseForScheduling`（4.2.3）：它调用同样的两段但**不 emit**——因为调用方持着 `d.lock`，事件由 `Continue` 收集后在锁外补发。
 
-[pkg/download/downloader_test.go:L635-L695](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go#L635-L695) —— `TestDownloader_PauseWinsAgainstStaleResolveError`：让 `Resolve` 阻塞在自制通道上，期间执行 Pause，再放行一个注定失败的 Resolve——断言任务保持 pause、没有 error 事件（第 ④ 次核对拦截了旧代数的错误）。
+仓库里有两个直击竞态的测试，值得逐行读：
 
-[pkg/download/downloader_test.go:L697-L765](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader_test.go#L697-L765) —— `TestDownloader_SchedulingPauseCompletesBeforeReplacementStart`：让 `fetcher.Pause` 阻塞，验证 Continue 的替换任务**不会**在物理暂停完成前启动（`doPauseForScheduling` 是同步完成的，不是发了就算）。
+[pkg/download/downloader_test.go:L577-L633](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L577-L633) —— `TestDownloader_StaleStartGenerationCannotRestartTask`：用 `task.lock.Lock()` 人为制造「第一次 Start、Pause 处理器、第二次 Start 全部排队」的极端交错，最终断言 `Fetcher.Start` 只发生 1 次——过期启动被代数守卫拦下。
 
-#### 4.3.4 代码实践：复现「暂停与完成同时发生」
+[pkg/download/downloader_test.go:L635-L695](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L635-L695) —— `TestDownloader_PauseWinsAgainstStaleResolveError`：让 `Resolve` 阻塞后返回错误，期间完成 Pause，断言「暂停赢」且陈旧的 Resolve 错误既不能覆盖 pause 状态、也不能发出 error 事件。
 
-**实践目标**：验证 `markTaskDone` 的 running 守卫 + 代数递增如何防止「晚到的完成信号把已暂停的任务标成 done」。
+假协议工具箱（实践复用）：`generationTestManager`/`generationTestFetcher` 定义在 [pkg/download/downloader_test.go:L33-L44](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L33-L44) 与 [L128-L185](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L128-L185)——`Start` 可挂起（`holdOpen`）、`Resolve`/`Pause` 可注入阻塞与错误（`resolveRelease`/`pauseRelease` 通道），`Wait()` 阻塞在 done 通道上。
 
-**操作步骤**：继续写在你自己的 `pkg/download/u4l4_practice_test.go` 里（**示例代码**）：
+#### 4.3.4 代码实践
+
+**实践目标**：复现「暂停与完成同时发生」，验证 runGeneration 防止过期协程把任务标成 done。
+
+**操作步骤**：由于 `generationTestFetcher.Wait()` 在 `holdOpen: true` 时永不返回，无法直接制造「完成与暂停同时」，我们改用它的孪生场景（同一防护机制覆盖）：**「Resolve 阻塞期间发起 Pause，随后 Resolve 失败返回」**——这正是陈旧结果试图覆盖新状态的竞态。在上一步的练习测试文件中追加：
 
 ```go
-func TestU4L4_PracticePauseWinsAgainstCompletion(t *testing.T) {
-	manager := &generationTestManager{holdOpen: true}
-	downloader := NewDownloader(&DownloaderConfig{
-		FetchManagers: []fetcher.FetcherManager{manager},
-	})
-	if err := downloader.Setup(); err != nil {
+// 示例代码：读者练习用
+func TestPractice_PauseWinsOverStaleWork(t *testing.T) {
+	release := make(chan struct{})
+	manager := &generationTestManager{
+		resolveStarted: make(chan struct{}),
+		resolveRelease: release,
+		resolveErr:     errors.New("stale"),
+	}
+	d := NewDownloader(&DownloaderConfig{FetchManagers: []fetcher.FetcherManager{manager}})
+	if err := d.Setup(); err != nil {
 		t.Fatal(err)
 	}
-	defer downloader.Clear()
-	downloader.cfg.MaxRunning = 1
+	defer d.Clear()
 
-	id, err := downloader.CreateDirect(
-		&base.Request{URL: "generation://race"},
-		&base.Options{Path: t.TempDir(), Name: "race.bin"},
-	)
+	id, err := d.CreateDirect(&base.Request{URL: "generation://y"},
+		&base.Options{Path: t.TempDir(), Name: "y.bin"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 等任务 running 且物理启动完成、watch 已就位
-	waitForTaskStatus(t, downloader, id, base.DownloadStatusRunning, 2*time.Second)
-	deadline := time.Now().Add(2 * time.Second)
-	for manager.starts.Load() != 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if manager.starts.Load() != 1 {
-		t.Fatal("task did not physically start")
-	}
-
-	// ① 暂停先赢：等状态确实变成 pause
+	<-manager.resolveStarted            // 等 Resolve 真正开始
 	pauseDone := make(chan error, 1)
-	go func() { pauseDone <- downloader.Pause(&TaskFilter{IDs: []string{id}}) }()
-	waitForTaskStatus(t, downloader, id, base.DownloadStatusPause, 2*time.Second)
-
-	// ② “旧协程”（watch）此刻才收到完成信号
-	downloader.GetTask(id).fetcher.(*generationTestFetcher).done <- nil
-
-	// ③ 给 watch 一点时间处理完成信号，然后裁决：任务必须仍是 pause
-	time.Sleep(300 * time.Millisecond)
-	if got := downloader.taskStatus(downloader.GetTask(id)); got != base.DownloadStatusPause {
-		t.Fatalf("stale completion overwrote pause, status = %s", got)
-	}
-	if err := <-pauseDone; err != nil {
-		t.Fatal(err)
+	go func() { pauseDone <- d.Pause(&TaskFilter{IDs: []string{id}}) }()
+	// 轮询等待状态变 pause（参考 downloader_test.go:671-677 的写法）
+	<-pauseDone
+	close(release)                      // 放行陈旧的 Resolve 失败
+	time.Sleep(200 * time.Millisecond)  // 给过期协程机会作恶
+	if got := d.taskStatus(d.GetTask(id)); got != base.DownloadStatusPause {
+		t.Fatalf("stale work overwrote pause: %s", got)
 	}
 }
 ```
 
-运行：
+运行：`go test ./pkg/download/ -run TestPractice_PauseWinsOverStaleWork -v`。然后对照官方测试 `TestDownloader_PauseWinsAgainstStaleResolveError` 补全事件断言（订阅 `EventKeyError`，断言 100ms 内不触发）。
 
-```bash
-go test ./pkg/download/ -run 'TestU4L4_PracticePauseWinsAgainstCompletion' -v
-```
+**需要观察的现象**：`close(release)` 之后任务状态**仍是 `pause`**，没有变成 `error`；错误事件不发射。这正是 handler 尾部 `taskIsRunningGeneration` 核对失败后静默 return 的效果。
 
-**需要观察的现象**：② 向 `done` 通道发信号后，watch 从 `Wait()` 中醒来、尝试走成功分支，但 ③ 处任务状态始终是 `pause`——`markTaskDone` 在 [pkg/download/downloader.go:L2244-L2246](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2244-L2246) 的守卫（`Status != running → return false`）把它拦下，`watch` 随即返回（[L1583-L1585](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1583-L1585) 的 `if !d.markTaskDone(task) { return }`），不发 `done` 事件、不 `notifyRunning`。
-
-**预期结果**：测试通过。任务最终是 `pause` 而非 `done`；若把断言换成「等待 done」则会超时失败——这正是防护生效的证明。反向交错（完成先到、暂停后到）留作 4.4.4 的实践。
-
-**待本地验证**：本沙箱无 Go 工具链，测试未实际运行；交错模型与官方 `TestDownloader_PauseWinsAgainstStaleResolveError` 同构。
-
-**延伸问题（选做）**：结合 4.1.5 练习 1——构造「带过滤器暂停一个 wait 任务、然后释放名额」的场景，观察该任务是否会被 `notifyRunning` 重新拉起（`doStart` 同步段只拒绝 `running/done`）。把你观察到的行为记录下来，并思考这是否符合用户直觉。待本地验证。
+**预期结果**：测试通过。若想观察「没有防护会怎样」，可以在本地实验性地删掉 `doStart` handler 中两处代数核对再跑官方的 `TestDownloader_StaleStartGenerationCannotRestartTask`（记得改回来）——它会因 `starts != 1` 失败。改动效果「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 `runGeneration` 不需要原子类型或锁保护，直接 `task.runGeneration++` 就行？
+**练习 1**：`preparePause` 已经把状态置为 `pause` 了，`runPauseHandler` 为什么还要再核对一次代数？
 
-**参考答案**：因为对它的每一次读写都在锁内：递增点分别在 `statusMut`（`statusLock`）、`markTaskDone`/`markTaskError` 的临界区、`doPauseForScheduling` 的 `statusLock` 段内；核对点 `taskIsRunningGeneration`/`taskIsPausedGeneration` 也先拿 `statusLock`。代数与状态的变更被**同一把锁**绑定成原子对，这正是 4.3.3 强调的「状态与代数一起变」的落地方式。
+**答案**：两段之间会释放 `statusLock` 并去抢 `task.lock`，这个间隙里一个完整的 `Continue` 可能已经发生（置 running、代数再 ++，甚至新的启动 handler 已经在跑）。若不核对，本次暂停会 `fetcher.Pause()` 一个刚被重新启动的下载、并把 pause 快照覆盖新状态。核对失败即放弃，让位给最新一代。
 
-**练习 2**：watch goroutine 阻塞在 `fetcher.Wait()` 时任务被暂停，watch 醒来后为什么「静默退出」而不是报错？
+**练习 2**：`taskIsPausedGeneration` 为什么接受 `wait` 状态，而 `taskIsRunningGeneration` 只接受 `running`？
 
-**参考答案**：见 [pkg/download/downloader.go:L1547-L1553](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1547-L1553)：`Wait()` 返回错误后先查当前状态，`pause/wait` 说明错误来自「暂停打断了传输」（比如 HTTP fetcher 关闭连接导致读错误），属于预期内的打断而非下载失败，直接 return。同理，`Wait()` 返回 nil 时若 `markTaskDone` 因状态非 running 而拒绝，watch 也直接返回——「暂停期间的任何信号都不改变 pause 裁决」。
+**答案**：`doPauseForScheduling` 在 `runPauseHandler` 成功后会把 pause 翻转为 wait（入队），如果之后同一代暂停的落盘动作还要核对（或测试在翻转后核对），接受 wait 才不会误判失败。而「运行代数」语义上只对应 running——wait 意味着已让出执行权，不存在「仍在运行的过期启动」。
 
-**练习 3**：假如去掉 `doStart` handler 里 `triggerOnStart` 之后的那次核对（第 ② 次），最坏会发生什么？
+**练习 3**：`runGeneration` 为什么不持久化、重启后归零也安全？
 
-**参考答案**：`triggerOnStart` 执行的是扩展的 onStart 钩子（u9），可能耗时任意长。期间用户暂停了任务（`preparePause` 置 pause、代数++、`runPauseHandler` 物理 `fetcher.Pause` 完成）。没有第 ② 次核对的话，handler 会继续走 prepareTask、`timer.Start()`、`fetcher.Start()`——把一个用户明确暂停的任务又物理启动了，且代数还是旧的，之后 watch 的收尾、事件的归属全部错乱。三次核对分别守住「进锁后」「慢操作后」「启动前」三个风险窗口，删任何一次都会打开对应的窗口。
+**答案**：代数只用于**同一进程内**区分「同一任务的第 N 次状态迁移」，进程关闭后所有相关协程（watch、启动 handler）都不复存在，不存在跨进程的过期协程，归零即安全。它属于 u2-l2 说的「运行时层字段」。
 
-### 4.4 markTaskDone / markTaskError：终态的唯一守门人
+### 4.4 doDelete 与删除失败恢复：deletingTasks 标记
 
 #### 4.4.1 概念说明
 
-`done` 和 `error` 是两个终态（done 不可逆，error 可经 Continue 重试离开）。它们的写入被收敛到两个私有函数，全部调用点只有三处：
+删除是唯一会让任务**从系统里消失**的操作，也是最难写对的：它要删内存（`d.tasks`、`d.waitTasks`）、删持久化（三个存储桶）、关资源（fetcher、Blob 租约）、可选删文件（`force`）、还可能触发空组清理——任何一步都可能失败，而前几步可能已经生效。
 
-- `markTaskDone` ← `watch` 成功分支（`Wait()` 返回 nil）
-- `markTaskError` ← `handleOnError`（`doOnError`/`doOnBlobSourceError` 的共同实现）
+本版本的 `Delete` 采用「**先摘除、再执行、失败回滚**」的结构：
 
-两个函数都用同一个模式把终态写入变成**一次性裁决**：
+1. **临界区内一次摘除**：持 `d.lock` 把目标任务从 `d.tasks` 与 `d.waitTasks` 中移出、登记进 `d.deletingTasks`（「删除中」标记），并收集涉及的组 ID；
+2. **锁外逐个 `doDelete`**：删桶、关 fetcher、删文件；
+3. **失败恢复**：某个任务删除失败 → 把它**重新写回 `bucketTask`**（持久化恢复）、追加回 `d.tasks`（必要时回到 `d.waitTasks` 队尾）；
+4. **收尾**：清掉 `deletingTasks` 标记、清理空组、`notifyRunning` 补位。
 
-1. **running 守卫**：状态不是 running 直接返回 `false`——不管调用者是谁、持有哪个代数；
-2. **成功后递增代数**：`runGeneration++` 让所有仍在途的旧代数协程（迟到的 start handler、迟到的 pause handler）全部失效。
-
-守卫挡住「迟到的写者」，递增作废「已过检查但还没写完的写者」——两层合起来，终态一旦写下就不可被旧协程覆盖。
+`deletingTasks` 标记的作用是让**并发的其他删除/清理路径**知道「这个任务正在被删除」：`cleanupTaskGroups` 会跳过仍被删除中任务引用的组，防止组元数据先于成员删除而被误清（然后成员删除又失败，组就永久丢了）。`creatingGroups` 则反向保护：批量创建分组进行中时，`Delete` 直接报错「task group is being created」。
 
 #### 4.4.2 核心流程
 
 ```text
-watch: Wait() == nil                        handleOnError(err)
-  ├─ 边界检查（Res 非空、任务未删）            ├─ task.lock
-  ├─ markTaskDone(task) → true?              │   ├─ markTaskError(task) → true?
-  │    ├─ 【task.lock + statusLock】          │   │    ├─ 【statusLock】
-  │    ├─ 守卫：Status != running → false     │   │    ├─ 守卫：Status != running → false
-  │    ├─ Used = timer.Used()（净用时）       │   │    └─ updateStatus(error) + gen++
-  │    ├─ Res.Size==0 → 用 fetcher 进度补齐   │   ├─ triggerOnError（扩展可改 URL 救活任务）
-  │    ├─ Speed = 总大小 / used（全程平均）    │   └─ …统计、落盘
-  │    ├─ Downloaded = 总大小（对齐 100%）     └─ 锁外：emit(error) + emit(finally) + notifyRunning
-  │    ├─ 清空 producer（Blob 状态）
-  │    ├─ updateStatus(done)（DoneAt 一次性写入）
-  │    └─ runGeneration++（封版）
-  ├─ 统计快照 + 任务快照落盘
-  └─ emit(done) + emit(finally) + notifyRunning() + webhook/script
+Delete(filter, force)
+  持 d.lock：
+    收集目标组（空过滤器→全部组；ID 过滤器→直接命中的组）
+    ID 过滤器：copyFilter（不污染调用方！）→ 展开组 ID
+      展开为空但有命中组 → 哨兵 ID []string{""}（防止「空 IDs=全部任务」语义反转）
+    任一目标组 ∈ creatingGroups → 报错退出
+    tasks = getTasksByFilter(copyFilter)
+    每个任务：deletingTasks[ID] = task；记 wasQueued；从 d.tasks / d.waitTasks 摘除
+    groupIDs ∪= 各任务的 ParentID
+  释放 d.lock：
+    for task in tasks: doDelete(task, force)
+      失败 → storage.Put(bucketTask, task.ID, task.clone())  ← 持久化恢复
+             持 d.lock：d.tasks 追加回；wasQueued → waitTasks 队尾追加回
+  持 d.lock：清 deletingTasks 标记
+  force=false 时 groups 置 nil（非强删不删文件）
+  cleanupTaskGroups(groupIDs, forceGroups)
+    候选组 = groupIDs - 存活任务的 ParentID - 删除中任务的 ParentID - 创建中组
+    force → os.RemoveAll(组目录)；否则 removeEmptyGroupDirectories（只删空目录树）
+    storage.Delete(bucketTaskGroup, id)；从 d.groups 移除
+  notifyRunning()
 ```
 
-注意 `markTaskDone` 是唯一同时拿 `task.lock` 和 `statusLock` 的状态写入者——因为要改 `Progress`、`Meta.Res.Size` 和 `producer` 这些任务级字段；`markTaskError` 只改状态，只拿 `statusLock`。
+`doDelete` 内部的删除顺序（决定失败后丢了什么）：
+
+```text
+bucketTask → bucketSave → bucketTaskStats → fetcher.Close → (force) 删文件 → emit(EventKeyDelete)
+```
+
+任何一步失败即中断返回；`Delete` 的恢复路径只回写 `bucketTask`——因此失败点越靠后，已丢失的辅助数据越多（这是有意的取舍：`bucketTask` 是任务的权威记录，恢复它就恢复了任务本身）。
 
 #### 4.4.3 源码精读
 
-[pkg/download/downloader.go:L2236-L2264](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2236-L2264) —— `markTaskDone` 逐行：`task == nil || task.statusLock == nil` 防的是**从存储恢复但尚未 `initTask` 重建内核**的任务对象（u2-l2 讲过 JSON 序列化丢运行时字段）；running 守卫；`Used = task.timer.Used()` 取净用时（暂停时段不计）；`Res.Size == 0` 时用 `fetcher.Progress().TotalDownloaded()` 补齐（未知大小资源的收尾）；`used` 按秒取整且至少为 1，`Speed = totalSize / used`——**完成时刻的速度从滑动窗口均值改写为全程平均**（u4-l3 的伏笔在这里闭环）；`Downloaded = totalSize` 把进度精确对齐到 100%；`producer`/`producerReceived` 清零是 Blob 资源（u9）的收尾；最后 `updateStatus(done)` + `runGeneration++`。
+`Delete` 主体的摘除段：
 
-[pkg/download/model.go:L155-L164](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/model.go#L155-L164) —— `updateStatus` 里 `DoneAt` 只在进入 done 时写入且**没有任何分支负责清除它**——「done 任务永不离开 done 态」的结构保证（u2-l2 的「一次性写入」语义）。
+[pkg/download/downloader.go:L1156-L1186](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1156-L1186) —— 注意三个细节：①`copyFilter := *filter` 浅拷贝再改 `IDs`，不动调用方的过滤器（对比 `Pause` 的直接改写）；②展开为空但命中了组时，`copyFilter.IDs = []string{""}`——因为 `getTasksByFilter` 对空 ID 列表会匹配**全部**任务，哨兵保证「删空组」不会误删所有任务；③`creatingGroups` 守卫在锁内快速失败。
 
-[pkg/download/downloader.go:L2266-L2278](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2266-L2278) —— `markTaskError`：同款 running 守卫 + 代数递增，但只改状态。它被 `handleOnError` 在持 `task.lock` 的前提下调用（[L1700-L1704](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1700-L1704)），守卫返回 false 时整个错误处理直接放弃——这正是 4.3.5 练习 2 里「暂停打断不报错」的机制另一半：不是 watch 不报，是守卫不让报。
+摘除与登记：
 
-[pkg/download/downloader.go:L1583-L1599](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L1583-L1599) —— watch 成功分支对 `markTaskDone` 返回值的处理：`false` 立即 return（任务已被别人裁决），`true` 才做全套收尾并 `notifyRunning()`——**名额释放以终态成功落笔为前提**，不会出现「任务其实没 done 却把名额放出去了」的错账。
+[pkg/download/downloader.go:L1187-L1218](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1187-L1218) —— `deletingTasks[task.ID] = task` 登记；`deleted` 集合驱动两个原地过滤（`d.tasks[:0]`、`d.waitTasks[:0]` 复用底层数组）完成摘除；`wasQueued` 记录被删任务是否在排队，供失败恢复。
 
-#### 4.4.4 代码实践：反向交错与速度改写
+失败恢复段：
 
-**实践目标**：① 验证「完成先到、暂停后到」时 `preparePause` 的跳过守卫；② 验证完成时刻速度被改写为全程平均。
+[pkg/download/downloader.go:L1219-L1244](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1219-L1244) —— L1222-L1223 的注释「Deletion can fail after removing bucketTask. Keep recovery durable.」点明回写 `bucketTask` 的动机；恢复动作含两层容错：回写本身失败（`saveErr`）也记录为 firstErr；任务追加回 `d.tasks`（在锁内）与 `d.waitTasks`（仅当原来在队列）。最后统一清理 `deletingTasks` 标记。
 
-**操作步骤**：
+空组清理与 force 语义：
 
-1. 把 4.3.4 的测试复制为 `TestU4L4_PracticeDoneWinsAgainstPause`，把②③两步交换：先发 `done <- nil`、`waitForTaskStatus(done)`，再调用 `Pause`，最后断言任务**仍是 done**（`preparePause` 见 `done` 直接 `isReturn`，[pkg/download/downloader.go:L2161-L2164](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2161-L2164)）。
-2. 给 `generationTestFetcher` 换一个思路验证速度改写：直接写一个纯逻辑小测试（**示例代码**）：
+[pkg/download/downloader.go:L1245-L1253](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1245-L1253) —— `force=false` 时把 `groups` 置 nil，即「非强删不整目录删除」；随后 `cleanupTaskGroups` + `notifyRunning` 收尾。
+
+[pkg/download/downloader.go:L1262-L1304](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1262-L1304) —— `cleanupTaskGroups` 的候选集合运算：`groupIDs` 减去「存活任务的 ParentID」减去「删除中任务的 ParentID」（L1272-L1274——这就是 `deletingTasks` 的防御价值），再跳过创建中的组；force 组做 `os.RemoveAll`，普通组做 `removeEmptyGroupDirectories`；最后删 `bucketTaskGroup` 元数据并从 `d.groups` 移除。
+
+[pkg/download/downloader.go:L1307-L1325](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1307-L1325) —— `removeEmptyGroupDirectories` 递归后序删除空目录，保留仍有文件（或符号链接，用 `Lstat` 判断）的子树——非强删时绝不碰用户数据。
+
+单任务删除的物理动作：
+
+[pkg/download/downloader.go:L1520-L1558](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1520-L1558) —— `doDelete` 先 `defer d.releaseBlobTask(task)`（Blob 租约必须无条件释放，见 u9-l4），随后按「task 桶 → save 桶 → stats 桶 → fetcher.Close → force 删文件 → emit delete 事件」的顺序执行；成功后 `task = nil`（阻断对已完成删除的任务误用），失败则保留 task 供日志输出 `task.ID`。force 删文件分两种：资源有根名（文件夹）用 `os.RemoveAll`，单文件用 `util.SafeRemove`。
+
+删除失败的官方复现测试（本讲实践的范本）：
+
+[pkg/download/downloader_test.go:L4387-L4401](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L4387-L4401) —— `groupFailureConcurrentDeleteStorage`：包装 `MemStorage`，在 `Delete(bucketTask, blockedID)` 时注入错误——这正是「存储报错」的模拟手法。
+
+[pkg/download/downloader_test.go:L4479-L4501](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L4479-L4501) —— `TestDownloader_TaskGroupDeleteFailureRestoresQueue`：分组批量建 2 个任务（MaxRunning=1），注入其中一个的桶删除失败，断言 `Delete` 返回错误**且** `waitTasks` 里仍有 1 个成员（恢复路径生效）；再删掉另一个，断言恢复的任务最终被调度为 running——完整验证「失败 → 回滚 → 重新排队 → 正常调度」。
+
+顺带一提，优雅关闭也复用了 `pauseAll`：[pkg/download/downloader.go:L1575-L1584](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1575-L1584) —— `Close` 把 `d.pauseAll` 排在关闭序列第一位，先清空队列并暂停全部任务，再关协议管理器与存储（详见 u11-l2）。
+
+#### 4.4.4 代码实践
+
+**实践目标**：模拟 `doDelete` 中途存储报错，验证任务被重新写回 `bucketTask` 与 `d.tasks` 的恢复路径。
+
+**操作步骤**：仿照官方测试，用一个会「选择性失败」的包装存储。在练习测试文件中追加：
 
 ```go
-func TestU4L4_PracticeAverageSpeedMath(t *testing.T) {
-	// 复算 markTaskDone 的速度公式：Speed = totalSize / max(Used/1e9, 1)
-	totalSize := int64(10 * 1024 * 1024) // 10 MiB
-	usedSeconds := int64(3)              // 净用时 3.2s → 按秒取整为 3
-	want := totalSize / usedSeconds      // = 3495253 字节/秒
-	if want != 3495253 {
-		t.Fatalf("speed math changed: %d", want)
+// 示例代码：读者练习用
+type failOnceStorage struct {
+	Storage                  // 嵌入真实存储（MemStorage 或 BoltStorage）
+	failDeleteTaskID string  // 对这个任务 ID 的 bucketTask 删除报错
+}
+
+func (s *failOnceStorage) Delete(bucket, key string) error {
+	if bucket == bucketTask && key == s.failDeleteTaskID {
+		return errors.New("injected storage failure")
 	}
+	return s.Storage.Delete(bucket, key)
+}
+
+func TestPractice_DeleteFailureRestores(t *testing.T) {
+	inner := NewMemStorage()
+	storage := &failOnceStorage{Storage: inner}
+	d := newTaskGroupDownloader(t, storage, 0) // MaxRunning=0，全部排队
+	result, err := d.CreateDirectBatchWithResult(taskGroupBatch(t.TempDir(), 2))
+	if err != nil {
+		t.Fatal(err)
+	}
+	victim := result.TaskIDs[0]
+	storage.failDeleteTaskID = victim
+
+	if err := d.Delete(&TaskFilter{IDs: []string{victim}}, false); err == nil {
+		t.Fatal("expected deletion failure")
+	}
+	// 断言 1：任务回到内存列表
+	if d.GetTask(victim) == nil {
+		t.Fatal("failed deletion lost the task in memory")
+	}
+	// 断言 2：任务回到持久化（bucketTask 桶里能读回）
+	var restored bool
+	d.storage.List(bucketTask, &[]*Task{}) // List 语义见 storage.go，读者可改用计数断言
+	restored = d.GetTask(victim) != nil
+	if !restored {
+		t.Fatal("task not restored")
+	}
+	// 断言 3（进阶）：用 inner.List(bucketTask, &[]*Task{}) 统计数量 == 2
 }
 ```
 
-**需要观察的现象**：反向交错测试中任务保持 done、无 pause 事件；速度公式测试通过（若失败说明公式变了，请回读 [L2251-L2256](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L2251-L2256)）。
+运行：`go test ./pkg/download/ -run TestPractice_DeleteFailureRestores -v`。更严格的持久化断言建议直接模仿官方测试 `TestDownloader_TaskGroupDeleteFailureRestoresQueue`（检查 `waitTasks` 长度与后续调度），它是最完整的范本。
 
-**预期结果**：两个方向的交错各自保持先到的裁决；`done` 之后任何 `Pause`/`Continue`（点名 running/done 会被过滤器排除）都无法移动它。
+**需要观察的现象**：`Delete` 返回非 nil 错误；但 `GetTask(victim)` 找得到任务（回到 `d.tasks`）；另一个未受影响的任务删除正常；用 `MemStorage` 的 `List` 可以看到 victim 仍在 `bucketTask` 桶中（恢复写回成功）。
 
-**待本地验证**：同上，本沙箱未运行。
+**预期结果**：三条断言全部通过；日志中出现 `delete task failed, task id: ...`（来自 `doDelete` 的错误日志）。若把存储换成 `NewBoltStorage(t.TempDir())` 再跑，行为一致——恢复路径与具体存储实现无关（接口见 [pkg/download/storage.go:L13-L23](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/storage.go#L13-L23)）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：为什么 `markTaskDone` 要拿 `task.lock` 而 `markTaskError` 不用？
+**练习 1**：为什么 `Delete` 需要哨兵 ID `[]string{""}`？
 
-**参考答案**：`markTaskDone` 除了改状态还要写 `Progress.Used/Speed/Downloaded`、可能改 `Meta.Res.Size`、清 `producer`——这些是任务级字段，需要 `task.lock` 防止与 Patch、异步 handler 等并发写坏；`markTaskError` 只写 `Status` 和代数，`statusLock` 足够。（调用方 `handleOnError` 自己会拿 `task.lock` 做后续的错误处理，但那不是 `markTaskError` 的需求。）
+**答案**：`getTasksByFilter` 对「空 ID 列表」的解释是「匹配全部任务」。当过滤器只含组 ID 且展开后为空（比如组内无成员，但组本身存在）时，若不填哨兵，`Delete` 会误删**所有**任务。哨兵是一个不可能命中任何任务 ID 的占位符，把语义从「全部」钉回「无」。
 
-**练习 2**：一个任务下载到 99% 时被暂停，随后 `Continue` 重启并完成。`DoneAt`、`Progress.Used`、最终 `Speed` 分别是什么口径？
+**练习 2**：删除失败恢复把任务追加回 `d.waitTasks` 的**尾部**而不是原位置，会有什么影响？为什么可以接受？
 
-**参考答案**：`DoneAt` 是第二次运行完成的时刻（第一次从未进入 done）；`Used` 是两轮的**净用时之和**（`timer.Pause` 累计、`Start` 续算，暂停时段不计入，见 [pkg/util/timer.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/util/timer.go)）；`Speed` 是 `总大小 / 净用时秒数` 的全程平均——不是任何一轮的瞬时速度。
+**答案**：恢复任务失去原有排队位置，会比原本晚启动。可以接受是因为：删除本身是用户显式的「破坏性」操作，失败后任务能存活并重新排队已经是恢复的目标；为极罕见的失败路径维护精确的队列位置插还逻辑，复杂度收益不成比例（FIFO 队列用切片实现，中部插入是 O(n)）。
 
-**练习 3**：`markTaskError` 成功后任务进入 error，用户 `Continue` 它。代数经历了怎样的变化？旧 watch 还有机会写状态吗？
+**练习 3**：`deletingTasks` 与 `creatingGroups` 分别防住哪两个方向的竞态？
 
-**参考答案**：error 落笔时 `runGeneration++`（作废旧协程）；Continue 走 `doStart`，进入 running 时再次 `runGeneration++` 并把新代数交给新的 handler 与（可能复用的）watch。旧 watch 若还阻塞在旧 fetcher 的 `Wait()` 上，醒来后要么被状态检查（非 running 不标 done、非 running 不标 error）拦下，要么发现状态仍是 running 但代数语义上已属新一轮——`watch` 主循环的错误分支靠「处理后状态仍 running 则 continue」续守新一轮（u4-l3），但 `markTaskDone`/`markTaskError` 的 running 守卫保证它**只能成功于当前轮、不可能覆盖别人的裁决**。
+**答案**：`creatingGroups` 防「创建方」：批量分组创建尚未落定时，`Delete` 抢先删除会把组目录/元数据删掉，创建完成后写入就会落空或悬空，因此 `Delete` 在锁内检测到即报错。`deletingTasks` 防「删除方」：成员删除在途时，其他清理路径（如 `cleanupTaskGroups`）不能把该组判定为「无成员」而清掉元数据——一旦成员删除失败回滚，组关系必须还在。
 
-## 5. 综合实践：调度器探针——排队、腾挪与竞态一网打尽
+### 4.5 markTaskDone 与 markTaskError：终态的唯一守门人
 
-把本讲四个模块串成一个探针测试。场景：`MaxRunning=2`，创建 4 个任务（前 2 个 running、后 2 个 wait），然后用户 `Continue` 点名最后一个任务——观察「腾挪」全过程中**状态、队列、事件、物理调用**四个视角的一致性。
+#### 4.5.1 概念说明
 
-在**你自己的克隆**里追加到 `pkg/download/u4l4_practice_test.go`（**示例代码**）：
+任务怎么从 running 变成 `done` 或 `error`？答案不是「谁想写就写」，而是两个专职守门函数：
 
-```go
-func TestU4L4_PracticeContinuePreempts(t *testing.T) {
-	manager := &generationTestManager{holdOpen: true}
-	downloader := NewDownloader(&DownloaderConfig{
-		FetchManagers: []fetcher.FetcherManager{manager},
-	})
-	if err := downloader.Setup(); err != nil {
-		t.Fatal(err)
-	}
-	defer downloader.Clear()
-	downloader.cfg.MaxRunning = 2
+- `markTaskDone(task) bool`：watch 循环在 `fetcher.Wait()` 返回 nil（下载完成）后调用；
+- `markTaskError(task) bool`：错误处理路径（`handleOnError`）在 fetcher 报错后调用。
 
-	ids := make([]string, 0, 4)
-	for i := 0; i < 4; i++ {
-		id, err := downloader.CreateDirect(
-			&base.Request{URL: "generation://pre"},
-			&base.Options{Path: t.TempDir(), Name: "pre.bin"},
-		)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ids = append(ids, id)
-	}
-	// 等前两个任务物理启动（running = ids[0], ids[1]；wait = ids[2], ids[3]）
-	deadline := time.Now().Add(2 * time.Second)
-	for manager.starts.Load() != 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if manager.starts.Load() != 2 {
-		t.Fatal("first two tasks did not physically start")
-	}
+两者都是「检查-写入」原子段：**只有当前状态是 running 才允许写入终态**，写入同时 `runGeneration++` 使所有在途协程的票据作废。返回值 `bool` 告诉调用方「这次迁移归我」——false 意味着别人（通常是 `preparePause`）已经先一步改写了状态，调用方必须放弃后续所有收尾动作。
 
-	// 记录 pause 事件
-	var mu sync.Mutex
-	pauseEvents := make([]string, 0)
-	downloader.Listener(func(event *Event) {
-		if event.Key == EventKeyPause {
-			mu.Lock()
-			pauseEvents = append(pauseEvents, event.Task.ID)
-			mu.Unlock()
-		}
-	})
+这一设计直接回答了本讲开头的问题「暂停与完成同时发生谁赢」：**先抢到 `statusLock` 并通过守卫的那一方赢**；`markTaskDone` 的守卫要求 running，所以 `preparePause` 先到（状态已变 pause）时，watch 的 done 迁移被拒绝、静默退出——一个已经暂停的任务不该被标成 done（文件可能确实下完了，但状态机的权威归属是暂停方；数据进度早已通过检查点落盘，继续任务后会看到已下完的进度）。
 
-	// 用户点名继续 ids[3]：空闲名额 0，需要现场腾挪 1 个
-	if err := downloader.Continue(&TaskFilter{IDs: []string{ids[3]}}); err != nil {
-		t.Fatal(err)
-	}
+#### 4.5.2 核心流程
 
-	// 视角一：状态 —— ids[0] 被腾挪成 wait，ids[1] 保持 running，ids[3] 变 running
-	if got := downloader.taskStatus(downloader.GetTask(ids[0])); got != base.DownloadStatusWait {
-		t.Fatalf("ids[0] should be preempted to wait, got %s", got)
-	}
-	if got := downloader.taskStatus(downloader.GetTask(ids[1])); got != base.DownloadStatusRunning {
-		t.Fatalf("ids[1] should keep running, got %s", got)
-	}
-	if got := downloader.taskStatus(downloader.GetTask(ids[3])); got != base.DownloadStatusRunning {
-		t.Fatalf("ids[3] should be running, got %s", got)
-	}
-	// 视角二：事件 —— 恰好一个 pause 事件，且发给 ids[0]
-	mu.Lock()
-	if len(pauseEvents) != 1 || pauseEvents[0] != ids[0] {
-		t.Fatalf("pause events = %v, want exactly [%s]", pauseEvents, ids[0])
-	}
-	mu.Unlock()
-	// 视角三：物理调用 —— 一次 fetcher.Pause
-	if got := manager.pauses.Load(); got != 1 {
-		t.Fatalf("physical pauses = %d, want 1", got)
-	}
-
-	// 视角四：队列 —— 释放 ids[1] 的名额，观察队首（ids[2]）而非 ids[0] 顶上
-	downloader.GetTask(ids[1]).fetcher.(*generationTestFetcher).done <- nil
-	deadline = time.Now().Add(3 * time.Second)
-	for manager.starts.Load() != 3 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if got := manager.starts.Load(); got != 3 {
-		t.Fatalf("replacement did not start, starts = %d", got)
-	}
-	if got := downloader.taskStatus(downloader.GetTask(ids[2])); got != base.DownloadStatusRunning {
-		t.Fatalf("ids[2] should be running after ids[1] finished, got %s", got)
-	}
-	if got := downloader.taskStatus(downloader.GetTask(ids[0])); got != base.DownloadStatusWait {
-		t.Fatalf("ids[0] should still be waiting, got %s", got)
-	}
-}
+```text
+watch(task)（每任务一个守夜协程，见 u4-l3）
+  loop:
+    err := fetcher.Wait()
+    err != nil:
+      状态 ∈ {pause, wait} → return（暂停抢到了，守夜人退场）
+      …错误处理（可能触发扩展改 URL 后 continue 重试）…
+      最终 handleOnError → markTaskError 守卫
+    err == nil（完成）:
+      markTaskDone(task) ──false→ return（暂停/删除抢到了）
+      true → 快照落盘 bucketTask
+             emit(done) → emit(finally)
+             notifyRunning()          ← 空位释放，队列下一个顶上
+             releaseBlobTask / onDone 钩子 / webhook / script
+             …auto-torrent / auto-extract 等后处理…
 ```
 
-运行：
+`markTaskDone` 里的速度改写：终态时 `Progress.Speed` 不再是 5 秒滑动窗口值，而是**全程平均速度** \[ \text{Speed} = \frac{\text{TotalSize}}{\max(\text{Used}, 1\text{s})} \]，并把 `Downloaded` 对齐到总大小——给 UI 一个稳定的最终数字。
 
-```bash
-go test ./pkg/download/ -run 'TestU4L4_Practice' -v
-```
+#### 4.5.3 源码精读
 
-**完成标准**：
+[pkg/download/downloader.go:L2604-L2632](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2604-L2632) —— `markTaskDone`：同时持有 `task.lock` 与 `statusLock`（先 lock 后 statusLock，与 `doStart`/`runPauseHandler` 的获取顺序一致，避免死锁）；守卫 `Status != running → false`；随后填 `Used`、兜底 `Res.Size`（未知大小资源用实际下载量补齐）、计算全程平均速度、清空生产者状态、`updateStatus(done)` 并 `runGeneration++`。
 
-1. 能解释为什么被腾挪的是 `ids[0]`（`Continue` 按 `d.tasks` 创建顺序扫描 running，[pkg/download/downloader.go:L823-L839](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L823-L839)）。
-2. 能解释 `ids[0]` 为何排在 `ids[2]` 之后被唤醒（腾挪者 append 到队尾，而 `ids[2]` 早已在队列里）。
-3. 能在测试输出里指出四个视角（状态/事件/物理调用/队列）各自对应的断言，并说出「pause 事件为何一定已经发出」（Continue 在释放 `d.lock` 后、`doStart` 之前补发事件，而 `doStart` 的同步段在 `Continue` 返回前已完成）。
-4. 把 4.3.4 的竞态测试与本测试放在一起跑若干次（`-count=10`），体会「交错不确定、结果确定」的并发设计目标。
+[pkg/download/downloader.go:L2634-L2646](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2634-L2646) —— `markTaskError`：更轻量，只抢 `statusLock`，同样以 running 为唯一准入，置 error 并代数自增。
 
-**待本地验证**：以上代码未在本环境运行；若断言失败，优先检查你对「`Continue` 扫描的是 `d.tasks` 而非 `waitTasks`」与「事件补发时机」的理解，再回读 4.2.3 与 4.3.3。
+调用方一：watch 的完成分支：
+
+[pkg/download/downloader.go:L1888-L1941](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L1888-L1941) —— `Wait()` 出错且状态已是 pause/wait 时直接退场（L1891-L1894）；成功路径先 `markTaskDone`，返回 false 就 return（L1924-L1926）；true 才落快照、发 done/finally 事件、`notifyRunning` 释放空位、触发 onDone/webhook/script 与 auto-torrent 等后处理。
+
+调用方二：错误处理：
+
+[pkg/download/downloader.go:L2037-L2085](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L2037-L2085) —— `handleOnError` 持 `task.lock` 后第一件事就是 `markTaskError`，false 即整段放弃（L2042-L2045）——这保证了「Pause 赢得状态后，陈旧的 fetcher 错误无法把任务改成 error」，与 4.3 的测试互相印证。收尾处若任务确为 error，同样 `notifyRunning`（L2085）释放空位。
+
+状态常量与 DoneAt 的唯一写入门：
+
+[pkg/base/constants.go:L6-L11](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/constants.go#L6-L11) —— 六个状态常量。
+
+[pkg/download/model.go:L175-L184](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L175-L184) —— `updateStatus` 在迁移到 done 时写入 `DoneAt`；由于 `markTaskDone` 是进入 done 的唯一入口且要求 running，「DoneAt 只写一次」由结构保证（u2-l2 的结论在此落地）。
+
+#### 4.5.4 代码实践
+
+**实践目标**：验证「done 任务 DoneAt 只写一次」与「error 后空位被补上」。
+
+**操作步骤**：纯源码阅读 + 运行既有测试：
+
+1. 运行 `go test ./pkg/download/ -run 'TestDownloader_PauseAndContinue|TestDownloader_PauseAllAndContinueAll' -v`（[pkg/download/downloader_test.go:L1913-L1978](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L1913-L1978) 与 [pkg/download/downloader_test.go:L2095-L2182](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go#L2095-L2182)）。注意第一个测试用的是慢速文件服务器（2 秒/请求），保证暂停发生在传输中途。
+2. 在测试输出中确认：暂停→状态 pause→继续→最终 done 的完整断言链。
+3. 源码追踪练习：从 `markTaskDone` 向上找三处调用约束——`watch` 的完成分支、`updateStatus` 的 DoneAt 写入、`runGeneration++` 的作废效果，画一张「谁可能调用、谁会被拒绝」的表格。
+
+**需要观察的现象**：两个测试均 PASS；慢速服务器场景下任务在被暂停的时刻确实处于 running（否则 Pause 的过滤器会跳过它）。
+
+**预期结果**：全部通过。若想看「DoneAt 只写一次」的数据面证据，可在练习测试里对 done 任务连续调用两次 `d.Continue(&TaskFilter{IDs: ...})`，第二次因 `NotStatuses` 排除 done 而返回 `ErrTaskNotFound`，`doStart` 根本不会执行——终态无出边（u2-l2）从 API 层到内核双层封死。「待本地验证」。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`markTaskDone` 为什么要同时持有 `task.lock` 和 `statusLock`，而 `markTaskError` 只持 `statusLock`？
+
+**答案**：`markTaskDone` 除了改状态还要读写任务正文：`Progress.Used`、`Res.Size` 兜底、`producer` 清理，这些字段被其他持 `task.lock` 的路径（如 `runPauseHandler` 的快照）并发访问，必须用 `task.lock` 互斥；`markTaskError` 只动 `Status` 与 `runGeneration`，这两个字段专属于 `statusLock`。锁粒度最小化也是 `preparePause` 只抢 `statusLock` 的原因。
+
+**练习 2**：一个任务物理上已经下载完毕，但用户在 `fetcher.Wait()` 返回前一刻点了暂停。最终状态是什么？数据丢了吗？
+
+**答案**：最终状态是 `pause`（若 `preparePause` 先完成状态翻转，`markTaskDone` 被守卫拒绝）。数据不丢：进度数据由 fetcher 写入磁盘文件、检查点由 watch 周期与暂停路径落盘（`runPauseHandler` 会 `saveTask`）；用户继续任务后，协议实现（如 HTTP 的 Range 续传）会发现文件已完整并立即完成。
+
+**练习 3**：`handleOnError` 里 `markTaskError` 返回 false 时，为什么连扩展的 onError 钩子都不该执行？
+
+**答案**：返回 false 说明任务已不处于 running（典型：被暂停）。onError 钩子带有「恢复」语义（扩展可改写 URL 并让任务继续，见 u9-l3），对一个用户明确暂停的任务执行「错误恢复」会违背用户意图；整段放弃让暂停语义保持完整。
+
+## 5. 综合实践
+
+把本讲四个模块串成一个「调度观察台」小项目。在 `pkg/download/` 下写一个练习测试文件（全部基于仓库既有的 `generationTestManager` 工具，无需网络）：
+
+1. **场景搭建**（4.2）：`MaxRunning=2`，一次性创建 8 个 `generation://` 任务（`holdOpen: true`），用轮询记录每个任务从创建到稳定的状态时间线，画出「2 running + 6 wait」的调度表。
+2. **腾位实验**（4.2）：`Continue` 一个队尾任务，验证腾位算法：哪个 running 任务被 `doPauseForScheduling` 压回队尾、目标任务是否立即 running；对照 `TestDownloader_SchedulingPauseCompletesBeforeReplacementStart` 的断言方式。
+3. **组暂停实验**（4.1）：改用 `CreateDirectBatchWithResult` 建一个 3 成员的分组，用返回的 `parentId` 一次 `Pause`，断言 3 个成员同时 pause 且 wait 队列同步清空（检查 `len(d.waitTasks)`）。
+4. **竞态复现**（4.3）：实现 4.3.4 的「Pause 赢过陈旧 Resolve」测试，并额外断言 `EventKeyError` 不触发。
+5. **删除恢复**（4.4）：实现 4.4.4 的存储故障注入，验证失败任务回到 `d.tasks`、`bucketTask` 与 wait 队列，且组元数据因 `deletingTasks` 保护而未消失（用 `d.groups` 长度断言）。
+
+完成标志：一张手绘的完整状态-事件时序图（8 任务 × 暂停/继续/删除三次扰动），加上 5 个全绿的练习测试。若时间有限，优先做 2、4、5——它们分别对应本讲最核心的三个机制：腾位调度、代数防护、删除恢复。
 
 ## 6. 本讲小结
 
-- **批量操作模型**：`Pause`/`Continue`/`Delete` 共用 `TaskFilter`（IDs + Statuses + NotStatuses，AND 语义）；`Pause`/`Continue` 各自注入默认黑名单，`Delete` 不设限且幂等（匹配空返回 nil）；API 层只做「单 ID/查询参数 → 过滤器」的翻译，语义全部收敛在核心层。
-- **MaxRunning 是软上限**：仲裁只发生在入队决策点（`doCreate`、`Continue`、`continueAll`、`notifyRunning` 弹出），`doStart` 本身不查名额；`waitTasks` 是 FIFO 切片，`notifyRunning` 异步、持锁、一次只拉一个、每次重算名额，天然防超发。
-- **Continue 的腾挪算法**：\( \text{needPauseCount} = \max(0, \min(M, C) - (M - R)) \)；被腾挪任务经 `doPauseForScheduling`「同步物理暂停 + 代数复核 + 翻转 wait」后排队尾，pause 事件延迟到 `d.lock` 释放后补发。
-- **runGeneration 代数**：状态与代数在同一把锁内成对变更；异步协程（start handler、pause handler、watch）在关键步骤前核对代数，「不是本轮负责人就不动手」；递增点共 4 处（doStart/preparePause/markTaskDone/markTaskError）。
-- **终态守门人**：`markTaskDone`/`markTaskError` 用 running 守卫拒绝迟到者、用代数递增作废在途者，使 done/error 成为一次性裁决；`DoneAt` 靠「无清除分支」的结构保证一次性写入；完成时刻速度改写为全程平均。
-- **事件纪律**：凡是在持有 `d.lock`（`Continue` 的调度暂停）或 `task.lock`（watch 收尾）期间发生的事件，一律延迟到锁外 `emit`——因为 listener 回调可能反过来调用任何需要这些锁的 Downloader 方法，锁内发事件等于埋死锁。
+- **过滤批量模型**：`Pause`/`Continue`/`Delete` 共享「空过滤器=全量 → 组 ID 经 `expandGroupTaskIDs` 展开 → 状态黑名单过滤 → 逐个执行」的骨架；`Delete` 额外拷贝过滤器并用哨兵 ID 防「空 IDs=全部任务」的语义反转。
+- **wait 队列与腾位**：`MaxRunning` 由「闸门（remainRunningCount）+ FIFO 队列（waitTasks）+ 唤醒者（notifyRunning）」实现；`Pause` 先持锁清队列再物理暂停；`Continue` 空位不足时用 `doPauseForScheduling` 把 running 任务物理暂停（不 emit）并压回队尾腾位。
+- **runGeneration 代数**：每次成功状态迁移自增的计数器，是所有异步协程的「票据编号」；`doStart` handler 的两次核对、`runPauseHandler` 的暂停代数核对、`taskIsRunningGeneration`/`taskIsPausedGeneration` 原语，共同保证过期协程只能静默放弃。
+- **两段式暂停**：`preparePause`（statusLock 内原子声明 pause + 代数自增）与 `runPauseHandler`（task.lock 内做 fetcher 暂停、统计与落盘）分离，让「谁赢得暂停」快速定论、慢动作可被更新一代取代。
+- **删除三段式**：锁内一次摘除并登记 `deletingTasks` → 锁外 `doDelete`（task→save→stats 桶 → 关 fetcher → force 删文件）→ 失败回滚（回写 bucketTask、追加回 d.tasks/waitTasks）；`creatingGroups` 与 `deletingTasks` 双向标记守住分组创建/删除的竞态，`cleanupTaskGroups` 只清理真正无成员的组。
+- **终态守门**：`markTaskDone`/`markTaskError` 以 running 为唯一准入并自增代数，使「暂停 vs 完成」「暂停 vs 出错」都有一致的裁决规则——先到者赢，后到者静默退场。
 
 ## 7. 下一步学习建议
 
-本讲补全了 Downloader 生命周期的「控制面」：暂停、继续、删除与调度。至此第四单元还剩最后一块拼图——**持久化与断点恢复**（u4-l5）：本讲反复出现的 `saveTask`、`restoreFetcher`、三个存储桶（`task`/`save`/`task_stats`）到底写了什么、重启后任务如何恢复成 pause 并被 `ContinueOnStartup` 拉起。建议：
-
-1. 依次精读 [pkg/download/storage.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/storage.go) 的 `Storage` 接口与 `BoltStorage` 实现、`downloader.go` 的 `Setup` 恢复路径（`restoreTask`/`restoreFetcher`），以及 HTTP 与 BT 两个协议各自的 `Store`/`Restore`。
-2. 做一个承上启下的实验：把 4.2.4 的时序测试换成 `NewBoltStorage(t.TempDir())`，在任务 running 时 `Close()` 再重建 Downloader，验证任务回落 pause、`ContinueOnStartup`（[pkg/download/downloader.go:L916-L921](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L916-L921)）的行为与本讲的 `continueAll` 语义一致。
-3. 之后进入第五单元（u5-l1 HTTP Resolve 深潜），把 `fetcher.Pause()` 在 HTTP 协议里到底关掉了什么连接作为引子——控制面的每一次「暂停」，最终都要由协议实现翻译成传输面的具体动作。
+- **u4-l5 持久化与断点恢复**：本讲多次出现 `saveTask`/`bucketSave`，下一讲系统讲解九个存储桶的布局与 `Store`/`Restore` 两段式契约——暂停的持久化语义在那里闭环。
+- **u4-l6 任务分组与批量创建**：本讲只消费了组 ID 展开与空组清理，下一讲从创建侧完整讲解 `TaskGroup` 模型、`CreateDirectBatchWithResult` 的部分成功语义与组目录预留。
+- **u11-l2 并发控制与优雅关闭**：本讲聚焦任务级竞态，收官讲系统梳理 Downloader 的完整锁清单与 `Close` 的排水时序（本讲已见到 `Close` 先 `pauseAll` 的伏笔）。
+- **动手方向**：给 `ContinueBatch` 这个「未接线」的预留接口找一个合理用途（比如扩展批量恢复失败任务），或者为本讲补一个「删除与完成同时发生」的测试——观察 `watch` 里 `d.GetTask(task.ID) == nil` 的判断（L1911）如何让守夜协程在任务被删后退场。

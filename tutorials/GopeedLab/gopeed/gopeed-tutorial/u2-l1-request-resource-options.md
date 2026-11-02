@@ -7,7 +7,8 @@
 - 逐字段解释 `Request`、`Resource`、`FileInfo`、`Options` 四个结构体的含义与相互关系。
 - 理解 `Extra` 字段为什么声明为 `any`，以及 `ParseReqExtra` / `ParseOptExtra` 这对泛型函数如何在「JSON 世界」和「Go 类型世界」之间做翻译。
 - 写出 HTTP / FTP / BT / ED2K 各协议 `ReqExtra` / `OptsExtra` 的用途对照表。
-- 通过一个真实单元测试验证 `CalcSize` 的选择计算逻辑，并亲手序列化一份 HTTP `ReqExtra`。
+- 解释 `CreateTaskBatch` / `CreateTaskBatchItem` 批量模型的字段（含本轮新增的 `Group` / `GroupName` 与 `Rid`）与「rid 优先、成员 opts 整体替换、部分成功」的批量规则。
+- 通过真实单元测试验证 `CalcSize` 的选择计算逻辑，并亲手序列化一份 HTTP `ReqExtra` 和一份分组批量请求。
 
 本讲是整个学习手册的「词汇表」：后续讲 Task 状态机、Downloader 主链路、各协议实现时，全部用这里的名词说话。把这一讲吃透，后面读任何源码都会顺畅得多。
 
@@ -16,7 +17,7 @@
 阅读本讲前，你只需要具备：
 
 1. **Go 基础语法**：结构体、指针接收者、`any`（即 `interface{}`）、泛型函数（`func F[E any](...)`）。
-2. **JSON 序列化常识**：`encoding/json` 的 tag（`json:"xxx"`）、`json.Marshal` 会把 `map[string]string` 的键按字典序输出、把 `any` 反序列化成 `map[string]any`。
+2. **JSON 序列化常识**：`encoding/json` 的 tag（`json:"xxx"`、`json:"xxx,omitempty"`）、`json.Marshal` 会把 `map[string]string` 的键按字典序输出、把 `any` 反序列化成 `map[string]any`。
 3. **已完成 u1-l3（仓库地图）**：知道 `pkg/` 放公共模型与库、`internal/` 放协议实现。本讲的模型全部在 `pkg/base` 与 `pkg/protocol` 中，它们是公开 API 的一部分，稳定性要求最高。
 
 两个需要先建立直觉的概念：
@@ -28,25 +29,28 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [pkg/base/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go) | 领域模型核心：`Request` / `Resource` / `FileInfo` / `Options`、`ParseReqExtra` / `ParseOptExtra`，以及下一讲的 `DownloaderStoreConfig` |
-| [pkg/protocol/http/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model.go) | HTTP 协议的公开参数模型：`ReqExtra`（Method/Header/Body）、`OptsExtra`（连接数、校验和等）、`Stats` |
-| [pkg/protocol/ftp/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/ftp/model.go) | FTP 协议参数模型：`ReqExtra`（TLS 模式）、`OptsExtra`（并行登录数等） |
-| [pkg/protocol/bt/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/bt/model.go) | BT 协议参数模型：`ReqExtra`（tracker 列表）与做种统计快照 |
-| [pkg/protocol/ed2k/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/ed2k/model.go) | ED2K 协议模型：只有统计结构，**没有** `ReqExtra` / `OptsExtra`（对照组） |
-| [pkg/base/model_test.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model_test.go) | `pkg/base` 的现有测试，学习表驱动测试写法的范本 |
-| [pkg/util/json.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/util/json.go) | `MapToStruct`：`Extra` 类型转换的底层实现 |
-| [pkg/download/downloader.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go) | 三要素的真实使用现场：`Resolve`、`CreateWithOptions` 等 |
+| [pkg/base/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go) | 领域模型核心：`Request` / `Resource` / `FileInfo` / `Options`、`ParseReqExtra` / `ParseOptExtra`、`CreateTaskBatch` / `CreateTaskBatchItem`，以及下一讲的 `DownloaderStoreConfig` |
+| [pkg/protocol/http/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model.go) | HTTP 协议的公开参数模型：`ReqExtra`（Method/Header/Body）、`OptsExtra`（连接数、校验和等）、`Stats` |
+| [pkg/protocol/ftp/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/ftp/model.go) | FTP 协议参数模型：`ReqExtra`（TLS 模式）、`OptsExtra`（并行登录数等） |
+| [pkg/protocol/bt/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/bt/model.go) | BT 协议参数模型：`ReqExtra`（tracker 列表）与做种统计快照 |
+| [pkg/protocol/ed2k/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/ed2k/model.go) | ED2K 协议模型：只有统计结构，**没有** `ReqExtra` / `OptsExtra`（对照组） |
+| [pkg/base/model_test.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model_test.go) | `pkg/base` 的现有测试，学习表驱动测试写法的范本 |
+| [pkg/util/json.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/util/json.go) | `MapToStruct`：`Extra` 类型转换的底层实现 |
+| [pkg/download/downloader.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go) | 三要素的真实使用现场：`Resolve`、`createResolved`、`CreateDirectBatchWithResult` 等 |
+| [pkg/download/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go) | `ResolveResult`、`TaskGroup`、`CreateTaskBatchResult`：批量创建的返回值与分组元数据 |
+| [_docs/task-batch-api.md](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/_docs/task-batch-api.md) | 批量创建 API 的行为规格文档（rid 优先、opts 替换、部分成功语义的权威描述） |
 
 注意一个重要分层：`pkg/protocol` 只放「用户可配置的公开参数模型」，而协议的具体实现（fetcher、连接管理、解析逻辑）在 `internal/protocol` 下。这是 u1-l3 讲过的「pkg 稳定、internal 可自由重构」原则的体现。
 
 ## 4. 核心概念与源码讲解
 
-本讲的四个最小模块：
+本讲的五个最小模块：
 
 1. Request 与 RequestProxy —— 「我想下载什么」
 2. Resource 与 FileInfo —— 「服务器说那里有什么」
 3. Options 与 SelectFiles —— 「我要怎么下载它」
 4. 协议 Extra 模型 —— 「每个协议私有的补充参数」
+5. CreateTaskBatch 批量请求模型 —— 「一次提交一批三要素」
 
 ### 4.1 Request 与 RequestProxy
 
@@ -84,7 +88,7 @@ fetcher.Resolve(req)             ← 各协议解析出 Resource
 
 #### 4.1.3 源码精读
 
-Request 结构体定义在 [pkg/base/model.go:L17-L28](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L17-L28)：
+Request 结构体定义在 [pkg/base/model.go:L17-L28](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L17-L28)：
 
 ```go
 // Request download request
@@ -94,7 +98,7 @@ type Request struct {
 	Extra  any    `json:"extra"`
 	// Labels is used to mark the download task
 	Labels map[string]string `json:"labels"`
-	// Proxy is special proxy config for request
+	// proxy is special proxy config for request
 	Proxy *RequestProxy `json:"proxy"`
 	// SkipVerifyCert is the flag that skip verify cert
 	SkipVerifyCert bool `json:"skipVerifyCert"`
@@ -112,7 +116,7 @@ type Request struct {
 | `Proxy` | 本请求专属代理，见下文 |
 | `SkipVerifyCert` | 跳过 TLS 证书校验（自签名证书场景） |
 
-`RawURL` 的兜底逻辑在 [pkg/download/downloader.go:L516-L523](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L516-L523)：`Resolve`/`CreateDirect` 入口都会调用 `ensureRequestRawURL`，当 `RawURL` 为空时用 `URL` 回填，保证「原始地址」这个概念永远有值：
+`RawURL` 的兜底逻辑在 [pkg/download/downloader.go:L538-L545](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L538-L545)：`Resolve` 与 `createDirect` 入口都会调用 `ensureRequestRawURL`，当 `RawURL` 为空时用 `URL` 回填，保证「原始地址」这个概念永远有值：
 
 ```go
 func ensureRequestRawURL(req *base.Request) {
@@ -125,11 +129,11 @@ func ensureRequestRawURL(req *base.Request) {
 }
 ```
 
-`URL` 被改写的实例可以看 HTTP fetcher 的 Patch 实现 [internal/protocol/http/fetcher.go:L2380-L2386](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/http/fetcher.go#L2380-L2386)：换 URL 的同时清空重定向缓存，让后续请求直连新地址。
+`URL` 被改写的实例可以看 HTTP fetcher 的 Patch 实现 [internal/protocol/http/fetcher.go:L2380-L2386](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/http/fetcher.go#L2380-L2386)：换 URL 的同时清空重定向缓存，让后续请求直连新地址。
 
-请求校验非常克制，只有一条规则，见 [pkg/base/model.go:L57-L62](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L57-L62)（URL 非空）——协议格式合法性的校验留给各协议 Fetcher 自己完成。
+请求校验非常克制，只有一条规则，见 [pkg/base/model.go:L57-L62](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L57-L62)（URL 非空）——协议格式合法性的校验留给各协议 Fetcher 自己完成。
 
-代理模型分三档，见 [pkg/base/model.go:L64-L81](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L64-L81)：
+代理模型分三档，见 [pkg/base/model.go:L64-L81](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L64-L81)：
 
 ```go
 const (
@@ -147,9 +151,9 @@ type RequestProxy struct {
 }
 ```
 
-`ToHandler` 方法（[pkg/base/model.go:L83-L93](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L83-L93)）把配置翻译成 Go 标准库 `http.Transport` 认识的代理函数：只有 `custom` 模式且 `Scheme`/`Host` 都齐全才生效，`follow`/`none` 返回 `nil` 交给上层（全局配置）处理。这种「请求级配置优先、缺省回落全局」的三态设计在 Gopeed 里反复出现。
+`ToHandler` 方法（[pkg/base/model.go:L83-L93](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L83-L93)）把配置翻译成 Go 标准库 `http.Transport` 认识的代理函数：只有 `custom` 模式且 `Scheme`/`Host` 都齐全才生效，`follow`/`none` 返回 `nil` 交给上层（全局配置）处理。这种「请求级配置优先、缺省回落全局」的三态设计在 Gopeed 里反复出现。
 
-另外注意 [pkg/base/model.go:L30-L55](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L30-L55) 的 `SetLabels` / `PutLabel` / `DelLabel` 三个方法都标注了 `Deprecated`——它们是给旧版 JS 扩展保留的兼容入口，新代码应直接操作 `Labels` 字段。读源码时看到 `Deprecated` 注释不要跳过，它往往记录着 API 演化的历史。
+另外注意 [pkg/base/model.go:L30-L55](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L30-L55) 的 `SetLabels` / `PutLabel` / `DelLabel` 三个方法都标注了 `Deprecated`——它们是给旧版 JS 扩展保留的兼容入口，新代码应直接操作 `Labels` 字段。读源码时看到 `Deprecated` 注释不要跳过，它往往记录着 API 演化的历史。
 
 #### 4.1.4 代码实践
 
@@ -228,16 +232,16 @@ func TestRequestBasics(t *testing.T) {
 ```text
 Request ──fetcher.Resolve()──▶ Resource
                                   │
-                  ┌───────────────┼────────────────┐
-                  ▼               ▼                ▼
-            Name/Size/Range   Files[]          Hash
-           （单文件即文件名  （多文件时 Name     （BT 种子的
-             多文件即目录名）  是目录名）          infohash）
-                  │
-                  ▼
+                      ┌───────────┼────────────────┐
+                      ▼           ▼                ▼
+                Name/Size/Range  Files[]          Hash
+               （单文件即文件名 （多文件时 Name     （BT 种子的
+                 多文件即目录名）  是目录名）          infohash）
+                      │
+                      ▼
      用户在 UI 勾选文件 ──▶ Options.SelectFiles
-                  │
-                  ▼
+                      │
+                      ▼
      Resource.CalcSize(SelectFiles) 重算总大小
 ```
 
@@ -251,7 +255,7 @@ Request ──fetcher.Resolve()──▶ Resource
 
 #### 4.2.3 源码精读
 
-Resource 定义在 [pkg/base/model.go:L95-L105](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L95-L105)：
+Resource 定义在 [pkg/base/model.go:L95-L105](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L95-L105)：
 
 ```go
 // Resource download resource
@@ -275,7 +279,7 @@ type Resource struct {
 | `Files` | 文件列表，至少一项（`Validate` 强制） | 各协议解析 |
 | `Hash` | 资源哈希标识 | BT 的 infohash；HTTP 通常为空 |
 
-`CalcSize` 实现在 [pkg/base/model.go:L119-L127](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L119-L127)：
+`CalcSize` 实现在 [pkg/base/model.go:L119-L127](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L119-L127)：
 
 ```go
 func (r *Resource) CalcSize(selectFiles []int) {
@@ -291,9 +295,9 @@ func (r *Resource) CalcSize(selectFiles []int) {
 
 两个细节：`len(selectFiles) == 0` 代表全选（与 4.3 的 `InitSelectFiles` 呼应）；用 `slices.Contains` 做下标成员判断，时间复杂度是 \( O(n \cdot |S|) \)，对文件数上万的大型种子也够用（选择操作频率极低）。
 
-`Resource.Validate`（[pkg/base/model.go:L107-L117](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L107-L117)）要求 `Files` 非空且每个文件 `Name` 非空——即一个 `Resource` 至少描述一个可命名文件，不允许「空资源」。
+`Resource.Validate`（[pkg/base/model.go:L107-L117](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L107-L117)）要求 `Files` 非空且每个文件 `Name` 非空——即一个 `Resource` 至少描述一个可命名文件，不允许「空资源」。
 
-FileInfo 定义在 [pkg/base/model.go:L129-L136](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L129-L136)：
+FileInfo 定义在 [pkg/base/model.go:L129-L136](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L129-L136)：
 
 ```go
 type FileInfo struct {
@@ -306,9 +310,9 @@ type FileInfo struct {
 }
 ```
 
-最值得琢磨的是 `Req *Request` 这个字段：**每个文件可以携带自己的请求**。普通 HTTP/BT 下载用不到它，但当 JS 扩展在内存里「凭空产出」一个多文件资源时（u9 的 Blob 机制），每个文件各自对应不同的获取方式，就需要逐文件描述。Downloader 在 [pkg/download/downloader.go:L525-L538](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L525-L538) 的 `ensureResourceRequestRawURLs` 中专门为这些内嵌请求回填 `RawURL`，测试工具 `cmd/extmock`（[cmd/extmock/main.go:L283-L309](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/cmd/extmock/main.go#L283-L309)）就是靠 `file.Req` 把模拟资源逐个转成真实任务的。
+最值得琢磨的是 `Req *Request` 这个字段：**每个文件可以携带自己的请求**。普通 HTTP/BT 下载用不到它，但当 JS 扩展在内存里「凭空产出」一个多文件资源时（u9 的 Blob 机制），每个文件各自对应不同的获取方式，就需要逐文件描述。Downloader 在 [pkg/download/downloader.go:L547-L560](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L547-L560) 的 `ensureResourceRequestRawURLs` 中专门为这些内嵌请求回填 `RawURL`，测试工具 `cmd/extmock`（[cmd/extmock/main.go:L283-L309](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/cmd/extmock/main.go#L283-L309)）就是靠 `file.Req` 把模拟资源逐个转成真实任务的。
 
-`Resource` 是 `Resolve` 的直接产出，见 [pkg/download/downloader.go:L540-L574](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L540-L574)：`Downloader.Resolve` 优先让扩展产出资源（`triggerOnResolve`），否则路由到协议 Fetcher 解析，最终都装进 `ResolveResult.Res` 返回给调用方。
+`Resource` 是 `Resolve` 的直接产出，见 [pkg/download/downloader.go:L562-L598](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L562-L598)：`Downloader.Resolve` 优先让扩展产出资源（`triggerOnResolve`），否则路由到协议 Fetcher 解析，最终都装进 `ResolveResult.Res` 返回给调用方。
 
 #### 4.2.4 代码实践
 
@@ -390,7 +394,7 @@ func TestResourceCalcSize(t *testing.T) {
 
 #### 4.3.2 核心流程
 
-`Options` 与 `SelectFiles` 在建任务主链路上的协作（`Downloader.CreateWithOptions`，[pkg/download/downloader.go:L662-L711](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L662-L711)）：
+`Options` 与 `SelectFiles` 在建任务主链路上的协作（核心逻辑在 [pkg/download/downloader.go:L868-L913](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L868-L913) 的 `createResolved`，它同时服务于单任务创建 `CreateWithOptions` 和 4.5 的批量 `rid` 成员）：
 
 ```text
 用户提交 Options
@@ -415,7 +419,7 @@ fetcher.Meta().Opts = taskOpts  ← 固化为任务的选项
 
 #### 4.3.3 源码精读
 
-Options 定义在 [pkg/base/model.go:L138-L156](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L138-L156)：
+Options 定义在 [pkg/base/model.go:L138-L156](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L138-L156)：
 
 ```go
 // Options for download
@@ -445,11 +449,11 @@ type Options struct {
 | `Name` | 覆盖默认文件名 | 空则使用 `Resource.Name` |
 | `Path` | 下载目录 | 受全局目录白名单约束（u10-l1 讲 `decideDownloadDir`） |
 | `AsDefaultPath` | 建任务成功后把该目录记住为默认目录 | |
-| `SkipAutoCategorize` | 跳过按扩展名自动归类到分类目录 | 与 u10-l1 的自动分类机制配合 |
+| `SkipAutoCategorize` | 跳过按扩展名自动归类到分类目录 | 与 u10-l1 的自动分类机制配合；4.5 会看到分组批量会强制置 true |
 | `SelectFiles` | 要下载的文件下标列表 | 空代表全选，见 `InitSelectFiles` |
 | `Extra` | 协议私有选项，类型 `any` | 与 `Request.Extra` 对称，详见 4.4 |
 
-`InitSelectFiles` 在 [pkg/base/model.go:L158-L166](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L158-L166)：
+`InitSelectFiles` 在 [pkg/base/model.go:L158-L166](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L158-L166)：
 
 ```go
 func (o *Options) InitSelectFiles(fileSize int) {
@@ -463,9 +467,9 @@ func (o *Options) InitSelectFiles(fileSize int) {
 }
 ```
 
-`Clone`（[pkg/base/model.go:L168-L170](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L168-L170)）借助 `util.DeepClone` 做 JSON 往返式深拷贝。Downloader 在创建任务前总是先 Clone（[pkg/download/downloader.go:L678](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L678)），避免调用方在任务启动后修改手里的 `Options` 波及任务内部状态——这是「边界处拷贝」防御性编程的典型做法。
+`Clone`（[pkg/base/model.go:L168-L170](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L168-L170)）借助 `util.DeepClone` 做 JSON 往返式深拷贝。Downloader 在创建任务前总是先 Clone（[pkg/download/downloader.go:L888](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L888)），避免调用方在任务启动后修改手里的 `Options` 波及任务内部状态——这是「边界处拷贝」防御性编程的典型做法。
 
-三要素协作的现场在 [pkg/download/downloader.go:L682-L693](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L682-L693)：
+三要素协作的现场在 `createResolved` 中，见 [pkg/download/downloader.go:L892-L903](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L892-L903)：
 
 ```go
 	if res := fetcher.Meta().Res; res != nil {
@@ -484,7 +488,7 @@ func (o *Options) InitSelectFiles(fileSize int) {
 
 先校验、再规范化、最后重算大小——三行代码分别守护了安全性、语义一致性和数据准确性。这种「入口归一化」的风格在 Gopeed 源码里随处可见。
 
-另外，[pkg/base/model.go:L202-L210](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L202-L210) 的 `CreateTaskBatch` / `CreateTaskBatchItem` 是批量建任务的请求体：每个条目自带 `Req` 与可选 `Opts`，说明「一次请求 + 每任务独立选项」的建模方式。
+另外，[pkg/base/model.go:L202-L213](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L202-L213) 的 `CreateTaskBatch` / `CreateTaskBatchItem` 是「批量版三要素」的请求体，本讲 4.5 专门展开。
 
 #### 4.3.4 代码实践
 
@@ -541,11 +545,11 @@ func TestOptionsSelectFilesAndClone(t *testing.T) {
 
 **练习 2**：`Options.Size` 为什么放在通用 `Options` 里而不是 HTTP 的 `OptsExtra`？
 
-**答案**：这是一个 API 设计取舍。`Size` 是「创建任务时的一次性提示」，需要被 Downloader 层在 `CreateWithOptions` 中读取并直接 `Patch` 给 fetcher（[pkg/download/downloader.go:L694-L700](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/download/downloader.go#L694-L700)），放进通用结构可以让 Downloader 不必理解每个协议的 Extra 类型；注释同时声明「其他协议忽略它」来限定作用域。
+**答案**：这是一个 API 设计取舍。`Size` 是「创建任务时的一次性提示」，需要被 Downloader 层在 `createResolved` 中读取并直接 `Patch` 给 fetcher（[pkg/download/downloader.go:L904-L910](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L904-L910)），放进通用结构可以让 Downloader 不必理解每个协议的 Extra 类型；注释同时声明「其他协议忽略它」来限定作用域。
 
 **练习 3**：如果用户提交的 `SelectFiles` 含越界下标 `-1`，会在哪一步、以什么形式失败？
 
-**答案**：在 `CreateWithOptions` 的下标校验循环中（downloader.go:L683-L687）直接返回错误 `invalid selected file index: -1`，任务不会被创建。这是「尽早失败」原则：错误下标如果漏进 Fetcher，可能导致越界 panic 而不是可读的错误。
+**答案**：在 `createResolved` 的下标校验循环中（[pkg/download/downloader.go:L892-L897](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L892-L897)）直接返回错误 `invalid selected file index: -1`，任务不会被创建。这是「尽早失败」原则：错误下标如果漏进 Fetcher，可能导致越界 panic 而不是可读的错误。
 
 ### 4.4 协议 Extra 模型
 
@@ -583,7 +587,7 @@ Extra = &http.ReqExtra{...} ──json──▶ Extra = map[string]any{...}
 
 #### 4.4.3 源码精读
 
-两个泛型函数在 [pkg/base/model.go:L172-L200](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L172-L200)：
+两个泛型函数在 [pkg/base/model.go:L172-L200](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L172-L200)：
 
 ```go
 func ParseReqExtra[E any](req *Request) error {
@@ -604,7 +608,7 @@ func ParseReqExtra[E any](req *Request) error {
 
 四个分支：`nil` 直接放过（没有额外参数）；已是 `*E` 幂等返回（Go 进程内调用方直接传结构体的场景）；否则经 `MapToStruct` 转换；转换失败返回错误（JSON 结构对不上）。`ParseOptExtra` 与之完全对称，作用于 `Options.Extra`。
 
-底层 `MapToStruct` 在 [pkg/util/json.go:L5-L14](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/util/json.go#L5-L14)，实现非常直白——一次 Marshal 加一次 Unmarshal：
+底层 `MapToStruct` 在 [pkg/util/json.go:L5-L14](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/util/json.go#L5-L14)，实现非常直白——一次 Marshal 加一次 Unmarshal：
 
 ```go
 func MapToStruct(s any, v any) error {
@@ -623,20 +627,20 @@ func MapToStruct(s any, v any) error {
 
 | 协议 | ReqExtra（请求侧） | OptsExtra（选项侧） | 定义位置 |
 | --- | --- | --- | --- |
-| HTTP | `Method`（请求方法）、`Header`（请求头）、`Body`（请求体） | `Connections`（连接数）、`AutoTorrent`、`DeleteTorrentAfterDownload`、`AutoExtract`、`ArchivePassword`、`DeleteAfterExtract`、`Checksum`（完成后校验和） | [pkg/protocol/http/model.go:L9-L13](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model.go#L9-L13) 与 [L81-L98](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model.go#L81-L98) |
-| FTP | `TLS`（`none`/`explicit`/`implicit`，见 [pkg/protocol/ftp/model.go:L5-L17](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/ftp/model.go#L5-L17)） | `Connections`（并行登录上限）+ 与 HTTP 相同的自动化字段（[L19-L36](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/ftp/model.go#L19-L36)） | pkg/protocol/ftp/model.go |
-| BT | `Trackers`（tracker URL 列表，[pkg/protocol/bt/model.go:L5-L7](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/bt/model.go#L5-L7)） | **无**——文件选择用通用 `Options.SelectFiles` | pkg/protocol/bt/model.go |
-| ED2K | **无**（[pkg/protocol/ed2k/model.go](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/ed2k/model.go) 全文件只有统计结构） | **无** | pkg/protocol/ed2k/model.go |
-| HLS | 镜像 HTTP 的 `Method/Header/Body`（[internal/protocol/hls/fetcher.go:L24-L30](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/hls/fetcher.go#L24-L30)，因创建对话框给 m3u8 附带 HTTP 风格参数） | 无独立模型 | internal/protocol/hls |
+| HTTP | `Method`（请求方法）、`Header`（请求头）、`Body`（请求体） | `Connections`（连接数）、`AutoTorrent`、`DeleteTorrentAfterDownload`、`AutoExtract`、`ArchivePassword`、`DeleteAfterExtract`、`Checksum`（完成后校验和） | [pkg/protocol/http/model.go:L9-L13](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model.go#L9-L13) 与 [L81-L98](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model.go#L81-L98) |
+| FTP | `TLS`（`none`/`explicit`/`implicit`，见 [pkg/protocol/ftp/model.go:L13-L17](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/ftp/model.go#L13-L17)） | `Connections`（并行登录上限）+ 与 HTTP 相同的自动化字段（[L19-L36](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/ftp/model.go#L19-L36)） | pkg/protocol/ftp/model.go |
+| BT | `Trackers`（tracker URL 列表，[pkg/protocol/bt/model.go:L5-L7](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/bt/model.go#L5-L7)） | **无**——文件选择用通用 `Options.SelectFiles` | pkg/protocol/bt/model.go |
+| ED2K | **无**（[pkg/protocol/ed2k/model.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/ed2k/model.go) 全文件只有统计结构） | **无** | pkg/protocol/ed2k/model.go |
+| HLS | 镜像 HTTP 的 `Method/Header/Body`（[internal/protocol/hls/fetcher.go:L24-L30](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/hls/fetcher.go#L24-L30)，因创建对话框给 m3u8 附带 HTTP 风格参数） | 无独立模型 | internal/protocol/hls |
 
 注意两个不对称：
 
 1. **HTTP/FTP 的 OptsExtra 有大量相同字段**（AutoTorrent、AutoExtract 等）但**没有抽公共结构**——因为这些「下载完成后动作」实际由 Downloader 层按协议名分别消费（u10 讲），字段重复是刻意保持各协议模型独立演化的结果。
 2. **`*bool` 三态模式**：`AutoTorrent *bool` 等字段用指针区分「未设置（用全局配置）/显式 true/显式 false」，与 4.1 的代理三态是同一思想。
 
-`OptsExtra` 中的 `ChecksumOption` 值得单独一看（[pkg/protocol/http/model.go:L15-L79](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model.go#L15-L79)）：`Validate` 方法校验算法名（大小写不敏感，允许 `sha-1` 别名）、哈希长度必须精确等于 32/40/64（md5/sha1/sha256）、且必须是合法十六进制。配套测试 [pkg/protocol/http/model_test.go:L20-L162](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model_test.go#L20-L162) 用表驱动覆盖了 off-by-one 长度、非 hex 字符等边界——是学习该项目测试风格的好范本。
+`OptsExtra` 中的 `ChecksumOption` 值得单独一看（[pkg/protocol/http/model.go:L15-L79](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model.go#L15-L79)）：`Validate` 方法校验算法名（大小写不敏感，允许 `sha-1` 别名）、哈希长度必须精确等于 32/40/64（md5/sha1/sha256）、且必须是合法十六进制。配套测试 [pkg/protocol/http/model_test.go:L20-L162](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model_test.go#L20-L162) 用表驱动覆盖了 off-by-one 长度、非 hex 字符等边界——是学习该项目测试风格的好范本。
 
-最后看协议侧的真实调用。HTTP Fetcher 在 Resolve 入口转换请求侧 Extra（[internal/protocol/http/fetcher.go:L420](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/http/fetcher.go#L420)），BT Fetcher 同样在 Resolve 中解析 tracker 列表（[internal/protocol/bt/fetcher.go:L748](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/bt/fetcher.go#L748)）。最能说明「为什么需要 Parse」的是持久化恢复路径：任务从 bbolt 读回时 `Extra` 是 JSON 反序列化出的 map，所以 HTTP 的 FetcherManager 在 Restore 时必须重新调用一次 `ParseReqExtra` / `ParseOptExtra`（[internal/protocol/http/fetcher_manager.go:L161-L162](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/http/fetcher_manager.go#L161-L162)），FTP 的 Restore 也一样（[internal/protocol/ftp/fetcher_manager.go:L95-L98](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/ftp/fetcher_manager.go#L95-L98)）。HTTP 的 `Patch` 甚至要做**字段级合并**而非整体替换（[internal/protocol/http/fetcher.go:L2387-L2399](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/internal/protocol/http/fetcher.go#L2387-L2399)），避免只改 Method 时丢掉已有 Header。
+最后看协议侧的真实调用。HTTP Fetcher 在 Resolve 入口转换请求侧 Extra（[internal/protocol/http/fetcher.go:L419-L420](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/http/fetcher.go#L419-L420)），BT Fetcher 同样在 Resolve 中解析 tracker 列表（[internal/protocol/bt/fetcher.go:L748](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/bt/fetcher.go#L748)）。最能说明「为什么需要 Parse」的是持久化恢复路径：任务从 bbolt 读回时 `Extra` 是 JSON 反序列化出的 map，所以 HTTP 的 FetcherManager 在 Restore 时必须重新调用一次 `ParseReqExtra` / `ParseOptExtra`（[internal/protocol/http/fetcher_manager.go:L161-L162](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/http/fetcher_manager.go#L161-L162)），FTP 的 Restore 也一样（[internal/protocol/ftp/fetcher_manager.go:L95-L98](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/ftp/fetcher_manager.go#L95-L98)）。HTTP 的 `Patch` 甚至要做**字段级合并**而非整体替换（[internal/protocol/http/fetcher.go:L2387-L2413](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/internal/protocol/http/fetcher.go#L2387-L2413)），避免只改 Method 时丢掉已有 Header。
 
 #### 4.4.4 代码实践
 
@@ -731,41 +735,228 @@ func TestHttpReqExtra(t *testing.T) {
 
 **答案**：BT 的「选哪些文件」由通用 `Options.SelectFiles` 承担，连接数等参数由全局 `ProtocolConfig` 管，没有任务级私有选项需求。FTP 的 TLS 模式必须在 **Resolve 阶段建立控制连接时**就生效（注释原话：resolving the link already needs a connection），而 `OptsExtra` 是创建任务时才提交的，来不及——参数该放哪一侧，取决于它在生命周期的哪个阶段被消费。
 
+### 4.5 CreateTaskBatch 批量请求模型
+
+#### 4.5.1 概念说明
+
+单个任务用「`Request` + `Options`」即可描述，但真实场景常常要**一次提交一批**：JS 扩展解析出一个页面里的十几个直链、用户在 BT 资源对话框里勾选若干文件、前端「批量下载」列表。`CreateTaskBatch` 就是「三要素的批量容器」：批级 `Opts` 提供默认选项，每个成员（`CreateTaskBatchItem`）自带 `Req` 或 `Rid`，也可以用自己的 `Opts` 覆盖批级默认。
+
+提交 1e36599（feat(tasks): group extension folder downloads）给这对结构新增了三个字段：
+
+- `CreateTaskBatch.Group bool` 与 `GroupName string`：把整批任务放进一个「**任务分组**」（`TaskGroup`），组内任务共享一个**预留的下载目录**，任务列表里以父子关系呈现（典型场景：扩展发现的整个文件夹一次拖进来）。
+- `CreateTaskBatchItem.Rid string`：成员可以引用一次 `Resolve` 返回的结果 ID，**复用已解析的 fetcher**——「先解析展示给用户、确认后再批量建任务」的两段式交互不必对每个成员重新探测。
+
+理解这个模块的关键，是把它看作前四个模块的**组装方式**而不是新概念：成员的 `Req`/`Opts` 就是 4.1/4.3 的类型，`Rid` 指向 4.2 的 `ResolveResult`。
+
+#### 4.5.2 核心流程
+
+`CreateDirectBatchWithResult` 的批量规则（规格文档 [_docs/task-batch-api.md](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/_docs/task-batch-api.md) 是权威描述）：
+
+```text
+CreateTaskBatch{Reqs, Opts, Group, GroupName}
+        │
+        ├─ Group=true → createTaskGroup 预留 <父目录>/<组名>/
+        │              （重名自动加 " (1)"、" (2)"… 后缀）
+        │              成员路径被强制限制在组目录内，
+        │              且 SkipAutoCategorize=true（跳过自动分类）
+        ▼ 逐个成员处理（全部尝试，不因单个失败中断）
+   item.Opts 存在？──是──▶ 整体替换批级 Opts（不逐字段合并）
+        │ 否
+        ▼ 沿用批级 Opts（两者都没有则用空 Options）
+   item.Rid 非空？──是──▶ createResolved：消费 fetcherCache 里缓存的解析结果
+        │ 否
+   item.Req 非空？──是──▶ createDirect：从零解析并建任务
+        │ 否
+        ▼ 报错 "task request or rid is required"
+        │
+        ▼ 汇总
+   全部失败   → 返回错误（并清理刚预留的空组目录与元数据）
+   至少一个成功 → 返回 CreateTaskBatchResult{TaskIDs, ParentID}
+```
+
+两条最容易踩坑的规则：
+
+1. **rid 优先**：成员同时填了 `rid` 和 `req` 时，`rid` 分支先命中，`req` 被忽略。
+2. **成员 opts 是整体替换**：成员一旦带 `opts`，批级 `opts` 的所有字段（包括 path）都不再逐字段继承——想改批级默认就克隆一份完整 Options 再改。
+
+#### 4.5.3 源码精读
+
+批量模型定义在 [pkg/base/model.go:L202-L213](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L202-L213)，这就是穿过 REST 边界的请求体形状：
+
+```go
+type CreateTaskBatch struct {
+	Reqs      []*CreateTaskBatchItem `json:"reqs"`
+	Opts      *Options               `json:"opts"`
+	Group     bool                   `json:"group"`
+	GroupName string                 `json:"groupName"`
+}
+
+type CreateTaskBatchItem struct {
+	Rid  string   `json:"rid,omitempty"`
+	Req  *Request `json:"req"`
+	Opts *Options `json:"opts"`
+}
+```
+
+注意 `Rid` 带 `omitempty`：不引用解析结果的成员序列化后**完全不出现** `rid` 键，旧客户端提交的 `{"req": {...}}` 形状保持兼容——这是「给已有模型加字段」时的 JSON 兼容技巧。
+
+消费入口是 [pkg/download/downloader.go:L664-L753](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L664-L753) 的 `CreateDirectBatchWithResult`。成员分发的心脏在 [pkg/download/downloader.go:L730-L741](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L730-L741)，switch 的分支顺序直接体现了「rid 优先」：
+
+```go
+switch {
+case item == nil:
+	itemErr = errors.New("task request or rid is required")
+case item.Rid != "":
+	taskID, itemErr = d.createResolved(item.Rid, opts, groupID)
+case item.Req != nil:
+	taskID, itemErr = d.createDirect(item.Req, opts, groupID)
+default:
+	itemErr = errors.New("task request or rid is required")
+}
+```
+
+成员 opts 与批级 opts 的替换关系在 [pkg/download/downloader.go:L692-L705](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L692-L705)：`item.Opts` 存在就整体采用并 `Clone`，否则回落 `req.Opts`，再否则空 `Options`——没有任何逐字段合并。
+
+分组分支在 [pkg/download/downloader.go:L674-L690](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L674-L690) 与 [pkg/download/downloader.go:L708-L729](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L708-L729)：先 `createTaskGroup` 预留目录（[pkg/download/downloader.go:L757-L826](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L757-L826)，重名探测、白名单校验、`os.Mkdir` 抢占式预留、写入 `task_group` 存储桶），随后每个成员的路径经 `filepath.Rel` 检查必须落在组目录内（`filepath.IsLocal` 拒绝 `..` 逃逸），并强制 `SkipAutoCategorize = true`。组目录预留与成员路径安全属于 u4-l6 的主题，这里只需建立印象。
+
+部分成功语义在 [pkg/download/downloader.go:L748-L750](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L748-L750)：只有**全部**成员失败才返回错误；至少一个成功就返回结果对象，失败成员被跳过（错误用 `errors.Join` 聚合进终态错误）。
+
+返回值模型在 [pkg/download/model.go:L40-L44](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L40-L44)，普通批量与分组批量共用：
+
+```go
+// CreateTaskBatchResult is shared by ordinary and grouped batches.
+type CreateTaskBatchResult struct {
+	TaskIDs  []string `json:"taskIds"`
+	ParentID string   `json:"parentId,omitempty"`
+}
+```
+
+`ParentID` 指向 [pkg/download/model.go:L32-L38](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L32-L38) 的 `TaskGroup`（`ID/Name/Path/CreatedAt`），组内每个任务的 `Task.ParentID` 字段（[pkg/download/model.go:L49-L54](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/model.go#L49-L54)）记录这一归属。旧版只返回 `[]string` 的 Go API 由 [pkg/download/downloader.go:L654-L662](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L654-L662) 的 `CreateDirectBatch` 包装保留，内部同样委托给 `CreateDirectBatchWithResult`。
+
+REST 侧的接线：路由注册在 [pkg/api/service.go:L55](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/api/service.go#L55)（`POST /api/v1/tasks/batch`），handler [pkg/api/service.go:L175-L188](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/api/service.go#L175-L188) 反序列化成 `base.CreateTaskBatch` 后直接调用 `CreateDirectBatchWithResult` 并把结果对象放进响应 `data`——**普通批量的响应也从此返回 `{"taskIds": [...], "parentId": ...}` 对象而非数组**，这是本轮 API 的一个不兼容变更（规格文档明确写了 "This replaces the former array response"）。
+
+#### 4.5.4 代码实践
+
+**实践目标**：亲手序列化一份「带 `Group`/`GroupName`/`Rid`」的 `CreateTaskBatch`，观察它穿过 REST 边界时的最终 JSON 形态，验证 `omitempty` 与空值字段的输出差异。
+
+**操作步骤**：
+
+1. 新建 `learn/u2l1/batch_learn_test.go`（示例代码）：
+
+```go
+package u2l1
+
+import (
+	"encoding/json"
+	"testing"
+
+	"github.com/GopeedLab/gopeed/pkg/base"
+	download "github.com/GopeedLab/gopeed/pkg/download"
+)
+
+func TestCreateTaskBatchJSON(t *testing.T) {
+	batch := &base.CreateTaskBatch{
+		Group:     true,
+		GroupName: "album",
+		Opts:      &base.Options{Path: "/downloads"},
+		Reqs: []*base.CreateTaskBatchItem{
+			// 成员 1：引用一次 Resolve 的结果（rid），并自带成员级 opts
+			{Rid: "V1StGXR8_Z5jdHi6B-myT", Opts: &base.Options{SelectFiles: []int{1}}},
+			// 成员 2：直接给请求，不带 rid、不带成员 opts
+			{Req: &base.Request{URL: "https://example.com/cover.jpg"}},
+		},
+	}
+	data, err := json.Marshal(batch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("CreateTaskBatch json: %s", data)
+
+	// 对照：普通批量（Group=false）与结果对象的形态
+	plain, _ := json.Marshal(&base.CreateTaskBatch{Reqs: batch.Reqs})
+	t.Logf("plain batch json: %s", plain)
+
+	result, _ := json.Marshal(&download.CreateTaskBatchResult{
+		TaskIDs:  []string{"task-1", "task-2"},
+		ParentID: "group-9",
+	})
+	t.Logf("result json: %s", result)
+
+	emptyParent, _ := json.Marshal(&download.CreateTaskBatchResult{TaskIDs: []string{"task-1"}})
+	t.Logf("ordinary result json: %s", emptyParent)
+}
+```
+
+2. 运行：`go test ./learn/u2l1/ -run TestCreateTaskBatchJSON -v`
+
+**需要观察的现象**：
+
+- 成员 1 的 JSON 里**没有** `req` 且 `rid` 有值；成员 2 的 JSON 里**没有** `rid` 键（`omitempty` 生效）但 `opts: null` 会出现（`Opts` 无 `omitempty`）。
+- `plain` 输出中 `"group":false,"groupName":""` 依然出现（`Group`/`GroupName` 无 `omitempty`，所以旧客户端发来的 JSON 反序列化后这两个字段有确定的零值）。
+- `emptyParent` 输出中 `parentId` 键消失（`omitempty`），而 `taskIds` 即使为空也输出 `[]` 而非 `null`（`CreateDirectBatchWithResult` 里 `TaskIDs: make([]string, 0)` 初始化，见 [pkg/download/downloader.go:L672](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader.go#L672)）。
+
+**预期结果**（以本地实际运行输出为准，待本地验证）。注意 `Options.Size` 带 `omitempty`，零值时 `size` 键完全不出现：
+
+```json
+{"reqs":[{"rid":"V1StGXR8_Z5jdHi6B-myT","req":null,"opts":{"name":"","path":"","selectFiles":[1],"extra":null}},{"req":{"rawUrl":"","url":"https://example.com/cover.jpg","extra":null,"labels":null,"proxy":null,"skipVerifyCert":false},"opts":null}],"opts":{"name":"","path":"/downloads","selectFiles":null,"extra":null},"group":true,"groupName":"album"}
+```
+
+```json
+{"taskIds":["task-1","task-2"],"parentId":"group-9"}
+```
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：成员同时填了 `rid` 和 `req`，会发生什么？如果两者都不填呢？
+
+**答案**：`rid` 优先——`CreateDirectBatchWithResult` 的 switch 先判断 `item.Rid != ""`，命中后走 `createResolved` 消费缓存的解析结果，`req` 被忽略（见 downloader.go:L730-L741）。两者都不填（或 `item == nil`）则该成员得到错误 "task request or rid is required"，被记入失败列表；若所有成员都这样，整个批量返回 "all batch tasks failed" 聚合错误。
+
+**练习 2**：批级 `opts.path` 设为 `/downloads`，成员 A 不带 `opts`，成员 B 带 `opts: {"name": "x"}`（没写 path）。两个成员分别下到哪？
+
+**答案**：成员 A 沿用批级 opts，落在 `/downloads`。成员 B 的 opts **整体替换**批级 opts（downloader.go:L698-L705 只做「存在即采用」的二元选择），`path` 为空字符串——普通批量下空路径回落到全局默认下载目录（由 `initOptions` 补齐）；分组批量下则使用预留的组目录。这正是规格文档强调 "omitted fields do not inherit individual batch values" 的原因。
+
+**练习 3**：为什么 `CreateTaskBatchResult.TaskIDs` 要用 `make([]string, 0)` 初始化而不是留 `nil`？
+
+**答案**：JSON 语义差异——`nil` 切片序列化成 `null`，空切片序列化成 `[]`。前端拿到 `null` 时直接 `.length` 或 `.map` 会报错，`[]` 则安全。批量 API 的消费方（Flutter 前端、MCP 客户端）不应为「零个任务成功」 special-case 空值，而且按部分成功语义，返回成功时 `TaskIDs` 至少一项，这个初始化只是兜底防御。
+
 ## 5. 综合实践
 
-**任务：编写一份「三要素组装器」测试，把本讲四个模块串成一条链。**
+**任务：编写一份「三要素组装器」测试，把本讲五个模块串成一条链。**
 
-在 `learn/u2l1/` 下新建 `integration_learn_test.go`，模拟一次完整的「HTTP 任务提交前准备」流程（不启动网络、不创建 Downloader，纯模型层演练）：
+在 `learn/u2l1/` 下新建 `integration_learn_test.go`，模拟一次完整的「分组批量任务提交前准备」流程（不启动网络、不创建 Downloader，纯模型层演练）：
 
 1. **构造请求**：`Request{URL: "https://mirror.example.org/ubuntu-24.04.iso"}`，`Extra` 用 `map[string]any` 填入 `method: GET` 与两个请求头——模拟前端经 REST 提交的形态；再配一个 `RequestProxy{Mode: custom}`。
 2. **转换 Extra**：`ParseReqExtra[fhttp.ReqExtra]` 把 map 变成具体类型，断言方法与头都还原成功。
 3. **构造资源**：手写一个 3 文件的 `Resource`（模拟 Fetcher 解析结果），调用 `Validate`。
 4. **构造选项**：`Options{Path: "/downloads", SelectFiles: []int{0, 2}, Extra: map[string]any{"connections": 8}}`，先 `Clone`，再手动做一遍 Downloader 的入口逻辑——校验下标、`InitSelectFiles`、`CalcSize`——断言最终 `Resource.Size` 等于选中两个文件之和。
 5. **转换选项 Extra**：`ParseOptExtra[fhttp.OptsExtra]` 之后断言 `Connections == 8`。
-6. **打印终态**：把 `req`、`res`、`opts` 三个对象依次 `json.Marshal` 并用 `t.Logf` 输出。
+6. **组装批量**：把第 1 步的请求与第 4 步的选项装进 `CreateTaskBatchItem`，再配一个只有 `Rid` 的成员，整体放进 `CreateTaskBatch{Group: true, GroupName: "ubuntu-mirror", Opts: <批级 Options>}`；把整个 batch `json.Marshal` 打印出来。
+7. **打印终态**：把 `req`、`res`、`opts`、`batch` 四个对象依次 `json.Marshal` 并用 `t.Logf` 输出。
 
 **验收标准**：
 
 - 所有断言通过，`go test ./learn/u2l1/ -v` 全绿。
-- 三段 JSON 输出与你自己手写的预期完全一致（特别是 `rawUrl` 的兜底值、`selectFiles` 的展开结果、map 键的排序）。
-- 用一句话向自己解释：为什么第 4 步里 `Clone` 必须发生在修改 `SelectFiles` 之前。
+- 四段 JSON 输出与你自己手写的预期完全一致（特别是 `rawUrl` 的兜底值、`selectFiles` 的展开结果、map 键的排序、成员 2 上消失的 `rid` 键）。
+- 用一句话向自己解释：为什么第 4 步里 `Clone` 必须发生在修改 `SelectFiles` 之前；再解释第 6 步里成员自带 `opts` 时批级 `opts` 的 `path` 为什么不会被子字段继承。
 
-这个练习覆盖了本讲全部四个最小模块：Request 的边界形态（1、2）、Resource 的选择计算（3、4）、Options 的入口归一化（4）、Extra 的双向翻译（2、5）。
+这个练习覆盖了本讲全部五个最小模块：Request 的边界形态（1、2）、Resource 的选择计算（3、4）、Options 的入口归一化（4）、Extra 的双向翻译（2、5）、批量模型的组装与序列化（6）。
 
 ## 6. 本讲小结
 
 - **三要素分工**：`Request` 描述「从哪下、以什么身份下」，`Resource` 是解析阶段产出的「那里有什么」，`Options` 表达「用户想怎么下」；三者共同构成一次下载的全部输入。
 - **`RawURL` 与 `URL` 分离**：原始输入与实际请求地址解耦，`ensureRequestRawURL` 保证前者永远有值；重定向、扩展改写、`Patch` 只动后者。
-- **「空即全选」约定**：`Options.SelectFiles` 为空代表全选，`InitSelectFiles` 在入口处把它展开成显式下标列表，`CalcSize` 按选择覆盖式重算 `Resource.Size`——先校验、再规范化、最后重算，是 Downloader 入口的固定节奏。
+- **「空即全选」约定**：`Options.SelectFiles` 为空代表全选，`InitSelectFiles` 在入口处把它展开成显式下标列表，`CalcSize` 按选择覆盖式重算 `Resource.Size`——先校验、再规范化、最后重算，是 `createResolved` 入口的固定节奏。
 - **`Extra any` 是边界产物**：JSON 世界里它是 `map[string]any`，Go 世界里它是各协议的 `*ReqExtra` / `*OptsExtra`；`ParseReqExtra` / `ParseOptExtra` 通过「Marshal→Unmarshal」完成翻译，幂等且写回原字段。
 - **协议对照要记住不对称**：HTTP/FTP 有丰富的 `OptsExtra`（且大量字段重复但刻意不抽公共结构），BT 只有请求侧 `Trackers`，ED2K 两者皆无；参数放请求侧还是选项侧，取决于它在解析阶段还是创建阶段被消费。
+- **批量模型是三要素的容器**：`CreateTaskBatch` 以批级 `Opts` + 成员 `Req`/`Rid`/`Opts` 表达一次多任务提交；`rid` 优先复用解析缓存，成员 `opts` 整体替换而非逐字段合并，全部失败才报错（部分成功）；`Group`/`GroupName` 让整批任务共享一个预留目录并以 `ParentID` 关联，响应统一为 `CreateTaskBatchResult{taskIds, parentId}` 对象。
 - **三态模式贯穿始终**：代理 `follow/none/custom` 与 `*bool` 的「未设置/真/假」，都是用「可空」表达第三种语义「跟随上层配置」。
 
 ## 7. 下一步学习建议
 
-本讲只讲了「数据长什么样」，还没讲「数据怎么流转」。下一讲 **u2-l2（Task 结构与任务状态机）** 将把 `Request + Options` 装进 `Task.Meta`、给 `Resource` 挂上状态与进度，你会看到六种任务状态（ready/wait/running/pause/error/done）如何驱动整个 UI。随后 **u2-l3（DownloaderStoreConfig）** 会讲同一文件下半部分的全局配置体系（`ProtocolConfig` 如何按协议名索引到本讲的各协议 Extra）。
+本讲只讲了「数据长什么样」，还没讲「数据怎么流转」。下一讲 **u2-l2（Task 结构与任务状态机）** 将把 `Request + Options` 装进 `Task.Meta`、给 `Resource` 挂上状态与进度，你会看到六种任务状态（ready/wait/running/pause/error/done）如何驱动整个 UI，以及 `Task.ParentID` 如何表达本讲的分组归属。随后 **u2-l3（DownloaderStoreConfig）** 会讲同一文件下半部分的全局配置体系（`ProtocolConfig` 如何按协议名索引到本讲的各协议 Extra）。批量创建的完整运行时行为（组目录预留、去重后缀、空组清理、批量暂停/删除）则在 **u4-l6（任务分组与批量创建）** 深入展开。
 
 想提前热身的读者可以：
 
-- 通读 [pkg/base/model.go:L212-L231](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/base/model.go#L212-L231) 的 `DownloaderStoreConfig` 字段注释，猜猜 `ProtocolConfig map[string]any` 的 key 是什么（答案在 u2-l3）。
-- 阅读 [pkg/protocol/http/model_test.go:L20-L162](https://github.com/GopeedLab/gopeed/blob/fc0a1e0ef97ff5ec7f2dc875ff28925fe06b28ed/pkg/protocol/http/model_test.go#L20-L162)，体会项目表驱动测试对边界条件的覆盖密度。
+- 通读 [pkg/base/model.go:L215-L234](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/base/model.go#L215-L234) 的 `DownloaderStoreConfig` 字段注释，猜猜 `ProtocolConfig map[string]any` 的 key 是什么（答案在 u2-l3）。
+- 阅读 [_docs/task-batch-api.md](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/_docs/task-batch-api.md)，对照 [pkg/download/downloader_test.go](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/download/downloader_test.go) 中 `taskGroupBatch` 相关测试，看规格文档的每句话对应哪条测试。
+- 阅读 [pkg/protocol/http/model_test.go:L20-L162](https://github.com/GopeedLab/gopeed/blob/1e36599d52bc50c3aea479d348f3e9ccd43a448e/pkg/protocol/http/model_test.go#L20-L162)，体会项目表驱动测试对边界条件的覆盖密度。
