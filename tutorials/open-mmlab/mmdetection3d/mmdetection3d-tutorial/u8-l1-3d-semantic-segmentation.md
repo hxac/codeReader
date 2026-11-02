@@ -2,556 +2,547 @@
 
 ## 1. 本讲目标
 
-本讲是单元 8 的第一讲，从「检测」切换到 mmdet3d 的另一条主线——**3D 语义分割**：对点云中的**每一个点**预测一个类别标签。学完本讲你应该能够：
+前面的单元里，我们一直在和「3D 框」打交道：模型输出的是若干物体的中心、尺寸、朝向。本讲切换到另一大类任务——**3D 语义分割**：模型对点云中的**每一个点**输出一个类别标签（道路、植被、汽车……），不再有框、anchor、NMS。
 
-1. 说出 `Seg3DDataset` 与 `Det3DDataset` 在数据契约上的本质差异（逐点标签、双套标签映射、`scene_idxs` 采样）。
-2. 画出分割器（segmentor）的类层次：`Base3DSegmentor → EncoderDecoder3D → Cylinder3D / MinkUNet`，并解释为什么后两者要重写 `loss/predict`。
-3. 讲清 Cylinder3D 的两大设计：**柱体分区**（柱坐标体素化）与**不对称 3D 稀疏卷积**，并追踪 `voxels` 字典从预处理器到 decode head 的完整数据流。
-4. 讲清 MinkUNet 的**多后端稀疏卷积**（torchsparse / spconv / MinkowskiEngine 可切换）与 `minkunet` 风实体素化的差异。
-5. 对比两种模型的 voxel / 点表示差异，解释 decode head 中「体素级分类 + `point2voxel_map` 回投影」的逐点分类结构。
+学完本讲你应该能够：
 
-本讲默认你已掌握前置内容：数据集基类与管线（u3-l1、u3-l4）、`Det3DDataSample` 与 `PointData`（u2-l4）、检测器分层（u4-l2）、体素化预处理（u4-l3）。
+1. 说出 `Seg3DDataset` 与 `Det3DDataset` 在数据契约上的核心差异（逐点标签 vs 实例框标签、两级标签映射、`dataset` 注入）。
+2. 讲清 `segmentors`（分割器）子系统的组织方式：`Base3DSegmentor` → `EncoderDecoder3D` → `Cylinder3D` / `MinkUNet` 的继承层次，以及 `postprocess_result` 如何把 logits 变成 `pred_pts_seg`。
+3. 理解 Cylinder3D 的两大设计：**柱体分区**（cylindrical voxelization，把点云转到柱坐标再栅格化）与**不对称稀疏卷积**（`(1,3,3)` / `(3,1,3)` 交替的卷积核）。
+4. 理解 MinkUNet 的**立方体量化 + 每体素代表点**路线，以及它对三种稀疏卷积后端（torchsparse / spconv / Minkowski Engine）的适配方式。
+5. 对比两条路线的 voxel/点表示差异，并解释 decode head 中「逐点（逐体素）分类分支」的结构。
 
 ## 2. 前置知识
 
-**语义分割 vs 目标检测**。检测的监督信号是「每个目标一个 7 自由度框 + 类别」，分割的监督信号是「每个点一个整数类别标签」（`pts_semantic_mask`，长度恒等于点数）。这个差异会传导到全链路：数据集要多提供逐点掩码、损失从框回归变成逐点交叉熵、输出从 `pred_instances_3d` 变成 `pred_pts_seg`。
-
-**体素化（voxelization）回顾（u4-l3）**。`Det3DDataPreprocessor.voxelize()` 把 `points` 列表变成 `voxels` 字典。检测线用过的 `hard` / `dynamic` 两种类型本讲不再重复，本讲聚焦分割专用的 `cylindrical` 与 `minkunet` 两种新类型。
-
-**稀疏卷积回顾（u5-l2）**。稀疏卷积网络不存储稠密网格，只存「有值的格点」：特征矩阵 `(M, C)` + 坐标矩阵 `(M, 3~4)`。`SubMConv3d`（submanifold）不改变活跃格点集合，`SparseConv3d`（stride=2 时）会扩散/下采样，`SparseInverseConv3d` 借助正向卷积的索引表（indice table）做可逆上采样。`indice_key` 让同尺寸卷积共享 rule book 以省内存。
-
-**mIoU**。语义分割的标准指标是各类别交并比的平均值：
+**语义分割 vs 检测**。检测回答「哪里有什么物体」（输出实例框 + 类别 + 置信度）；语义分割回答「这个点属于哪一类」（输出与点数等长的标签数组）。3D 语义分割的常用指标是 mIoU（mean Intersection over Union）：
 
 \[
-\text{mIoU} = \frac{1}{C}\sum_{c=1}^{C}\frac{TP_c}{TP_c + FP_c + FN_c}
+\text{mIoU} = \frac{1}{C}\sum_{c=1}^{C}\frac{|P_c \cap G_c|}{|P_c \cup G_c|}
 \]
 
-其中被标注为 `ignore_index` 的点不参与统计。
+其中 \(P_c\)、\(G_c\) 分别是预测和真值中类别 \(c\) 的点集合。mIoU 是**按点数算的集合交并比**，这解释了后面 Cylinder3DHead 为什么用 Lovasz 损失——它是 Lovasz 扩展下对 IoU 的直接凸替代。
 
-**逐点标签的两难**。体素网络在体素（格子）上做计算，但监督和评估都在点上。mmdet3d 的解法是：训练时把逐点标签**降采样**成体素级标签（`voxel_semantic_mask`），推理时把体素级 logits **回投影**到每个点（`point2voxel_map`）。这两个张量都由预处理器在体素化时现场生成，是本讲最重要的数据流线索。
+**逐点标签与 `gt_pts_seg`**。在 [u2-l4](./u2-l4-det3d-data-sample.md) 中我们讲过 `Det3DDataSample` 的点级字段：`gt_pts_seg` / `pred_pts_seg` 装的是 `PointData`，要求所有字段一维且长度等于点数。分割任务的正线就是沿着这个契约展开的。本讲还会遇到两个派生字段：`voxel_semantic_mask`（体素级标签，长度 = 体素数）与 `point2voxel_map`（每个点属于哪个体素的下标，长度 = 点数）——它们不是数据管线产出的，而是模型前处理（体素化）时**动态写进** data_sample 的。
+
+**稀疏卷积**。承接 [u5-l2](./u5-l2-second-backbone-sparse-encoder.md)：点云栅格化后 99% 以上的格子是空的，稀疏卷积只对非空格（active site）做计算。`SubMConv3d` 的输出位置 = 输入位置（矩阵卷积），`SparseConv3d` 会随 stride 改变分辨率，`SparseInverseConv3d` 借助记录的索引表做「逆卷积」上采样。这些算子来自 mmcv 封装的 spconv 库。
+
+**忽略标签 ignore_index**。SemanticKITTI 原始标注有 20 多个大类（官方 id 0~259），但统一基准只评 19 类，其余统统映射为「无标签」。mmdet3d 的约定：19 个有效类是 0~18，无效类统一压成 `ignore_index = 19`（= 类别数），损失计算时跳过。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
+| 文件 | 角色 |
 | --- | --- |
-| `mmdet3d/datasets/seg3d_dataset.py` | 3D 分割数据集基类：双套标签映射、`scene_idxs`、向管线注入 dataset 自身 |
-| `mmdet3d/datasets/semantickitti_dataset.py` | SemanticKITTI 数据集类，极薄，仅重写 `get_seg_label_mapping` |
-| `configs/_base_/datasets/semantickitti.py` | SemanticKITTI 数据配置：`labels_map`、分割管线、`SegMetric` |
-| `mmdet3d/models/segmentors/base.py` | `Base3DSegmentor`：forward 三模式 + `postprocess_result` |
-| `mmdet3d/models/segmentors/encoder_decoder.py` | `EncoderDecoder3D`：backbone + decode_head 的组装与训练/推理骨架 |
-| `mmdet3d/models/segmentors/cylinder3d.py` | Cylinder3D 分割器：串起 voxel_encoder → backbone → decode_head |
-| `mmdet3d/models/segmentors/minkunet.py` | MinkUNet 分割器：薄壳，重写 loss/predict/extract_feat |
-| `mmdet3d/models/data_preprocessors/data_preprocessor.py` | `voxelize()` 的 `cylindrical` / `minkunet` 分支与 `get_voxel_seg` |
-| `mmdet3d/models/voxel_encoders/voxel_encoder.py` | `SegVFE`：分割专用体素特征编码器 |
-| `mmdet3d/models/backbones/cylinder3d.py` | `Asymm3DSpconv`：不对称稀疏卷积 U-Net 骨干 |
-| `mmdet3d/models/decode_heads/cylinder3d_head.py` | `Cylinder3DHead`：体素级 CE + Lovasz 损失、回投影预测 |
-| `mmdet3d/models/decode_heads/decode_head.py` | `Base3DDecodeHead`：分割头基类 |
-| `mmdet3d/models/backbones/minkunet_backbone.py` | `MinkUNetBackbone`：三后端可切换的稀疏 U-Net |
-| `mmdet3d/models/decode_heads/minkunet_head.py` | `MinkUNetHead`：线性分类层 + `point2voxel_map` 回投影 |
-| `mmdet3d/evaluation/metrics/seg_metric.py` | `SegMetric`：调 `seg_eval` 算 mIoU |
-| `configs/_base_/models/cylinder3d.py` / `configs/_base_/models/minkunet.py` | 两个模型的基座配置 |
-| `configs/cylinder3d/cylinder3d_4xb4-3x_semantickitti.py` | Cylinder3D 训练配置（36 epoch） |
-| `demo/pcd_seg_demo.py` | 分割推理 demo 入口（`LidarSeg3DInferencer`） |
+| `mmdet3d/datasets/seg3d_dataset.py` | 分割数据集基类：标签映射、场景采样、`dataset` 注入 |
+| `mmdet3d/datasets/semantickitti_dataset.py` | SemanticKITTI 数据集类，重写标签映射构建 |
+| `mmdet3d/datasets/s3dis_dataset.py` | S3DIS 室内分割数据集类（`S3DISSegDataset`） |
+| `mmdet3d/models/segmentors/base.py` | `Base3DSegmentor`：三模式入口 + `postprocess_result` |
+| `mmdet3d/models/segmentors/encoder_decoder.py` | `EncoderDecoder3D`：编解码分割器模板 |
+| `mmdet3d/models/segmentors/cylinder3d.py` | Cylinder3D 分割器（薄壳 + `voxel_encoder` 槽位） |
+| `mmdet3d/models/segmentors/minkunet.py` | MinkUNet 分割器 |
+| `mmdet3d/models/backbones/cylinder3d.py` | `Asymm3DSpconv` 骨干：不对称块 + U 形塔 + DDCM |
+| `mmdet3d/models/backbones/minkunet_backbone.py` | `MinkUNetBackbone`：三后端稀疏 UNet |
+| `mmdet3d/models/backbones/spvcnn_backone.py` | `SPVCNNBackbone` / `MinkUNetBackboneV2`：体素-点双分支 |
+| `mmdet3d/models/voxel_encoders/voxel_encoder.py` | `SegVFE`：分割体素编码器（逐点 MLP + max 聚合） |
+| `mmdet3d/models/decode_heads/decode_head.py` | `Base3DDecodeHead`：loss 模板 |
+| `mmdet3d/models/decode_heads/cylinder3d_head.py` | `Cylinder3DHead`：稀疏卷积分类 + CE/Lovasz |
+| `mmdet3d/models/decode_heads/minkunet_head.py` | `MinkUNetHead`：Linear 分类 |
+| `mmdet3d/models/data_preprocessors/data_preprocessor.py` | `cylindrical` / `minkunet` 两种体素化分支 |
+| `configs/_base_/models/cylinder3d.py`、`configs/_base_/models/minkunet.py` | 两个模型的基座配置 |
+| `configs/_base_/datasets/semantickitti.py` | SemanticKITTI 数据管线基座 |
+| `demo/pcd_seg_demo.py` | 点云分割 demo 入口 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 Seg3DDataset：3D 分割的数据契约
+本讲的四个最小模块：**Seg3DDataset**（数据侧）、**segmentors 组织**（模型骨架）、**Cylinder3D 全链路**（柱体路线）、**MinkUNet/SPVCNN**（立方体路线）。
+
+### 4.1 Seg3DDataset：分割数据集基类
 
 #### 4.1.1 概念说明
 
-`Seg3DDataset` 是 SemanticKITTI、ScanNet seg、S3DIS 的共同基类。与 `Det3DDataset` 相比，它解决三个分割特有问题：
+[u3-l1](./u3-l1-det3d-dataset-base.md) 讲过 `Det3DDataset` 的职责：读 info pkl、`parse_data_info` 拼路径、`parse_ann_info` 把实例标注包装成 3D 框。分割数据集没有「实例」这个概念，标注就是**与点云逐点对齐的标签数组**（存成 `.bin` 或 `.npy`，每个点一个 int）。所以 `Seg3DDataset` 要解决的问题变成了：
 
-1. **逐点语义标签的映射**：原始数据集的标签 id 往往不连续（SemanticKITTI 官方 id 是 0/1/10/11/13…），训练前必须重映射成连续的 `0~C-1`，未参与的类统一映射到 `ignore_index`。
-2. **子集训练**：metainfo 里传子集 `classes` 时，需要把「没选中的类」也打成 `ignore_index`。
-3. **大场景重采样**：一帧室外点云可达十万点，一个室内场景也可以被采样多次训练，`scene_idxs` 允许同一帧在数据列表里出现多次。
+- **标签空间归一**：不同数据集的原始类别 id 五花八门（SemanticKITTI 里 car 是 10、moving-car 是 252），要统一映射到连续的 0~18 加一个忽略位 19。
+- **子集训练**：允许用户在 `metainfo['classes']` 里只选一部分类，其余全部进忽略位。
+- **场景级采样**：一帧大场景十万点、一帧小场景一千点，如果按帧等概率采样，小场景被「看」的次数相对太少；`scene_idxs` 允许大场景重复出现。
+- **混合数据增强**：LaserMix / PolarMix 这类增强需要**从数据集里再抽别的帧**来混合，因此数据集对象本身要传进管线。
 
 #### 4.1.2 核心流程
 
-`Seg3DDataset` 初始化时的关键加工：
-
 ```text
-读 METAINFO（classes / palette / seg_valid_class_ids / seg_all_class_ids）
-    │
-    ├─ get_label_mapping(new_classes)     → label_mapping(dict) / label2cat / valid_class_ids
-    ├─ get_seg_label_mapping(metainfo)    → seg_label_mapping(np.ndarray, 逐点标签查表)
-    └─ super().__init__()（mmengine BaseDataset：读 info pkl → 逐条 parse_data_info → build pipeline）
-           │
-           └─ get_scene_idxs(scene_idxs)  → data_list 按 scene_idxs 重排（可重复）
+info pkl (v2 格式)
+  └─ Seg3DDataset.__init__
+       ├─ ignore_index = len(classes)        # 默认 19
+       ├─ get_label_mapping(new_classes)     # dict: 原始类别名 → 新标签
+       ├─ get_seg_label_mapping(metainfo)    # np 数组: 原始 seg id → 0..18 / 19
+       └─ BaseDataset.__init__               # 读 pkl、逐条回调 parse_data_info
+            └─ get_scene_idxs → 重排 data_list（大场景重复出现）
+
+每条样本 parse_data_info:
+  lidar_points.lidar_path       → 拼绝对路径
+  pts_semantic_mask_path        → 拼绝对路径
+  seg_label_mapping (np 数组)   → 注入 info，交给管线的 PointSegClassMapping
 ```
 
-两套映射的分工要分清：
+两级映射的分工是本模块的关键：
 
-- `label_mapping`（dict）：给**检测式**的类别子集选择用，描述「原始类 id → 新类 id」。
-- `seg_label_mapping`（ndarray）：给**逐点标签**用，被管线中的 `PointSegClassMapping` 消费——`pts_semantic_mask` 直接用它做数组下标查表。
-
-`seg_label_mapping` 的构造逻辑：长度为 `len(seg_all_class_ids)+1` 的全 `neg_label` 数组，再把有效类 id 的位置写成连续序号：
-
-```text
-seg_max_cat_id = len(seg_all_class_ids)     # 例如 19
-neg_label      = len(seg_valid_class_ids)   # 未选中/无效类 → 映到 ignore 一侧
-seg_label_mapping = np.ones(seg_max_cat_id + 1) * neg_label
-for cls_idx, cat_id in enumerate(seg_valid_class_ids):
-    seg_label_mapping[cat_id] = cls_idx
-```
+- `label_mapping` / `label2cat`：**字典**，作用于「类别 id 集合」层面，决定哪些原始 id 是有效类、哪些进忽略位；主要给配置和评估用。
+- `seg_label_mapping`：**numpy 查表数组**，下标是数据文件里的原始 seg id，值是归一后的标签；由管线里的 `PointSegClassMapping` 消费，做 `label_mapping[pts_semantic_mask]` 一次花式索引。
 
 #### 4.1.3 源码精读
 
-**METAINFO 的四个键**：分割数据集比检测多声明了 `seg_valid_class_ids`（参与训练的原始 id）与 `seg_all_class_ids`（标签文件里可能出现的全部 id），这是逐点标签映射的依据。
+类的注册与 METAINFO：`Seg3DDataset` 直接继承 mmengine 的 `BaseDataset`（注意：与 `Det3DDataset` 是平级兄弟，不是继承关系），METAINFO 比检测版多了 `seg_valid_class_ids`（参与训练的原始 id）与 `seg_all_class_ids`（标签文件里可能出现的全部 id）：
 
-[seg3d_dataset.py:L55-L60](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L55-L60)：`Seg3DDataset` 的 `METAINFO` 声明 `classes / palette / seg_valid_class_ids / seg_all_class_ids` 四个键，子类用真实数据覆盖。
+- [mmdet3d/datasets/seg3d_dataset.py:L12-L16](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L12-L16)：注册 `Seg3DDataset` 并声明它是 ScanNet / S3DIS / SemanticKIT 的公共基类。
+- [mmdet3d/datasets/seg3d_dataset.py:L55-L60](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L55-L60)：`METAINFO` 四件套，`seg_valid_class_ids` / `seg_all_class_ids` 是分割特有。
+- [mmdet3d/datasets/seg3d_dataset.py:L84-L98](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L84-L98)：构造函数里先定 `ignore_index`（缺省即类别数），再做两级标签映射并塞进 `metainfo`——这样映射表会随数据集元信息一起传给管线与可视化。
+- [mmdet3d/datasets/seg3d_dataset.py:L188-L209](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L188-L209)：`get_seg_label_mapping` 的实现：先建一个全填 `len(seg_valid_class_ids)`（即忽略位）的数组，再把有效 id 逐个写成 0、1、2……这就是「无效类全部塌缩到 ignore_index」的机制。
 
-[seg3d_dataset.py:L86-L98](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L86-L98)：构造函数中先定 `ignore_index`（缺省为 `len(classes)`，SemanticKITTI 配置里显式传 19），再算 `label_mapping / label2cat / seg_valid_class_ids` 并全部塞进 metainfo——这些元信息随后会随 `dataset_meta` 流向 `SegMetric` 与可视化器。
+`parse_data_info` 与检测版的差异——没有 `ann_info`/`instances` 处理，只有路径拼接与映射表注入：
 
-[seg3d_dataset.py:L188-L209](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L188-L209)：`get_seg_label_mapping` 生成前述的查表数组；注意 `neg_label = len(seg_valid_class_ids)`，即「无效类 → 序号等于有效类数」，配合 `ignore_index=19` 使用。
+- [mmdet3d/datasets/seg3d_dataset.py:L240-L287](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L240-L287)：把 `lidar_points.lidar_path`、`pts_instance_mask_path`、`pts_semantic_mask_path` 拼成绝对路径，并把 `seg_label_mapping` 数组写进 info；测试模式下准备空的 `eval_ann_info`（分割的真值由管线加载、随 data_sample 流转）。
 
-**SemanticKITTI 的特殊之处**：它的原始标签 id 稀疏且含动态目标合并（如 252 moving-car → car），所以配置文件里手工维护了一张 `labels_map` 字典，子类重写 `get_seg_label_mapping` 把这张 dict 物化成数组。
+两个分割特有的行为：
 
-[semantickitti_dataset.py:L91-L95](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/semantickitti_dataset.py#L91-L95)：`SemanticKittiDataset.get_seg_label_mapping` 用 metainfo 里的 `seg_label_mapping`（即配置中的 `labels_map`）与 `max_label` 逐 id 填表，生成长度 260 的映射数组。
+- [mmdet3d/datasets/seg3d_dataset.py:L289-L305](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L289-L305)：训练态的 `prepare_data` 把 `data_info['dataset'] = self` 注入——这是给 LaserMix / PolarMix 等「跨帧混合」增强开的口子，增强类可以拿 dataset 去取别的场景。`Det3DDataset` 没有这一步。
+- [mmdet3d/datasets/seg3d_dataset.py:L307-L329](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L307-L329)：`get_scene_idxs`，支持从 `.npy` 读预计算的场景索引（「点多的场景多采几次」）。
 
-[semantickitti.py:L12-L50](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/datasets/semantickitti.py#L12-L50)：数据配置里的 `labels_map` 把 30 个原始 id 映射到 19 类或 19（unlabeled），`metainfo` 里带着 `seg_label_mapping=labels_map` 和 `max_label=259`。注意 19 既是不存在的第 20 类，也是 `ignore_index`——unlabeled 点在损失里被忽略。
+SemanticKITTI 子类几乎只是换 METAINFO，但重写了 `get_seg_label_mapping`：
 
-**parse_data_info 的「轻」**：分割不需要框标注加工，基类的 `parse_data_info` 只做路径拼接与 `seg_label_mapping` 注入，没有 `parse_ann_info` 一环。
+- [mmdet3d/datasets/semantickitti_dataset.py:L46-L61](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/semantickitti_dataset.py#L46-L61)：19 个类名、调色板、`seg_valid_class_ids = tuple(range(19))`。
+- [mmdet3d/datasets/semantickitti_dataset.py:L91-L95](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/semantickitti_dataset.py#L91-L95)：映射数组直接由配置里的 `seg_label_mapping`（即 `labels_map` 字典）与 `max_label=259` 构建，覆盖基类默认逻辑——因为 SemanticKITTI 的原始 id 不连续（10、25、252……），必须显式给出整张表。
 
-[seg3d_dataset.py:L240-L287](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L240-L287)：拼接 `lidar_points`、`pts_instance_mask_path`、`pts_semantic_mask_path` 为绝对路径，并把 `seg_label_mapping` 写入 info dict 供管线使用（L279-L281）。
+这张表在配置基座里维护，值得对照看：[configs/_base_/datasets/semantickitti.py:L12-L50](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/datasets/semantickitti.py#L12-L50) 把 0（unlabeled）、1（outlier）、52（other-structure）、99（other-object）等统统映到 19，252（moving-car）映到 0（car）——「动/静同类」是 SemanticKITTI 的官方约定。
 
-**prepare_data 的「重」**：与 `Det3DDataset.prepare_data` 的深拷贝 + 过滤不同，分割基类在训练态把 **dataset 自身**塞进 data dict——这是混合增强（PolarMix / LaserMix 需要跨样本拼点云）的接口钩子。
+管线的最后一层加工是 `PointSegClassMapping`：
 
-[seg3d_dataset.py:L289-L305](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L289-L305)：训练分支中 `data_info['dataset'] = self` 后再过管线；测试分支走 mmengine 默认 `prepare_data`。
-
-[seg3d_dataset.py:L307-L329](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L307-L329)：`get_scene_idxs` 支持传 npy 文件或数组重排 `data_list`（同一帧可出现多次）；测试态恒为 `arange`，一次加载完整场景。L122-L124 在 `__init__` 尾部用 `scene_idxs` 重排数据列表。
-
-**分割管线与评估器**：分割的 train/test 管线比检测短得多——没有 3D 框增强，只有加载、标签映射与轻量几何增强。
-
-[semantickitti.py:L69-L98](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/datasets/semantickitti.py#L69-L98)：`train_pipeline` = `LoadPointsFromFile`(4 维：xyz+强度) → `LoadAnnotations3D`(with_seg_3d=True) → `PointSegClassMapping` → `RandomFlip3D` → `GlobalRotScaleTrans` → `Pack3DDetInputs(keys=['points', 'pts_semantic_mask'])`。`pts_semantic_mask` 被打包进 `gt_pts_seg`（见 u3-l8 的路由表）。
-
-[loading.py:L461-L475](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/transforms/loading.py#L461-L475)：`PointSegClassMapping` 的职责就是 `pts_semantic_mask = seg_label_mapping[pts_semantic_mask]`，把原始 id 换成连续训练 id。
-
-[seg_metric.py:L46-L67](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/evaluation/metrics/seg_metric.py#L46-L67) 与 [seg_metric.py:L103-L137](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/evaluation/metrics/seg_metric.py#L103-L137)：`SegMetric.process` 逐帧攒 `(eval_ann_info, pred_pts_seg)` 到 CPU，`compute_metrics` 最后统一调 `seg_eval`（实现在 `mmdet3d/evaluation/functional/seg_eval.py:L70`）算逐类 IoU 与 mIoU——AP 类指标需要全量排序，而 IoU 类指标逐帧可算，但这里仍按 BaseMetric 两段式契约组织。GT 来自 `eval_ann_info['pts_semantic_mask']`（由 `LoadAnnotations3D` 在测试管线里写入，见 u3-l8）。
+- [mmdet3d/datasets/transforms/loading.py:L477-L504](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/transforms/loading.py#L477-L504)：一次花式索引 `label_mapping[pts_semantic_mask]` 完成全部原始 id → 训练 id 的转换，并同步更新 `eval_ann_info`，保证评估与训练看到同一套标签。
 
 #### 4.1.4 代码实践
 
-**实践目标**：亲手验证 `seg_label_mapping` 数组的形状与内容，理解「原始 id → 训练 id」的查表过程。
+**实践目标**：不下载任何数据，手工复现 `get_seg_label_mapping`，验证 SemanticKITTI 的标签映射行为。
 
-**操作步骤**（示例代码，非项目原有）：
+1. 操作步骤（示例代码，非项目原有代码）：
 
-```python
-import numpy as np
-from mmdet3d.datasets import SemanticKittiDataset  # import 顺带完成注册
+   ```python
+   import numpy as np
+   from mmengine import Config
 
-# 复刻 semantickitti_dataset.py L91-95 的逻辑
-labels_map = {0: 19, 1: 19, 10: 0, 11: 1, 30: 5, 252: 0, 259: 4}  # 节选
-max_label = 259
-mapping = np.zeros(max_label + 1, dtype=np.int64)
-for idx in labels_map:
-    mapping[idx] = labels_map[idx]
+   cfg = Config.fromfile('configs/_base_/datasets/semantickitti.py')
+   metainfo = cfg.metainfo
 
-raw_mask = np.array([10, 10, 30, 0, 252, 99], dtype=np.int32)  # 模拟 6 个点的原始标签
-print(mapping[raw_mask])   # 逐点查表
-```
+   # 复刻 SemanticKittiDataset.get_seg_label_mapping 的逻辑
+   table = np.zeros(metainfo['max_label'] + 1, dtype=np.int64)
+   for idx in metainfo['seg_label_mapping']:
+       table[idx] = metainfo['seg_label_mapping'][idx]
 
-**需要观察的现象**：输出应为 `[0 0 5 19 0 19]`——car(10) 与 moving-car(252) 都变成 0，person(30) 变成 5，unlabeled(0) 与 other-object(99) 都变成 19（ignore）。
+   print('table[10] =', table[10], '  # car -> 0')
+   print('table[252] =', table[252], '  # moving-car -> 0')
+   print('table[0] =', table[0], '  # unlabeled -> 19')
+   print('table[1] =', table[1], '  # outlier -> 19')
 
-**预期结果**：确认「`PointSegClassMapping` 就是一次数组下标查表」，且动态/静态同类目标被合并、无效类统一为 19。
+   # 模拟一帧 8 个点的原始标签，走一遍 PointSegClassMapping 的变换
+   raw = np.array([10, 252, 30, 0, 99, 40, 70, 81], dtype=np.int32)
+   print('mapped:', table[raw])
+   ```
 
-**待本地验证**：以上输出需在装好 mmdet3d 的环境中运行确认（`mapping` 本身是纯 numpy 逻辑，不依赖权重）。
+2. 需要观察的现象：`table[10]` 与 `table[252]` 相同（动/静合并）；`table[0]`、`table[1]` 都是 19。
+3. 预期结果：`mapped` 为 `[0 0 5 19 19 8 14 18]`。
+4. 说明：本实践只依赖 mmengine 与仓库配置文件，可在 CPU 环境运行；若你的环境中 `Config.fromfile` 路径不同，请先 `cd` 到仓库根目录。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`Seg3DDataset` 里 `label_mapping`（dict）和 `seg_label_mapping`（ndarray）各自被谁消费？
-**答案**：`label_mapping` 面向类别子集选择，结果进 metainfo（供子集训练与评估用）；`seg_label_mapping` 是逐点标签的查表数组，由管线中的 `PointSegClassMapping` 对 `pts_semantic_mask` 做下标映射。
+**练习 1**：`Seg3DDataset` 与 `Det3DDataset` 都继承 mmengine 的 `BaseDataset`，二者是兄弟关系。说出它们在 `parse_data_info` 阶段的两个关键差异。
 
-**练习 2**：为什么 `SemanticKittiDataset` 要重写 `get_seg_label_mapping`，而 ScanNet seg 类基本不用？
-**答案**：SemanticKITTI 的原始标签 id 稀疏（0/1/10/…/259）且含动态目标合并规则，需要在配置里手工维护 `labels_map` dict（含 `max_label`）再物化成数组；基类默认实现假设 `seg_all_class_ids` 恰是 `0..C-1` 的连续小集合，不适配 SemanticKITTI。
+答案：(1) 检测版要处理 `instances` / `ann_info`（把实例标注包装成 3D 框对象并可能做坐标系转换），分割版完全不做实例处理，只拼接点云与逐点 mask 的路径；(2) 分割版额外注入 `seg_label_mapping` 查表数组（供 `PointSegClassMapping` 使用），并在测试模式准备空的 `eval_ann_info`。
 
-**练习 3**：`serialize_data` 在 `Seg3DDataset` 里默认 False，而 mmengine 默认 True，为什么？
-**答案**：见 [seg3d_dataset.py:L45-L48](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/seg3d_dataset.py#L45-L48) 的 docstring：分割场景单帧点云巨大，序列化共享内存的开销/收益不划算，故默认关闭，由 dataloader worker 各自持有一份。
+**练习 2**：为什么 `ignore_index` 默认取 `len(classes)`（19 类时即 19）？
 
-### 4.2 segmentors 家族：Base3DSegmentor 与 EncoderDecoder3D
+答案：这样无效标签恰好落在有效标签区间 [0, 18] 之外且紧邻其右，`CrossEntropyLoss(ignore_index=19)` 与 Lovasz 损失可以直接跳过这些点；同时 `get_seg_label_mapping` 里「全填 `len(seg_valid_class_ids)`」的初值与它天然对齐。
+
+**练习 3**：`prepare_data` 里 `data_info['dataset'] = self` 这一行为什么只在训练态注入？
+
+答案：它是给 LaserMix / PolarMix 等混合增强准备的——这些增强需要从数据集中再取其他场景来拼贴，只有训练需要；测试/评估管线逐帧推理，注入 dataset 反而会让 info 带着整个数据集引用到处流动（也无法被序列化调试）。
+
+### 4.2 segmentors 的组织：Base3DSegmentor 与 EncoderDecoder3D
 
 #### 4.2.1 概念说明
 
-检测侧的组织单元是 `detector`，分割侧是 `segmentor`。`mmdet3d/models/segmentors/__init__.py` 只导出 5 个类（见 [segmentors/__init__.py:L8-L11](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/__init__.py#L8-L11)）：`Base3DSegmentor`、`EncoderDecoder3D`、`Cylinder3D`、`MinkUNet`、`Seg3DTTAModel`（TTA 已在 u7-l4 讲过）。
+检测模型在 `mmdet3d/models/detectors/` 下自成体系（[u4-l2](./u4-l2-detector-class-hierarchy.md) 的 `Base3DDetector` 分层），分割模型则平行的放在 `mmdet3d/models/segmentors/` 下，一共五个注册类：`Base3DSegmentor`、`EncoderDecoder3D`、`Cylinder3D`、`MinkUNet`、`Seg3DTTAModel`（见 [mmdet3d/models/segmentors/__init__.py:L1-L11](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/__init__.py#L1-L11)）。
 
-- `Base3DSegmentor`：继承 mmengine `BaseModel`，约定 forward 三模式与「输出写进 `pred_pts_seg`」的后处理。
-- `EncoderDecoder3D`：经典「编码器-解码器」分割骨架，组装 `backbone + decode_head (+neck / auxiliary_head / loss_regularization)`，并提供滑窗推理。
-- `Cylinder3D` / `MinkUNet`：体素基分割器，重写 `loss/predict` 以适配 `voxels` 输入。
+`EncoderDecoder3D` 是「编码器-解码器」模板：backbone 提特征、decode_head 出逐点 logits。它同时兼容两类实现——
+
+- **逐点 MLP 路线**（PointNet++ 风格，如室内分割）：输入是 `(B, N, 3+C)` 的稠密点张量，基类的 `loss`/`predict` 可以直接用；
+- **体素化路线**（Cylinder3D / MinkUNet）：输入是 `batch_inputs_dict['voxels']`（体素字典），必须重写 `extract_feat` / `loss` / `predict`。
+
+这个「模板 + 按需重写」的结构是本模块要建立的认知。
 
 #### 4.2.2 核心流程
 
-`Base3DSegmentor.forward` 的三模式与检测器完全同构（u4-l2）：
+训练与推理的两条主线：
 
 ```text
-mode='loss'    → self.loss(inputs, data_samples)      返回 dict[str, Tensor]
-mode='predict' → self.predict(inputs, data_samples)   返回 List[Det3DDataSample]
-mode='tensor'  → self._forward(inputs, data_samples)  返回裸张量
+loss:      extract_feat(voxels) ──► decode_head.loss ──► loss_by_feat
+                                      （读 gt_pts_seg.voxel_semantic_mask）
+
+predict:   extract_feat(voxels) ──► decode_head.predict
+                                      （借 point2voxel_map 把体素 logits 查回每个点）
+           ──► postprocess_result
+                  seg_pred = seg_logits.argmax(dim=0)
+                  写入 pred_pts_seg.pts_semantic_mask / pts_seg_logits
 ```
 
-`EncoderDecoder3D` 的默认训练/推理主线：
-
-```text
-loss():    torch.stack(points) → extract_feat → decode_head.loss（+aux_head/正则项）
-predict(): 逐场景 inference()
-              ├─ test_cfg.mode == 'slide' → slide_inference()（滑窗 + scatter_add 聚合）
-              └─ test_cfg.mode == 'whole' → whole_inference()（整场景一次前向）
-           → postprocess_result()（argmax → 写 pred_pts_seg / pts_seg_logits）
-```
-
-关键认知：`EncoderDecoder3D` 的默认实现假设输入是**等长点堆叠**的 `(B, N, 3+C)` 张量、decode head 输出 `(B, num_classes, N)` 的点级 logits——这适合室内点基模型。Cylinder3D/MinkUNet 是**体素基**模型，输入是 `voxels` 字典、head 输出体素级 logits，因此二者都绕开默认 `loss/predict` 各自重写，只复用 `EncoderDecoder3D` 的组装逻辑与 `postprocess_result`。
+注意一个与检测不同的推理约束：**分割逐场景推理、batch 恒为 1**（测试 dataloader 的 `batch_size=1`）。因为每个场景点数不同，逐点预测没法像图像那样 pad 后堆叠。
 
 #### 4.2.3 源码精读
 
-[base.py:L66-L109](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/base.py#L66-L109)：`Base3DSegmentor.forward` 按 mode 分发到 `loss/predict/_forward`；`extract_feat`、`loss`、`predict`、`_forward` 均为抽象方法，强制子类实现。
-
-[base.py:L135-L165](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/base.py#L135-L165)：`postprocess_result` 是所有分割器共享的出口——对每场景 logits 沿类别维 `argmax` 得 `seg_pred`，然后以两个 `PointData` 写回 data_sample：`pts_seg_logits.pts_seg_logits`（原始 logits）与 `pred_pts_seg.pts_semantic_mask`（预测标签）。这正是 u2-l4 讲过的「点级数据装 PointData」契约在分割输出的落点。
-
-[encoder_decoder.py:L80-L103](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L80-L103)：`EncoderDecoder3D.__init__` 用 `MODELS.build` 依次构建 backbone / neck / decode_head / auxiliary_head / loss_regularization，并断言必须有 decode_head（L102-L103）。`num_classes` 取自 decode_head（L108）。
-
-[encoder_decoder.py:L226-L262](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L226-L262)：默认 `loss` 在 L245-L246 直接 `torch.stack(batch_inputs_dict['points'])`——这行就是「点基假设」的出处；`_decode_head_forward_train` 把 head 的损失字典加 `decode` 前缀（L176）。
-
-[encoder_decoder.py:L403-L447](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L403-L447)：`slide_inference` 先用 `_sliding_patch_generation` 把场景切成带 50% 重叠的 patch 并把每 patch 补/重采样到固定点数，再分批前向，最后用 `scatter_add_` + `bincount` 对重叠点的 logits 做**计数平均**（L438-L443）——这是滑窗融合的实现位置。
-
-[encoder_decoder.py:L481-L523](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L481-L523)：默认 `predict` 逐场景调用 `inference`（slide/whole 二选一，L470 断言）；注释（L509-L511）点明分割必须逐点输出、无法靠下采样对齐 batch，所以**一次只测一个场景**。Cylinder3D 的 `test_cfg=dict(mode='whole')`（整场景一次前向），MinkUNet 的 `test_cfg=dict()`。
+- [mmdet3d/models/segmentors/base.py:L66-L109](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/base.py#L66-L109)：`Base3DSegmentor.forward` 的三模式分发（loss / predict / tensor），与检测器 `Base3DDetector` 的约定完全一致——MMEngine 的 `train_step`/`test_step` 就是按这三个模式名调用的。
+- [mmdet3d/models/segmentors/base.py:L135-L165](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/base.py#L135-L165)：`postprocess_result`——对每帧的 `(num_classes, N)` logits 做 `argmax(dim=0)` 得逐点类别，然后把 logits 与预测分别以 `pts_seg_logits`、`pred_pts_seg`（均为 `PointData`）写回 data_sample。这就是「分割版 `add_pred_to_datasample`」。
+- [mmdet3d/models/segmentors/encoder_decoder.py:L80-L103](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L80-L103)：`EncoderDecoder3D.__init__` 组装 backbone / neck（可选）/ decode_head / auxiliary_head / loss_regularization，并断言必须有 decode_head。文件头注释（L29-L53）给出了完整的调用链图。
+- [mmdet3d/models/segmentors/encoder_decoder.py:L226-L262](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L226-L262)：基类 `loss` 在 L245-246 直接 `torch.stack(batch_inputs_dict['points'])`——这句话只对「等点数堆叠」的逐点 MLP 模型成立，体素模型必须绕开它（下一模块的 Cylinder3D / MinkUNet 都重写了 `loss`）。
+- [mmdet3d/models/segmentors/encoder_decoder.py:L481-L523](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L481-L523)：基类 `predict`：逐场景调 `inference`（slide / whole 两模式，见 [L456-L479](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L456-L479)），`slide` 模式按滑窗切块推理后用 `scatter_add_` 把重叠 patch 的 logits 求平均（[L403-L447](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/encoder_decoder.py#L403-L447)），这是室内大场景的常用做法；Cylinder3D/MinkUNet 走 `whole` 模式并重写了 predict。
+- [mmdet3d/models/decode_heads/decode_head.py:L118-L158](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/decode_head.py#L118-L158)：`Base3DDecodeHead.loss` 的两步模板：`forward` 出 logits → `loss_by_feat` 算损失；默认 `_stack_batch_gt` 读的是 `gt_pts_seg.pts_semantic_mask`（点级），体素头会重写为读 `voxel_semantic_mask`。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用配置直接构建 Cylinder3D segmentor，确认「EncoderDecoder3D 组装 + 子类扩展 voxel_encoder」的层次关系。
+**实践目标**：源码阅读型实践——画出「logits → Det3DDataSample」的最后一步，并用伪输入手工验证 `postprocess_result` 的形状语义。
 
-**操作步骤**（示例代码）：
+1. 操作步骤（示例代码）：
 
-```python
-from mmengine.config import Config
-from mmdet3d.registry import MODELS
+   ```python
+   import torch
+   from mmdet3d.structures import Det3DDataSample, PointData
 
-cfg = Config.fromfile('configs/_base_/models/cylinder3d.py')
-model = MODELS.build(cfg.model)
+   # 伪造一帧 5 个点、3 个类别的 logits，形状 (num_classes, N)
+   seg_logits = torch.tensor([[0.1, 0.9, 0.2, 0.8, 0.3],
+                              [0.5, 0.1, 0.4, 0.2, 0.6],
+                              [0.4, 0.0, 0.4, 0.0, 0.1]])
+   sample = Det3DDataSample()
+   sample.set_data({'gt_pts_seg': PointData(pts_semantic_mask=torch.zeros(5, dtype=torch.long))})
 
-print(type(model).__mro__)            # Cylinder3D → EncoderDecoder3D → Base3DSegmentor → BaseModel
-print(hasattr(model, 'voxel_encoder')) # True：Cylinder3D 独有
-print(model.num_classes)               # 20（含 ignore 类槽位，来自 decode_head）
-```
+   from mmdet3d.models.segmentors.base import Base3DSegmentor
+   # postprocess_result 是普通实例方法但函数体未用到 self，
+   # 因此可传 None 以未绑定方式调用（Base3DSegmentor 是抽象类无法实例化）
+   results = Base3DSegmentor.postprocess_result(None, [seg_logits], [sample])
 
-**需要观察的现象**：MRO 列表里 `Cylinder3D` 在 `EncoderDecoder3D` 之前；`voxel_encoder` 属性存在而 `EncoderDecoder3D` 基类不认识它。
+   pred = results[0].pred_pts_seg.pts_semantic_mask
+   print('逐点类别:', pred.tolist())
+   print('logits 形状:', results[0].pts_seg_logits.pts_seg_logits.shape)
+   ```
 
-**预期结果**：验证 `MODELS.build` 能从 dict 滚出整棵分割器对象树（注册器机制见 u4-l1），且 Cylinder3D 的扩展点只有一个 `voxel_encoder`。
-
-**待本地验证**：需在安装了 mmcv（含 spconv 算子）的环境中运行；若缺 spconv，`Asymm3DSpconv` 中的 `SubMConv3d` 导入会失败。
+2. 需要观察的现象：`argmax(dim=0)` 沿类别维取最大，逐点类别应与每列最大值的位置一致。
+3. 预期结果：逐点类别为 `[1, 0, 1, 0, 1]`（逐列比较三行 logits，并列时取先出现者）；logits 形状 `torch.Size([3, 5])`。
+4. 说明：需要安装好 mmdet3d 依赖后才可运行（`import mmdet3d` 成功）；如暂无环境，可对照源码 [base.py:L156-L164](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/base.py#L156-L164) 手工推演，结论相同。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：`EncoderDecoder3D` 的 `auxiliary_head` 与 `loss_regularization` 各自的作用是什么？
-**答案**：`auxiliary_head` 挂在骨干中间特征上做深监督（训练期额外损失，推理时弃用，见类 docstring L21-L22）；`loss_regularization` 对模型权重施正则损失（`_loss_regularization_forward_train` L211-L224，直接传入 `self.modules()`）。Cylinder3D/MinkUNet 的配置里两者均为 None。
+**练习 1**：为什么 Cylinder3D 和 MinkUNet 都要重写 `EncoderDecoder3D` 的 `loss` / `predict`，而不是直接复用？
 
-**练习 2**：为什么 `Cylinder3D.predict` 里要 `seg_logits_list[i].transpose(0, 1)`？
-**答案**：head 的 `predict` 返回每场景 `(num_classes, N)` 的点级 logits（沿类别维 argmax 方便），而 `postprocess_result` 里 `seg_logits.argmax(dim=0)` 约定类别在第 0 维——两个子类统一 transpose 对齐（[cylinder3d.py:L141-L142](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L141-L142)）。
+答案：基类 `loss` 假设输入是可 `torch.stack` 的等长点张量（逐点 MLP 路线），而体素路线的输入是 `batch_inputs_dict['voxels']` 字典且体素数各帧不同；基类 `predict` 走 `inference`→`encode_decode` 链路且不处理体素→点的回查。因此两个体素分割器都重写这三方法，绕过滑窗与堆叠逻辑。
+
+**练习 2**：`postprocess_result` 里写入的 `pred_pts_seg` 与 `pts_seg_logits` 分别给谁消费？
+
+答案：`pred_pts_seg.pts_semantic_mask`（整数类别）供 `SegMetric` 计算 mIoU、供可视化上色；`pts_seg_logits`（softmax 前的浮点 logits）保留原始置信度信息，供 TTA（`Seg3DTTAModel` 对多增强视图的 logits 取平均）等需要软输出的场合。
+
+**练习 3**：分割测试为什么 `batch_size=1`？
+
+答案：逐点预测要求输出长度与输入点数一致，不同场景点数不同，无法像图像那样 pad 到同一尺寸再堆叠；`Cylinder3D.predict` 的 docstring 明确写了「only support testing one scene every time」。
 
 ### 4.3 Cylinder3D 全链路：柱体分区与不对称稀疏卷积
 
 #### 4.3.1 概念说明
 
-Cylinder3D（CVPR 2021）针对室外 LiDAR 点云的两大特性设计：
+Cylinder3D（论文 *Cylindrical and Asymmetrical 3D Convolution Networks for LiDAR Segmentation*）的两个名字来源就是它的两个设计：
 
-1. **密度随距离急剧衰减**。笛卡尔体素下，远处格子大多为空、近处格子点数爆炸，格间点数极不均衡。**柱体分区（cylindrical partition）** 改用柱坐标 \((\rho, \phi, z)\) 划格：方位角 \(\phi\) 天然等分圆周，使远近处的格子在角度上均匀、每格点数更平衡。网格为 `480 × 360 × 32`，范围 \([0, -\pi, -4, 50, \pi, 2]\)。
-2. **z 轴与 BEV 两平面语义不同**。论文发现对 z 维无差别使用 3×3×3 卷积并无收益，于是用**不对称卷积**：BEV 两个方向用 (3,1,3)/(1,3,3) 交错，z 方向保持 3；下采样也优先压 BEV（stride (2,2,1)），z 维只在特定层下采样。
-
-坐标换算：
+**柱体分区（cylindrical partition）**。把点云从笛卡尔坐标 \((x,y,z)\) 转到柱坐标 \((\rho,\varphi,z)\) 再栅格化：
 
 \[
-\rho = \sqrt{x^2 + y^2}, \quad \phi = \mathrm{atan2}(y, x), \quad z = z
+\rho = \sqrt{x^2 + y^2}, \qquad \varphi = \arctan2(y, x)
 \]
+
+为什么？LiDAR 的点密度随距离平方衰减：笛卡尔网格下，近处格子挤爆、远处格子常年空置，格间点数极度失衡。柱形网格的每个格子是「固定角度 × 固定径向长度」的楔形，角分辨率与传感器扫描线天然对齐，米制尺寸随 \(\rho\) 增大而增大，恰好补偿密度衰减，使各格子点数更均衡。配置里 `grid_shape = [480, 360, 32]` 即径向 480 格 × 角向 360 格 × 高度 32 格。
+
+**不对称卷积（asymmetrical convolution）**。普通 3D 卷积用 \((3,3,3)\) 核，对 LiDAR 点云有两个不合适：一是计算量大，二是点云的三个轴统计特性不同（BEV 平面内各向同性、高度轴分布很薄）。Cylinder3D 把核拆成 \((1,3,3)\) 与 \((3,1,3)\) 两支互补使用，再辅以高度方向错开的下采样策略。
 
 #### 4.3.2 核心流程
 
-Cylinder3D 一次 `loss` 前向的完整数据流：
+一帧点云在 Cylinder3D 中的完整旅程：
 
 ```text
-points (List[Tensor (N,4)])                         # xyz + 强度
-  │ Det3DDataPreprocessor.voxelize(voxel_type='cylindrical')
-  │   ├─ 直角坐标 → 柱坐标 (rho, phi, z)，clamp 到范围
-  │   ├─ floor((polar - min) / voxel_size) → res_coors (N,3)
-  │   ├─ get_voxel_seg(res_coors, data_sample)
-  │   │     训练: one-hot 逐点标签 → dynamic_scatter_3d(mean) → argmax
-  │   │           ⇒ voxel_semantic_mask (体素级标签, 多数投票) + point2voxel_map
-  │   │     测试: 只生成 point2voxel_map
-  │   └─ res_voxels = cat(rho, phi, z, x, y, intensity) → (N, 6)；coors 补 batch 列
+(N, 4) 点云 (x, y, z, intensity)
+  │  Det3DDataPreprocessor.voxelize (voxel_type='cylindrical')
+  │    1) 转柱坐标 (rho, phi, z)，clamp 到 [0,50]×[-π,π]×[-4,2]
+  │    2) floor((p - min) / voxel_size) 得每点柱格坐标 coors (N, 3)
+  │    3) get_voxel_seg: 训练时 one-hot 标签按格 mean 聚合 + argmax
+  │       → voxel_semantic_mask（体素标签）、point2voxel_map（点→体素下标）
+  │    4) voxels 特征 = (rho, phi, z, x, y, intensity) 拼成 6 维
   ▼
-voxels dict {voxels(N,6), coors(N,4)}
-  │ SegVFE：逐点 [6 + 3(到格心偏移)] → Linear 64/128/256/256 → max 池化到体素 → 压缩到 16
+SegVFE（voxel_encoder）
+  │    逐点 Linear+BN+ReLU（64→128→256→256），点到中心偏移 3 维拼接
+  │    DynamicScatter max 把点特征聚合为体素特征，压缩 256→16
   ▼
-Asymm3DSpconv：SparseConvTensor(16ch) → down_context → 4×DownBlock(2×通道) → 4×UpBlock(逆卷积上采样+skip) → DDCM → concat → 128ch
-  │
-  ▼ Cylinder3DHead：SubMConv3d(128→20, 3³) ⇒ 每体素 20 类 logits
-  │ 训练: loss_by_feat → CE + Lovasz（体素级，ignore_index=19）
-  │ 推理: 按 coors[:,0] 过滤本场景体素 → seg_logits[point2voxel_map] 回投影到每点
-  ▼ postprocess_result → pred_pts_seg.pts_semantic_mask (N,)
+Asymm3DSpconv（backbone）
+  │    SparseConvTensor(features, coors, grid_size, batch)
+  │    down_context → 4×Down（stride=2 / 2 / (2,2,1) / (2,2,1)）
+  │    4×Up（SparseInverseConv3d 逆卷积 + skip 相加）→ DDCM
+  ▼
+Cylinder3DHead（decode_head）
+  │    SubMConv3d(128→20)：逐体素分类 logits
+  │    训练: CE + Lovasz（体素标签）
+  │    推理: coors 拆 batch → point2voxel_map 查回每个点
+  ▼
+postprocess_result → pred_pts_seg.pts_semantic_mask (N,)
 ```
+
+体素尺寸由 grid_shape 反推（注意分母是 `grid_shape - 1`，端点包含）：
+
+\[
+\text{voxel\_size} = \frac{\text{range}_{\max} - \text{range}_{\min}}{\text{grid\_shape} - 1}
+\]
 
 #### 4.3.3 源码精读
 
-**（a）柱体体素化**。配置入口在模型基座里：
+**入口配置**。模型基座把四个部件拼在一起：
 
-[models/cylinder3d.py:L1-L14](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/cylinder3d.py#L1-L14)：`grid_shape=[480,360,32]`、`point_cloud_range=[0,-π,-4,50,π,2]`、`max_num_points=-1, max_voxels=-1`（cylindrical 分支本来就不吃这两个上限，只依赖 grid/range）、`voxel_type='cylindrical'`。`VoxelizationByGridShape` 由 grid_shape 反推 `voxel_size = (range)/(grid-1)`（u4-l3 已讲），这里得到 \((50/479,\ 2\pi/359,\ 6/31)\)。
+- [configs/_base_/models/cylinder3d.py:L1-L21](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/cylinder3d.py#L1-L21)：`grid_shape=[480,360,32]`、柱坐标范围 `[0, -π, -4, 50, π, 2]`、`voxel_type='cylindrical'`；`SegVFE` 的 `in_channels=6`（后面解释为什么是 6）、`feat_compression=16`；backbone `input_channels=16` 正好接上压缩后的通道数。
+- [configs/_base_/models/cylinder3d.py:L28-L40](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/cylinder3d.py#L28-L40)：decode head 20 类（19 有效 + 1 忽略），损失 CE + Lovasz，`test_cfg=dict(mode='whole')` 全场景单次前向。
 
-[data_preprocessor.py:L394-L426](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L394-L426)：`cylindrical` 分支逐样本做坐标换算（L397-L399）、按范围 clamp（L404-L415）、`floor` 得整数格坐标（L416-L418）、调用 `get_voxel_seg`（L419）、补 batch 列（L420），并把 `res_voxels` 拼成 **(rho, phi, z, x, y, intensity) 共 6 列**（L421-L422）——注意特征里同时保留柱坐标与原始 x,y，这就是 `SegVFE` `in_channels=6` 的来源。
+**分割器薄壳**。`Cylinder3D` 相对 `EncoderDecoder3D` 只加了 `voxel_encoder` 槽位并重写三个方法：
 
-[data_preprocessor.py:L470-L492](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L470-L492)：`get_voxel_seg` 训练分支把 `pts_semantic_mask` one-hot 后按格 mean 再 argmax——即**每格取出现次数最多的标签**（多数投票）作为 `voxel_semantic_mask`，同时拿到 `point2voxel_map`；测试分支用全 1 伪张量走同一 scatter，只为拿 `point2voxel_map`。这两个张量都直接写进 `data_sample`（随 `gt_pts_seg` / 根级字段流转）。
+- [mmdet3d/models/segmentors/cylinder3d.py:L57-L68](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L57-L68)：先走基类构造（backbone/decode_head 等），再额外 `MODELS.build(voxel_encoder)` 构建 `SegVFE`。
+- [mmdet3d/models/segmentors/cylinder3d.py:L70-L79](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L70-L79)：`extract_feat` 三步：`voxel_encoder(voxels, coors)` 出体素特征 → 把返回的 `voxel_coors` 写回 `batch_inputs['voxels']`（decode head 推理时要用）→ `backbone(feats, coors, batch_size)`。注意 `len(batch_inputs['points'])` 就被用作 batch_size——每个样本的原始点列表还在。
+- [mmdet3d/models/segmentors/cylinder3d.py:L81-L105](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L81-L105)：`loss`：提特征 → `_decode_head_forward_train`（内部调 `decode_head.loss`，损失名加 `decode.` 前缀），没有辅助头。
+- [mmdet3d/models/segmentors/cylinder3d.py:L107-L144](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L107-L144)：`predict`：注意它把 `batch_inputs_dict` 一并传给 `decode_head.predict`（head 需要里面的 `voxels['voxel_coors']`），随后把 head 输出 `(N, C)` 转置为 `(C, N)` 再进 `postprocess_result`——这个转置就是与基类约定的 `(num_classes, N)` 对齐。
 
-**（b）SegVFE：分割专用体素编码器**。
+**柱体体素化**。全部发生在 data_preprocessor 的 `cylindrical` 分支：
 
-[voxel_encoder.py:L523-L596](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/voxel_encoders/voxel_encoder.py#L523-L596)：构造时 `with_voxel_center=True` 会使 `in_channels` 加 3（L541-L542，6→9）；`feat_channels=[64,128,256,256]` 组成逐点 `nn.Linear` 栈；`vfe_scatter` 是 mmcv 的 `DynamicScatter`（max 模式，L590-L592）；`feat_compression=16` 再加一个 Linear+ReLU 把 256 压到 16（L594-L596），正好等于骨干 `input_channels=16`。
+- [mmdet3d/models/data_preprocessors/data_preprocessor.py:L394-L426](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L394-L426)：逐帧处理：L397-399 三行完成笛卡尔→柱坐标转换（`rho=sqrt(x²+y²)`、`phi=atan2(y,x)`、堆叠 z）；L404-415 把柱坐标 clamp 到范围（兼容 PyTorch 版本的两种写法）；L416-418 `floor((p - min)/voxel_size)` 量化出整数格坐标；L421-422 拼接特征：`cat((polar_res, res[:, :2], res[:, 3:]))` = `(rho, phi, z) + (x, y) + (intensity)` 共 **6 维**——这就是配置里 `in_channels=6` 的来历（保留原始 x、y 是为了让网络仍能感知绝对位置）。
+- [mmdet3d/models/data_preprocessors/data_preprocessor.py:L470-L492](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L470-L492)：`get_voxel_seg`——训练分支把每点标签 one-hot 后按格 `dynamic_scatter_3d(..., 'mean')` 聚合再 `argmax`，即**体素标签 = 格内标签的多数投票**；同时产出的 `point2voxel_map` 无论训练测试都会写入 `data_sample.point2voxel_map`。测试分支用全 1 的伪张量走同样的 scatter，只为拿 `point2voxel_map`。
 
-[voxel_encoder.py:L598-L640](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/voxel_encoders/voxel_encoder.py#L598-L640)：`forward` 里 L613-L622 计算**每个点到所在格中心**的偏移 `f_center`（注意：在柱坐标语义下，`vx/vy/vz` 分别是 rho/phi/z 方向的格宽，`coors[:,1..3]` 是 rho/phi/z 的格索引）；逐点过 Linear 栈后在 L633 用 `vfe_scatter` 把变长点特征聚合成定长体素特征，返回 `(voxel_feats, voxel_coors)`。
+**SegVFE：点级 MLP + max 聚合**。
 
-**（c）Asymm3DSpconv 骨干**。
+- [mmdet3d/models/voxel_encoders/voxel_encoder.py:L598-L640](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/voxel_encoders/voxel_encoder.py#L598-L640)：`forward` 里 L614-622 计算每个点到所在柱格中心的偏移（`f_center`，注意用的是 `coors` 三列格坐标 × `vx/vy/vz`——此时 vx/vy/vz 是柱坐标三个方向的步长），拼到特征上（6+3=9 维）；L629-633 逐点过 `vfe_layers`（Linear+BN+ReLU 堆叠，最后一层纯 Linear），然后 **一次** `vfe_scatter`（`DynamicScatter`，默认 max）把点特征聚合成体素特征；L635-636 可选压缩层把 256 维压到 16 维。与 PointPillars 的 `PillarFeatureNet`（[u5-l1](./u5-l1-voxelnet-pointpillars.md)）相比，这里是「多层 MLP 后一次 max」而非「每层 PFN 后 max」。
 
-[backbones/cylinder3d.py:L460-L481](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L460-L481)：`forward` 把 `(voxel_features, coors, batch_size)` 包成 `SparseConvTensor`（L463-L465），先 `down_context`，再 4 个 DownBlock（每个同时返回池化结果与 skip，L470-L472），反向 4 个 UpBlock 消费 skip（L475-L476），最后 DDCM 并把其输出与 up 的特征 concat（L478-L479）→ 输出 128 通道体素特征。通道账本：16 → down_context 32 → 64/128/256/512 → up 512/256/128/64 → DDCM 64 → concat 64+64=128（与 decode head `channels=128` 严格咬合）。
+**不对称骨干 Asymm3DSpconv**。
 
-[backbones/cylinder3d.py:L43-L59](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L43-L59)：`AsymmResBlock` 内两条支路的卷积核分别是 `(1,3,3)` 与 `(3,1,3)`——**不对称体现在 BEV 的 rho/phi 两个方向**，z 方向恒为 3；两支路结果相加构成残差（[L83-L104](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L83-L104)）。所有 SubMConv3d 共享 `indice_key + 'bef'`（L49），复用同一张 rule book。
+- [mmdet3d/models/backbones/cylinder3d.py:L43-L59](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L43-L59)：`AsymmResBlock` 内两支卷积的核——`conv0_0` 是 `(1,3,3)`、`conv1_0` 是 `(3,1,3)`：一支不含高度核、一支含高度核，shortcut 支与 residual 支互补，最后相加（[L83-L104](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L83-L104) 的 forward）。由于两支的第二层互为转置形状（`(3,1,3)` 接 `(1,3,3)`），整个块仍能覆盖完整 3D 邻域。
+- [mmdet3d/models/backbones/cylinder3d.py:L175-L193](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L175-L193)：`AsymmeDownBlock` 的池化层——`height_pooling` 决定 stride：`height_pooling=True` 用 `stride=2`（三轴同缩，高度减半），否则用 `stride=(2,2,1)`（只缩 BEV、高度保持）。默认 `height_pooing=[True, True, False, False]`（[mmdet3d/models/backbones/cylinder3d.py:L416](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L416)，注意源码参数名就是这个拼写）：**前两级缩高度（32→16→8），后两级高度保持 8 格**——LiDAR 点云高度分布薄、早期快速降低高度分辨率省算力，深层保留高度线索供细粒度区分。
+- [mmdet3d/models/backbones/cylinder3d.py:L286-L317](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L286-L317)：`AsymmeUpBlock` 用 `SparseInverseConv3d`（`indice_key=up_key` 指回对应 down 块记录的索引表）做逆卷积上采样，上采后与 down 阶段保存的 skip 特征相加，再过三个不对称卷积精修——这是稀疏版 U-Net 解码器。
+- [mmdet3d/models/backbones/cylinder3d.py:L320-L389](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L320-L389)：`DDCMBlock`（Dimension-Decomposition based Context Modeling）：三个方向的分解核 `(3,1,1)` / `(1,3,1)` / `(1,1,3)` 各出一路，Sigmoid 门控后相加，再与原特征逐元素相乘（注意力式上下文建模），输出与输入通道一致。
+- [mmdet3d/models/backbones/cylinder3d.py:L460-L481](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L460-L481)：`Asymm3DSpconv.forward`：把 `(features, coors, grid_size, batch_size)` 包成 `SparseConvTensor`（稀疏卷积的标准容器）→ down_context → 4 次 down（每次返回 `(pooled, skip)`，skip 进列表）→ 倒序 4 次 up 吃 skip → DDCM → 与 up 特征通道维 concat，输出仍是 `SparseConvTensor`。
 
-[backbones/cylinder3d.py:L175-L193](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L175-L193)：DownBlock 的池化层有**命名陷阱**：`height_pooling=True` 时用全三维 `stride=2` 的 SparseConv3d（**对 z 也下采样**），`False` 时用 `stride=(2,2,1)`（保 z）。默认 `height_pooing=[True, True, False, False]`（[L416](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L416)，注意源码拼写就是双 o）——前两个 DownBlock 把 z 从 32 压到 8，后两个只压 BEV。`forward` 返回 `(pooled_res, res)` 二元组（[L195-L219](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L195-L219)），`res` 就是 U-Net 的 skip。
+**decode head**。
 
-[backbones/cylinder3d.py:L286-L317](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L286-L317)：UpBlock 用 `SparseInverseConv3d(indice_key=up_key)` 做**精确可逆上采样**（`up_key` 指回对应 DownBlock 的池化卷积，见组装处 [L437-L452](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L437-L452)），上采样后与 skip 的特征直接相加（L303），再过三个不对称卷积。
-
-[backbones/cylinder3d.py:L341-L369](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/cylinder3d.py#L341-L389)：`DDCMBlock`（维度分解上下文建模）用三支核 `(3,1,1)/(1,3,1)/(1,1,3)` 分别只在单一方向看上下文，Sigmoid 激活后求和，再**与输入特征逐元素相乘**充当注意力门控（L387）。
-
-**（d）Cylinder3DHead：体素级分类与回投影**。
-
-[cylinder3d_head.py:L78-L87](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L78-L87)：重写 `build_conv_seg`，分类器是一个 `SubMConv3d(channels→num_classes, kernel=3)`——**分类发生在体素域**，且仍是不对称骨干里的 submanifold 卷积（共享 `indice_key='logit'`）。对比基类默认的 `nn.Conv1d`（[decode_head.py:L106-L116](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/decode_head.py#L106-L116) 的 `cls_seg`），这是体素基 head 的标志。
-
-[cylinder3d_head.py:L94-L122](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L94-L122)：`loss_by_feat` 直接 cat 各样本的 `gt_pts_seg.voxel_semantic_mask`（预处理阶段多数投票的产物）与 `seg_logit.features`（体素级 logits）对齐计算 **CE + Lovasz** 双损失，`ignore_index=19`。Lovasz loss 直接优化 IoU 上界，是分割任务常用的互补损失（配置见 [configs/_base_/models/cylinder3d.py:L32-L38](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/cylinder3d.py#L32-L38)）。
-
-[cylinder3d_head.py:L124-L158](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L124-L158)：`predict` 是**回投影**的实现：用 `voxels['voxel_coors']` 的 batch 列过滤出本场景的体素（L150-L152），再 `seg_logits_sample[point2voxel_map]` 把体素 logits 广播回每个点（L153-L156）——同一格内所有点共享该格的预测。
-
-**（e）segmentor 串线**。
-
-[cylinder3d.py:L68-L79](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L68-L79)：`Cylinder3D` 在 `EncoderDecoder3D` 之上只加一个 `voxel_encoder`；`extract_feat` 依次调用 `voxel_encoder(voxels, coors)` 与 `backbone(feats, coors, batch_size)`，并把编码器去重后的 `voxel_coors` 写回 `voxels` 字典（L74）——供 head 的 `predict` 过滤 batch 用。`loss`（[L81-L105](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L81-L105)）与 `predict`（[L107-L144](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L107-L144)）均绕开基类的 `torch.stack(points)` 默认实现，predict 直接把 head 的 `(num_classes, N)` 输出交给 `postprocess_result`。
-
-**（f）训练配置**。
-
-[cylinder3d_4xb4-3x_semantickitti.py:L1-L38](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/cylinder3d/cylinder3d_4xb4-3x_semantickitti.py#L1-L38)：继承 semantickitti 数据基座 + cylinder3d 模型基座 + default_runtime；AdamW lr=1e-3、36 epoch、milestone 30 衰减 0.1、batch_size=4。README 报告该配置 mIoU 63.1±0.5；加 Laser-Polar Mix 增强的变体可达 67.0（见 [configs/cylinder3d/README.md](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/cylinder3d/README.md)）。
+- [mmdet3d/models/decode_heads/cylinder3d_head.py:L78-L92](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L78-L92)：`build_conv_seg` 重写基类的 1D 卷积为 **`SubMConv3d(channels, num_classes, kernel_size=3)`**——分类器本身就是一个稀疏 3×3×3 卷积，在每个活跃体素位置输出 20 维 logits（「逐点分类分支」的体素版）。
+- [mmdet3d/models/decode_heads/cylinder3d_head.py:L94-L122](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L94-L122)：`loss_by_feat` 把各帧的 `gt_pts_seg.voxel_semantic_mask` 拼接成体素标签序列，与 `seg_logit.features`（`(M, 20)`，M 为全部体素数）对齐后算 CE + Lovasz 双损失，`ignore_index=19`。Lovasz 直接优化 IoU 型目标，与 mIoU 指标同向。
+- [mmdet3d/models/decode_heads/cylinder3d_head.py:L124-L158](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/cylinder3d_head.py#L124-L158)：`predict` 的回查两步：先按 `coors[:, 0] == batch_idx` 把拼接的体素 logits 按帧切开，再用该帧的 `point2voxel_map` 做一次花式索引 `seg_logits_sample[point2voxel_map]`，把 `(M_i, 20)` 的体素 logits 还原成 `(N_i, 20)` 的**逐点 logits**——同一体素内所有点共享该体素的预测。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用 20 行代码手工复现柱体坐标换算与格坐标计算，验证你对 `cylindrical` 分支的理解。
+**实践目标**：运行仓库自带的点云分割 demo，对一帧 KITTI 点云得到逐点语义（本讲的主实践，综合实践一节会继续用它）。
 
-**操作步骤**（示例代码）：
+1. 操作步骤：
 
-```python
-import torch
+   ```bash
+   cd <仓库根目录>
+   # 1) 下载 Cylinder3D SemanticKITTI 预训练权重（链接来自 configs/cylinder3d/README.md）
+   wget https://download.openmmlab.com/mmdetection3d/v1.1.0_models/cylinder3d/cylinder3d_4xb4_3x_semantickitti/cylinder3d_4xb4_3x_semantickitti_20230318_191107-822a8c31.pth
 
-# 与 configs/_base_/models/cylinder3d.py 一致
-grid_shape = torch.tensor([480, 360, 32], dtype=torch.float32)
-pc_range = torch.tensor([0, -3.14159265359, -4, 50, 3.14159265359, 2])
-voxel_size = (pc_range[3:] - pc_range[:3]) / (grid_shape - 1)
-print('voxel_size =', voxel_size)   # rho≈0.1044, phi≈0.01752, z≈0.1935
+   # 2) 对 demo 自带的 KITTI 000008 帧做逐点分割
+   python demo/pcd_seg_demo.py \
+       demo/data/kitti/000008.bin \
+       configs/cylinder3d/cylinder3d_4xb4-3x_semantickitti.py \
+       cylinder3d_4xb4_3x_semantickitti_20230318_191107-822a8c31.pth \
+       --out-dir seg_demo_out
+   ```
 
-pts = torch.tensor([[10.0, 0.0, 1.0, 0.5],   # x, y, z, intensity
-                    [40.0, 40.0, -3.0, 0.2]])
-rho = torch.sqrt(pts[:, 0]**2 + pts[:, 1]**2)
-phi = torch.atan2(pts[:, 1], pts[:, 0])
-polar = torch.stack((rho, phi, pts[:, 2]), dim=-1)
-polar = torch.clamp(polar, pc_range[:3], pc_range[3:])
-coors = torch.floor((polar - pc_range[:3]) / voxel_size).int()
-print('coors =\n', coors)
-print('特征 6 列 =', torch.cat((polar, pts[:, :2], pts[:, 3:]), dim=-1).shape)
-```
-
-**需要观察的现象**：`voxel_size` 的三个分量；点 (10,0,1) 落在 rho≈95 格、phi≈180 格；点 (40,40,-3) 的 rho≈540 超出 480 格上限，被 clamp 到 479（体会 clamp 的作用）。
-
-**预期结果**：`coors` 两行都在 `[0,479]×[0,359]×[0,31]` 内；特征张量形状 `(2, 6)`。与 `data_preprocessor.py` L397-L422 逐行对应。
-
-**待本地验证**：数值输出请在本地运行确认。
+2. 依据：[demo/pcd_seg_demo.py:L70-L75](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/demo/pcd_seg_demo.py#L70-L75) 的 main 只是 `LidarSeg3DInferencer(**init_args)` 加一次调用；权重链接来自 [configs/cylinder3d/README.md:L23](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/cylinder3d/README.md#L23)。注意：README 该行的配置超链接文本写的是 `cylinder3d_8xb2-laser-polar-mix-3x_semantickitti.py`，但 model URL 是 `4xb4` 权重——本实践用 4xb4 配置配 4xb4 权重保持自洽；若想跑 LaserMix/PolarMix 增强版，请改用 `cylinder3d_8xb2-laser-polar-mix-3x_semantickitti.py` 搭配 README 第 24 行的 AMP 权重（两个配置文件都在 `configs/cylinder3d/` 下）。
+3. 需要观察的现象：`seg_demo_out` 目录下生成可视化图片与预测文件；可视化中同一物体的点被染成同一颜色（颜色查表来自 `SemanticKittiDataset.METAINFO['palette']`）。
+4. 预期结果：得到一张按语义着色的点云渲染图与逐点预测结果文件；预测标签取值范围 0~18（19 为忽略类，正常不会出现在预测中）。**具体输出文件名与格式待本地验证**（取决于 `Base3DInferencer` 版本行为）。
+5. 原理提示：[mmdet3d/apis/inferencers/lidar_seg3d_inferencer.py:L99-L124](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/apis/inferencers/lidar_seg3d_inferencer.py#L99-L124)——分割 Inferencer 在初始化时对测试管线做「外科手术」：删掉 `LoadAnnotations3D` 与 `PointSegClassMapping`（推理没有真值），把 `LoadPointsFromFile` 替换成可吃裸路径的 `LidarDet3DInferencerLoader`，其余 transform 原样保留。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：柱体化后每个体素的 6 维输入特征是什么？为什么不直接用 (rho, phi, z)？
-**答案**：`(rho, phi, z, x, y, intensity)`（L421-L422）。保留原始 x, y 与柱坐标并存，让网络既能利用柱坐标的均衡划分，又能接触原始几何量；`SegVFE` 还会再拼 3 维「点到格中心的偏移」。
+**练习 1**：配置里 `in_channels=6`，输入点云是 4 维 `(x, y, z, intensity)`，多出来的 2 维从哪来？
 
-**练习 2**：`height_pooling=True` 到底池化不池化 z 维？
-**答案**：池化。`True` → `SparseConv3d(stride=2)` 三维齐步下采样；`False` → `stride=(2,2,1)` 只压 BEV（L175-L193）。默认序列 `[True, True, False, False]` 使 z 只在前两层从 32 降到 8。
+答案：`voxelize` 的 cylindrical 分支把特征拼成 `(rho, phi, z, x, y, intensity)`：柱坐标 3 维 + 原始 `x, y` 2 维 + 强度 1 维，共 6 维（z 在柱坐标里已出现，不再重复取）。`SegVFE` 再因 `with_voxel_center=True` 追加 3 维中心偏移，进入第一层 Linear 的实际是 9 维。
 
-**练习 3**：训练时的 `voxel_semantic_mask` 是怎么从逐点标签得到的？为什么说它是「有损」的？
-**答案**：逐点标签 one-hot 后按格 mean 再 argmax（[data_preprocessor.py:L480-L487](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L480-L487)），即多数投票。同格内不同类别的点被迫共用一个标签，监督被「压扁」，论文中的 point-wise refinement 模块就是为缓解这一点（README 注明本实现未含该模块）。
+**练习 2**：`point2voxel_map` 与 `voxel_semantic_mask` 分别是什么形状、在什么阶段产生？
 
-### 4.4 MinkUNet：多后端稀疏 UNet 与 minkunet 体素化
+答案：都在 `Det3DDataPreprocessor` 体素化时产生（`get_voxel_seg`）。`point2voxel_map` 长度等于该帧点数 N（每个点指向其体素在该帧体素列表中的下标）；`voxel_semantic_mask` 长度等于体素数 M（格内点标签 one-hot 均值后 argmax 的多数投票），训练时才有语义内容。推理时只生成 `point2voxel_map` 用于把体素预测查回每个点。
+
+**练习 3**：如果把 `height_pooing` 改成 `[False, False, False, False]`，骨干的高度分辨率会怎样变化？对照默认值说明两者的取舍。
+
+答案：改成全 False 后，高度方向全程保持 32 格不缩减（四个 Down 块全部 `stride=(2,2,1)`，只缩 BEV 两轴）；默认 `[True, True, False, False]` 则在前两级把高度 32→16→8、后两级保持 8 格。取舍在于：柱坐标下高度本就只有 32 格且 LiDAR 点的 z 分布很薄，早期降低高度分辨率可以显著省算力；而深层（物体级语义区分）保留 8 格高度，地面、低矮物体与高处植被等仍可分。想直观感受差异，可对比两种设置下 `get_flops.py` 的输出（见 [u7-l5](./u7-l5-analysis-tools.md)）。
+
+### 4.4 MinkUNet 与 SPVCNN：立方体量化与多后端稀疏卷积
 
 #### 4.4.1 概念说明
 
-MinkUNet 出自《4D Spatio-Temporal ConvNets》（Minkowski Engine 一文），是最经典的稀疏卷积 U-Net 分割基线：**在笛卡尔坐标下等距量化**（voxel 0.05m），编码器 kernel=2/stride=2 下采样，解码器转置卷积上采样，skip 连接沿通道 concat。它与 Cylinder3D 的差异不在「是否稀疏」，而在**分区方式**（等距立方体 vs 柱体）与**稀疏库后端**。
+MinkUNet 出自 *4D Spatio-Temporal ConvNets*（Minkowski Engine 论文），是语义分割的另一个经典基线。它与 Cylinder3D 的根本差异在**体素化方式和体素特征来源**：
 
-mmdet3d 的实现把三种稀疏卷积库统一封装成可选后端：`torchsparse`（默认）、`spconv`、`minkowski`（MinkowskiEngine）。三者都是**可选依赖**，需要按官方安装文档单独安装；这就是本讲标题所说「MinkUNet/SPVCNN 依赖的稀疏库」。配套的 `spvcnn_backone.py`（SPVCNN，稀疏体素 + 点分支混合）复用同一套后端封装。
+| 维度 | Cylinder3D | MinkUNet |
+| --- | --- | --- |
+| 体素形状 | 柱坐标楔形格（`voxel_type='cylindrical'`） | 5cm 立方体（`voxel_type='minkunet'`） |
+| 量化公式 | 柱坐标 `floor((p-min)/voxel)` | 笛卡尔 `round(p/voxel)` 后减 min |
+| 体素特征 | 格内全部点过 MLP 后 max 聚合 | 每格取**一个代表点**，特征即该点特征 |
+| 体素标签 | 格内标签多数投票 | 代表点的标签 |
+| batch 维位置 | coors 第 0 列（`batch_first=True`） | coors 最后一列（`batch_first=False`） |
+| 稀疏卷积库 | mmcv/spconv（`SubMConv3d` 等） | torchsparse / spconv2 / Minkowski Engine 三选一 |
+| 分类器 | `SubMConv3d(128→20)` | `nn.Linear(96→19)` |
+
+另一个工程亮点是**后端可切换**：`MinkUNetBackbone` 在构造时根据 `sparseconv_backend` 参数选择 torchsparse、spconv（1.x/2.x）或 Minkowski Engine 的算子集合，同一套 UNet 结构可以在三种稀疏库之间迁移——因为 MinkUNet 的 encoder/decoder 只用到「下采样卷积 / 上采样转置卷积 / 残差块」三种原语，每个库都有对应实现。
+
+SPVCNN（*Searching Efficient 3D Architectures with Sparse Point-Voxel Convolution*）则是在 MinkUNet 骨架里插入**体素分支与点分支的双向转换**：编码早期点特征更细、深层体素更省，两支信息来回穿插。
 
 #### 4.4.2 核心流程
 
-MinkUNet 的前向链路（`voxel_type='minkunet'`）：
-
 ```text
-points (N,4)
-  │ voxelize() minkunet 分支：
-  │   coors = round(xyz / 0.05) - min          # 逐点格坐标
-  │   sparse_quantize：ravel_hash + np.unique  # 去重得 M 个体素
-  │     inds(M,)         每个不重复格的首个点下标
-  │     point2voxel_map(N,)  每个点 → 体素行号（inverse）
-  │   训练: voxel_semantic_mask = pts_semantic_mask[inds]  # 首现点标签
-  │   voxels = points[inds] (M,4)；coors 补 batch 列（batch_first=False → 末列）
+(N, 4) 点云 (x, y, z, intensity)
+  │  Det3DDataPreprocessor.voxelize (voxel_type='minkunet')
+  │    coors = round(xyz / 0.05) - min        # 每点一个整数格坐标
+  │    sparse_quantize(coors)                 # ravel 哈希去重
+  │      ├─ inds            (M,)   代表点下标
+  │      └─ point2voxel_map (N,)   点→体素
+  │    voxels = points[inds]                  # (M, 4) 每体素一个代表点
+  │    gt: voxel_semantic_mask = pts_semantic_mask[inds]
   ▼
-MinkUNetBackbone：SparseTensor → conv_input → 4×encoder(2×通道) → 4×decoder(转置卷积+skip cat)
-  ▼ (M, 96)
-MinkUNetHead：nn.Linear(96→19) ⇒ 每体素 logits
-  │ predict：按 data_sample.batch_idx 过滤 → seg_logits[point2voxel_map] 回投影
-  ▼ postprocess_result → pred_pts_seg
+MinkUNetBackbone（稀疏 UNet）
+  │    conv_input (SubM 3×3×3 ×2)
+  │    encoder: 4 级 SparseConv(k=2, s=2) 下采样 + 残差块
+  │    decoder: 4 级 转置卷积上采样 + skip 拼接/相加 + 残差块
+  ▼
+MinkUNetHead
+  │    nn.Linear(96 → 19)：每个体素直接线性分类
+  │    推理: batch_idx 拆帧 → point2voxel_map 查回每个点
+  ▼
+postprocess_result → pred_pts_seg
 ```
 
 #### 4.4.3 源码精读
 
-**（a）minkunet 体素化：量化 + 哈希去重**。
+**minkunet 体素化**：
 
-[data_preprocessor.py:L427-L460](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L427-L460)：逐样本 `round(xyz/voxel_size)` 后减全局最小值（L431-L432，让格坐标从 0 起），然后 `sparse_quantize` 得 `inds`（去重后每个格的**首个点**下标）与 `point2voxel_map`（L434-L437）。训练态若体素数超过 `max_voxels=80000` 则随机抽体素（L438-L441）。L443-L445：`voxel_semantic_mask = pts_semantic_mask[inds]`——**直接取每格首现点的标签**，不做 Cylinder3D 那样的多数投票。L448-L456：`batch_first=False` 时 batch 列补在**末列**，且把 `batch_idx` 与 `point2voxel_map` 写进 data_sample 供 head 使用。
+- [mmdet3d/models/data_preprocessors/data_preprocessor.py:L427-L460](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L427-L460)：逐帧：L431 `torch.round(res[:, :3] / voxel_size)` 量化（注意是 round 不是 floor，正负对称更贴近 Minkowski Engine 的惯例）再减每维最小值平移到非负；L435-436 `sparse_quantize` 返回代表点下标 `inds` 与 `point2voxel_map`；L443-445 若有真值则 `voxel_semantic_mask = pts_semantic_mask[inds]`（**代表点的标签即体素标签**，无投票）；L448-456 因为 `batch_first=False`，batch 号 pad 在 coors **末列**，同时把每帧代表点的 batch 号写进 `data_sample.batch_idx`，并把 `point2voxel_map` 写入 data_sample。
+- [mmdet3d/models/data_preprocessors/data_preprocessor.py:L494-L528](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L494-L528)：`ravel_hash` 把三维整数坐标压成一维哈希（逐维乘累积极大值），供 `np.unique` 去重——这就是 `sparse_quantize` 的实现思路（文件继续往下是 `sparse_quantize` 本体，返回 `unique` 的 `index`/`inverse`）。
 
-[data_preprocessor.py:L494-L542](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L494-L542)：`ravel_hash` 把 3 列格坐标按列宽进位混成一个 uint64 哈希（L505-L513），`sparse_quantize` 用 `np.unique` 一次性拿到去重下标与逆映射——这是纯 numpy 的 O(N log N) 去重方案，不依赖 CUDA 算子。
+**MinkUNet 分割器与基座配置**：
 
-**（b）MinkUNetBackbone：一套结构，三种后端**。
+- [mmdet3d/models/segmentors/minkunet.py:L24-L42](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/minkunet.py#L24-L42)：`loss` 与 Cylinder3D 同构但更薄——直接 `decode_head.loss(x, data_samples, self.train_cfg)`；[L95-L112](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/minkunet.py#L95-L112)：`extract_feat` 只有两行——`backbone(voxels, coors)`（可选 neck）。注意它**没有** `voxel_encoder` 槽位：MinkUNet 的「体素编码」就是取代表点本身，无需网络。
+- [configs/_base_/models/minkunet.py:L1-L13](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/minkunet.py#L1-L13)：`voxel_type='minkunet'`、`batch_first=False`、`voxel_size=[0.05,0.05,0.05]`、`max_voxels=80000`（训练时随机丢弃多余体素）。
+- [configs/_base_/models/minkunet.py:L14-L31](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/minkunet.py#L14-L31)：backbone `encoder_channels=[32,64,128,256]` / `decoder_channels=[256,128,96,96]` 的对称 UNet；head 是 96→19 的 Linear，`avg_non_ignore=True` 的 CE（按非忽略点数平均）。
 
-[minkunet_backbone.py:L74-L116](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L74-L116)：构造函数按 `sparseconv_backend` 从 `mmdet3d/models/layers/` 下的三套封装（`torchsparse_block` / `sparse_block`(spconv) / `minkowski_engine_block`）里选模块与残差块，并断言对应库已安装。转置卷积只在上采样层使用（minkowski 分支用 `MinkowskiConvNdTranspose`，L111-L113）。
+**MinkUNetBackbone 的三后端**：
 
-[minkunet_backbone.py:L132-L197](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L132-L197)：编码器每级 = 一个 kernel=2/stride=2 的下采样卷积 + 若干残差块；解码器每级 = 转置卷积上采样 + 残差块，首个残差块输入通道要加上对应编码器 lateral 的通道数（L179），即 **concat 式 skip**（与 Cylinder3D 的相加式 skip 不同）。通道账本：4(xyz+i) → 32 → 64 → 128 → 256 → 解码 256 → 128 → 96 → 96。
+- [mmdet3d/models/backbones/minkunet_backbone.py:L62-L77](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L62-L77)：构造参数与后端白名单断言（torchsparse / spconv / minkowski）。
+- [mmdet3d/models/backbones/minkunet_backbone.py:L80-L116](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L80-L116)：后端选择分支——每个分支把 `input_conv` / `encoder_conv` / `decoder_conv` / `residual_block` 四个「原语工厂」绑到对应库的实现（如 spconv 分支用 `make_sparse_convmodule` 的 partial，minkowski 分支的 decoder 用 `MinkowskiConvNdTranspose`）。后面的网络组装代码对这些工厂一视同仁，从而实现一套结构、三种后端。
+- [mmdet3d/models/backbones/minkunet_backbone.py:L118-L144](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L118-L144)：输入两个 SubMConv3d；encoder 每级以 `kernel_size=2, stride=2` 的稀疏卷积下采样（正好对齐格子）。
 
-[minkunet_backbone.py:L199-L245](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/minkunet_backbone.py#L199-L245)：`forward` 按后端把 `(voxel_features, coors)` 包成对应的 SparseTensor（torchsparse 直接收原始 coors；spconv 分支需自己推 `spatial_shape` 与 batch 数，L213-L216），走完 U-Net 后返回裸特征矩阵 `(M, 96)`（`decoder_outs[-1].F` 或 `.features`）。注意 spconv 分支要求 coors 的 batch 列在第 0 列，torchsparse/minkowski 在末列——这与预处理器 `batch_first` 的取值配套。
+**MinkUNetHead 的逐点分类分支**：
 
-**（c）MinkUNetHead：最简 head**。
+- [mmdet3d/models/decode_heads/minkunet_head.py:L27-L30](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/minkunet_head.py#L27-L30)：`build_conv_seg` 返回 `nn.Linear(channels, num_classes)`——与 Cylinder3DHead 的 3×3×3 稀疏卷积分类器相比，这里**没有邻域交互**，纯逐体素线性映射（邻域建模已全部由 backbone 完成）。
+- [mmdet3d/models/decode_heads/minkunet_head.py:L32-L38](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/minkunet_head.py#L32-L38)：`_stack_batch_gt` 读的是 `voxel_semantic_mask`（重写基类的点级版本）。
+- [mmdet3d/models/decode_heads/minkunet_head.py:L40-L62](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/minkunet_head.py#L40-L62)：`predict`：`batch_idx` 拆帧 → `point2voxel_map` 查回逐点 logits，与 Cylinder3DHead 的回查思路一致，只是拆帧依据从 `voxels['voxel_coors']` 换成了预写的 `data_sample.batch_idx`。
 
-[minkunet_head.py:L27-L38](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/minkunet_head.py#L27-L38)：`build_conv_seg` 就是 `nn.Linear(channels, num_classes)`——因为骨干输出已是裸 `(M, C)` 矩阵，分类无需任何卷积；`_stack_batch_gt` cat 的是 `voxel_semantic_mask`（体素级 GT）。
+**SPVCNN 变体**：
 
-[minkunet_head.py:L40-L62](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/decode_heads/minkunet_head.py#L40-L62)：`predict` 用预处理器写在 data_sample 上的 `batch_idx`（每个体素的 batch 号）过滤本场景体素，再用 `point2voxel_map` 回投影到点——与 `Cylinder3DHead.predict` 同构，只是「本场景体素的行号」来源不同（MinkUNet 用 `batch_idx` 掩码，Cylinder3D 用 `voxels['voxel_coors'][:,0]`）。
+- [mmdet3d/models/backbones/spvcnn_backone.py:L20-L76](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/spvcnn_backone.py#L20-L76)：`SPVCNNBackbone` 继承 `MinkUNetBackbone`（仅允许 torchsparse），额外加了三个 `point_transforms`（Linear+BN+ReLU）与 dropout。
+- [mmdet3d/models/backbones/spvcnn_backone.py:L78-L119](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/spvcnn_backone.py#L78-L119)：forward 里 `initial_voxelize` / `voxel_to_point` / `point_to_voxel` 在体素态与点态之间往返切换（编码器末端、解码器中部、末端各一次），`PointTensor` 携带逐点特征一路跟到输出——骨干直接输出**逐点特征**而非体素特征，head 因此可完全按点处理。
+- [mmdet3d/models/backbones/spvcnn_backone.py:L122-L138](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/backbones/spvcnn_backone.py#L122-L138)：`MinkUNetBackboneV2` 进一步限定 torchsparse，是 SPVCNN 在本仓库的注册名。
 
-**（d）segmentor 与配置**。
+**分割专用增强**。MinkUNet 的 SemanticKITTI 配置用了 LaserMix / PolarMix 两种混合增强（这正是 4.1 中 `dataset` 注入的消费者）：
 
-[minkunet.py:L95-L112](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/minkunet.py#L95-L112)：`MinkUNet` 是**纯薄壳**：`extract_feat` 直接 `backbone(voxels, coors)`（它连 voxel_encoder 都不需要，因为量化后的原始 4 维点特征就够用），`loss/predict/_forward` 三个重写都只是绕开基类的 stack-points 假设。
-
-[configs/_base_/models/minkunet.py:L1-L33](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/minkunet.py#L1-L33)：`voxel_type='minkunet'`、`batch_first=False`、`max_voxels=80000`、`voxel_size=[0.05,0.05,0.05]`；head 用普通 CE（`avg_non_ignore=True`，无 Lovasz）、`ignore_index=19`。
-
-[minkunet18_w32_torchsparse_8xb2-amp-15e_semantickitti.py:L1-L54](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/minkunet/minkunet18_w32_torchsparse_8xb2-amp-15e_semantickitti.py#L1-L54)：训练配置覆盖了 train_pipeline（只做全局旋转缩放、不翻转）与优化器（SGD lr=0.24、`AmpOptimWrapper` 混合精度、cosine 退火 15 epoch）——与 Cylinder3D 的 AdamW 低学习率路线形成对照。
-
-**（e）两种 voxel/点表示的对比总表**：
-
-| 维度 | Cylinder3D（`cylindrical`） | MinkUNet（`minkunet`） |
-| --- | --- | --- |
-| 分区坐标 | 柱坐标 (rho, phi, z)，网格 480×360×32 | 笛卡尔 xyz，0.05m 等距立方体 |
-| 格坐标计算 | `floor((clamp(polar)-min)/voxel_size)` | `round(xyz/0.05) - min` |
-| 去重方式 | `SegVFE` 内 mmcv `DynamicScatter`（max） | numpy `ravel_hash` + `np.unique` |
-| 体素输入特征 | (rho,phi,z,x,y,i) 6 列 + 3 维格心偏移，SegVFE 编码 | 原始点 4 列 (x,y,z,i)，无 encoder |
-| 体素级 GT | one-hot mean + argmax（多数投票） | 首现点标签 `mask[inds]` |
-| batch 列位置 | coors 第 0 列（`batch_first=True`） | coors 末列（`batch_first=False`，torchsparse 约定） |
-| head 分类器 | `SubMConv3d(128→20, k=3)`（体素域卷积） | `nn.Linear(96→19)`（裸特征线性层） |
-| 损失 | CE + Lovasz | CE（avg_non_ignore） |
-| head 回投影依据 | `voxels['voxel_coors'][:,0]` + `point2voxel_map` | `data_sample.batch_idx` + `point2voxel_map` |
-| 稀疏库 | mmcv spconv 1.x | torchsparse / spconv2 / MinkowskiEngine 三选一 |
+- [configs/minkunet/minkunet34_w32_torchsparse_8xb2-laser-polar-mix-3x_semantickitti.py:L21-L72](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/minkunet/minkunet34_w32_torchsparse_8xb2-laser-polar-mix-3x_semantickitti.py#L21-L72)：`RandomChoice` 在 LaserMix（[transforms_3d.py:L2541](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/transforms/transforms_3d.py#L2541) 起）与 PolarMix（[transforms_3d.py:L2373](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/transforms/transforms_3d.py#L2373) 起）之间各 50% 抽选；LaserMix 按俯仰角把多帧点云「切片拼贴」，PolarMix 按类别做物体级旋转粘贴。
 
 #### 4.4.4 代码实践
 
-**实践目标**：以源码阅读方式完成上表最难的一格——亲手推演 `ravel_hash` 与 `np.unique` 的输出，确认 `point2voxel_map` 的语义。
+**实践目标**：源码阅读型实践——写 20 行脚本手工复现 `minkunet` 体素化的「量化 + 去重 + 代表点」三步，弄清 `voxels`、`coors`、`point2voxel_map` 的形状关系。
 
-**操作步骤**：
+1. 操作步骤（示例代码，非项目原有代码，仅需 numpy）：
 
-1. 阅读 [data_preprocessor.py:L494-L542](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L494-L542)，注意 `np.unique(..., return_index=True, return_inverse=True)` 三个返回值。
-2. 用如下示例代码（非项目原有）验证：
+   ```python
+   import numpy as np
 
-```python
-import numpy as np
+   rng = np.random.RandomState(0)
+   points = rng.rand(1000, 4).astype(np.float32)   # 模拟 (x,y,z,intensity)
+   points[:, :3] *= 0.5                            # 让落点重复，模拟同格多点
 
-coords = np.array([[0, 0, 0],
-                   [1, 0, 0],
-                   [0, 0, 0],   # 与第 0 行重复
-                   [1, 0, 0]])  # 与第 1 行重复
+   voxel_size = 0.05
+   coors = np.round(points[:, :3] / voxel_size).astype(np.int32)
+   coors -= coors.min(0)                           # 平移到非负，与源码 L431-432 一致
 
-# 复刻 ravel_hash（data_preprocessor.py L494-L514）
-x = coords - coords.min(axis=0)
-xmax = x.max(axis=0) + 1
-h = np.zeros(x.shape[0], dtype=np.uint64)
-for k in range(x.shape[1] - 1):
-    h += x[:, k]
-    h *= xmax[k + 1]
-h += x[:, -1]
+   # 复现 sparse_quantize：先 ravel 哈希再 unique
+   xmax = coors.max(0) + 1
+   h = coors[:, 0] * (xmax[1] * xmax[2]) + coors[:, 1] * xmax[2] + coors[:, 2]
+   uniq, inds, point2voxel_map = np.unique(h, return_index=True, return_inverse=True)
 
-_, indices, inverse = np.unique(h, return_index=True, return_inverse=True)
-print('inds =', indices)          # 每个不重复格的首现点下标
-print('point2voxel_map =', inverse)  # 每个点属于第几个格
-```
+   print('点数 N =', len(points))
+   print('体素数 M =', len(uniq), '        # voxels 形状 = (M, 4)')
+   print('point2voxel_map 形状 =', point2voxel_map.shape, '  # (N,)')
+   print('重复率 = %.1f%%' % (100 * (1 - len(uniq) / len(points))))
+   ```
 
-3. 对照 L443-L445 与 L456：`voxel_semantic_mask = pts_semantic_mask[inds]`、`data_sample.point2voxel_map = inverse`。
-
-**需要观察的现象**：`inds = [0 1]`（格 [0,0,0] 与 [1,0,0] 各自的首现点），`point2voxel_map = [0 1 0 1]`（4 个点分别属于 0 号、1 号格）。
-
-**预期结果**：体素数 M=2 < 点数 N=4；head 推理时 `(M, num_classes)` 的 logits 经 `point2voxel_map` 变成 `(N, num_classes)`，同格点拿到相同 logits。
-
-**待本地验证**：输出请本地运行确认。
+2. 需要观察的现象：因为点了 0.5m 范围内撒 1000 个点、格边只有 0.05m，大量点落入同格，`M` 明显小于 `N`。
+3. 预期结果：`M < N`（本例约几百），`point2voxel_map` 长度恒为 1000；把 `voxel_size` 改成 `0.01` 后 `M` 会显著增大（格子更细、去重更少）。**具体数值待本地验证**（与随机种子有关，现象方向是确定的）。
+4. 对照源码：真实实现在 [data_preprocessor.py:L429-L436](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L429-L436)（量化+去重）与 [L494-L514](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/data_preprocessors/data_preprocessor.py#L494-L514)（`ravel_hash`，注意其哈希按列累乘的顺序与上面伪码等价）。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：MinkUNet 为什么不需要 Cylinder3D 那样的 `SegVFE`？
-**答案**：MinkUNet 的体素特征就是量化后点的原始 4 维坐标+强度（`voxels = points[inds]`），骨干 `conv_input` 直接从 4 通道卷到 `base_channels`；Cylinder3D 的输入是变长的 6+3 维逐点特征，需要 Linear 栈 + max 池化 + 通道压缩才能变成定长体素特征。
+**练习 1**：Cylinder3D 与 MinkUNet 的体素标签（`voxel_semantic_mask`）生成方式有何不同？
 
-**练习 2**：`batch_first` 在两个模型里为什么取值不同？
-**答案**：spconv 1.x（mmcv）的 `SparseConvTensor` 约定 batch 列在第 0 列（与检测线 `hard/dynamic` 一致，`batch_first=True`）；torchsparse 的 `SparseTensor` 约定 batch 列在最后一列（`batch_first=False`）。预处理器据此决定 `F.pad` 补在哪一端（L448-L455）。
+答案：Cylinder3D 把格内所有点的 one-hot 标签做 mean 聚合后 argmax（多数投票，见 `get_voxel_seg`）；MinkUNet 直接取代表点（`inds` 中的第一个落入该格的点）的标签，即 `pts_semantic_mask[inds]`，无任何聚合。
 
-**练习 3**：如果训练时某帧点云量化后有 9 万个体素（超过 `max_voxels=80000`），会发生什么？被丢掉的「体素」对应的点怎么办？
-**答案**：L438-L441 会随机抽 8 万个体素保留。`point2voxel_map` 仍按**未抽样**的 `np.unique` 逆映射生成（L434-L437 在抽样之前），因此被丢体素的点会指向 head 输出中不存在的行——这是阅读时值得注意的边界情形；实践中 0.05m 量化下单帧体素数通常低于该上限（待本地验证具体行为）。
+**练习 2**：为什么 MinkUNet 配置要设 `batch_first=False`，而 Cylinder3D 用默认 `True`？
+
+答案：`batch_first` 决定 batch 号 pad 在 coors 的末列还是首列，本质是配合骨干所依赖的稀疏库的坐标约定：torchsparse 的 `SparseTensor` 约定坐标为 `(x, y, z, batch)`（batch 在最后），而 spconv 的 `SparseConvTensor` 约定 `(batch, z, y, x)`（batch 在最前）。MinkUNetBackbone 主用 torchsparse 所以 `batch_first=False`；Cylinder3D 的 `Asymm3DSpconv` 用 mmcv/spconv 所以默认 True。
+
+**练习 3**：`MinkUNetHead` 的分类器是一个普通 `nn.Linear`，没有邻域卷积，为什么这样就够？
+
+答案：MinkUNet 的 backbone 是完整的稀疏 UNet，decoder 末端每个体素的特征已经聚合了大感受野的邻域信息，head 只需做通道到类别的线性映射；而 Cylinder3DHead 用 `SubMConv3d` 做分类器，相当于在 head 里又补一次 3×3×3 的局部上下文（配合 DDCM 的设计），分工不同。
 
 ## 5. 综合实践
 
-**任务：跑通一次 Cylinder3D 分割推理，并用源码知识解释输出的每一步。**
+把本讲三个模块串起来的任务：**跑通 Cylinder3D 推理，并用一张对比表消化两条体素路线**。
 
-**实践目标**：把本讲四个模块串起来——从 demo 入口出发，依次核对「管线改写 → 柱体体素化 → 骨干前向 → 回投影 → 可视化」。
+**任务 A：跑通 demo（依赖 GPU 环境；无 GPU 可只做任务 B）**
 
-**操作步骤**：
+1. 按 4.3.4 的步骤下载权重并运行 `demo/pcd_seg_demo.py`，对 `demo/data/kitti/000008.bin` 得到逐点语义预测。
+2. 打开输出的预测文件（pkl/json），用 `np.bincount(pred, minlength=20)` 统计每个语义类别的点数，对照 [configs/_base_/datasets/semantickitti.py:L7-L11](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/datasets/semantickitti.py#L7-L11) 的类名表回答：这帧里最多的三类是什么？（KITTI 街景中通常是 vegetation、building、road 一类地形。**待本地验证**。）
 
-1. 下载 Cylinder3D 预训练权重（模型库见 [configs/cylinder3d/README.md](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/cylinder3d/README.md)，本配置对应 checkpoint `cylinder3d_4xb4_3x_semantickitti_20230318_191107-822a8c31.pth`）。
-2. 用仓库自带的 demo 点云运行分割 demo（入口见 [demo/pcd_seg_demo.py:L70-L82](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/demo/pcd_seg_demo.py#L70-L82)，它把参数转交给 `LidarSeg3DInferencer`）：
+**任务 B：填写两条路线的对比表（纯源码阅读，随时可做）**
 
-   ```bash
-   python demo/pcd_seg_demo.py \
-       demo/data/kitti/000008.bin \
-       configs/cylinder3d/cylinder3d_4xb4-3x_semantickitti.py \
-       <checkpoint路径>/cylinder3d_4xb4_3x_semantickitti_20230318_191107-822a8c31.pth \
-       --out-dir outputs/seg_demo
-   ```
+对照 [configs/_base_/models/cylinder3d.py](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/cylinder3d.py) 与 [configs/_base_/models/minkunet.py](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/models/minkunet.py)，逐项填写并注明依据源码行号：
 
-3. 阅读推理管线的「外科手术」：[lidar_seg3d_inferencer.py:L99-L124](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/apis/inferencers/lidar_seg3d_inferencer.py#L99-L124) 会从 test pipeline 中**删掉** `LoadAnnotations3D` 与 `PointSegClassMapping`（L103-L109，推理没有真值），并把 `LoadPointsFromFile` 替换成可吃裸路径的 `LidarDet3DInferencerLoader`（L123）——对照 u1-l3 讲过的检测版改写，注意分割版多删了一个标签映射 transform。
-4. 在 `Cylinder3D.predict`（[cylinder3d.py:L138-L144](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/cylinder3d.py#L138-L144)）处下断点或加日志，打印 `batch_inputs_dict['voxels']['voxels'].shape`、`coors.shape`、`point2voxel_map.shape` 与最终 `seg_logits_list[0].shape`。
-5. 检查输出目录：`outputs/seg_demo/` 下应有可视化图片（`vis_lidar/`，Open3D 渲染、按数据集 palette 上色，见 u7-l3）与 preds 文件。
+| 对比项 | Cylinder3D | MinkUNet |
+| --- | --- | --- |
+| `voxel_type` | ？ | ？ |
+| 体素几何形状 / 分辨率 | ？ | ？ |
+| 点→体素特征（聚合 or 代表点） | ？ | ？ |
+| 体素标签生成 | ？ | ？ |
+| decode head 分类器类型与形状 | ？ | ？ |
+| head 损失函数 | CE + ? | ? |
+| 依赖的稀疏卷积库 | ？ | ？（三选一） |
 
-**需要观察的现象**：
+参考答案（自查）：`cylindrical` vs `minkunet`；柱形格 `[480,360,32]` vs 5cm 立方体；SegVFE max 聚合 vs `points[inds]` 代表点；one-hot mean+argmax 投票 vs 代表点标签直取；`SubMConv3d(128→20)` vs `Linear(96→19)`；CE+Lovasz vs `avg_non_ignore` CE；spconv（mmcv 封装） vs torchsparse/spconv/minkowski 三选一。
 
-- `voxels['voxels']` 形状为 `(N, 6)`（柱坐标 + x,y + 强度），`coors` 为 `(N, 4)`；
-- `point2voxel_map` 长度等于点数 N，`seg_logits_list[0]` 形状为 `(20, N)`——类别数 × 点数，证明「体素级 logits 已被广播回每个点」；
-- 可视化图中道路/车辆/植被等大类颜色与 SemanticKITTI 官方 palette 一致。
+**任务 C（进阶，可选）：tiny SemanticKITTI 训练**
 
-**预期结果**：一张逐点上色的 3D 分割结果图 + 一份含 `pts_semantic_mask`（长度 N 的类别数组）的预测文件。
-
-**待本地验证**：以上命令与形状需要 GPU 环境（mmcv spconv 算子）与权重文件，请在本地运行确认；无 GPU 时可退而完成 4.3.4 / 4.4.4 两个纯 CPU 实践。
-
-**进阶替代方案（tiny 训练）**：若本地已用 `tools/create_data.py` 生成 SemanticKITTI info pkl（现成 pkl 可从 [docs/en/user_guides/dataset_prepare.md:L269](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/docs/en/user_guides/dataset_prepare.md#L269) 的表格下载），可截取少量样本做一档短训练，观察日志中的 `decode.loss_ce / decode.loss_lovasz` 与验证 mIoU：
-
-```bash
-python tools/train.py configs/cylinder3d/cylinder3d_4xb4-3x_semantickitti.py \
-    --cfg-options train_cfg.max_epochs=1 train_dataloader.dataset.ann_file=semantickitti_infos_train.pkl
-```
-
-（`--cfg-options` 的合并语义见 u1-l5；此命令仅为示意，样本裁剪方式请自行组织，待本地验证。）
+若已下载 SemanticKITTI，可仿照 [u7-l1](./u7-l1-training-loop.md) 的方法用 `--cfg-options` 把 `train_dataloader.dataset.ann_file` 指向一个只含几帧的自制 info pkl、`train_cfg.max_epochs=1`，跑一次最小训练，观察日志中的 `decode.loss_ce` 与 `decode.loss_lovasz` 两项损失是否都在下降。
 
 ## 6. 本讲小结
 
-- `Seg3DDataset` 与 `Det3DDataset` 的核心差异在数据契约：逐点标签 `pts_semantic_mask` + 双套映射（dict 型 `label_mapping`、数组型 `seg_label_mapping` 供 `PointSegClassMapping` 查表）+ `scene_idxs` 大场景重采样 + 训练态向管线注入 dataset 自身（服务 PolarMix/LaserMix）。
-- 分割器层次为 `Base3DSegmentor → EncoderDecoder3D → Cylinder3D/MinkUNet`：基类定 forward 三模式与 `postprocess_result`（写 `pred_pts_seg`/`pts_seg_logits` 两个 `PointData`）；`EncoderDecoder3D` 的默认 loss/predict 基于「等长点堆叠」假设，体素基子类必须重写。
-- Cylinder3D 两大设计：**柱体分区**（`voxelize` 的 cylindrical 分支把点换到 (rho,phi,z) 再划 480×360×32 格，特征含柱坐标与原始 x,y 共 6 列）与**不对称稀疏卷积**（(3,1,3)/(1,3,3) 交错、`SparseInverseConv3d` 精确上采样、DDCM 三方向门控）。
-- 逐点分类的统一解法是「体素级分类 + 回投影」：训练时逐点标签被降采样成 `voxel_semantic_mask`（Cylinder3D 多数投票 / MinkUNet 首现点），推理时体素 logits 经 `point2voxel_map` 广播回每个点。
-- MinkUNet 是多后端稀疏 U-Net：`minkunet` 体素化用 `ravel_hash + np.unique` 在 numpy 里去重，骨干用统一封装在 torchsparse/spconv/MinkowskiEngine 间切换，head 退化为一个 `nn.Linear(96→19)`。
-- 评估走 `SegMetric`：`process` 攒 `(eval_ann_info, pred_pts_seg)`，`compute_metrics` 调 `seg_eval` 输出逐类 IoU 与 mIoU。
+- `Seg3DDataset` 与 `Det3DDataset` 平级：没有实例标注与 `parse_ann_info` 链，取而代之的是 `seg_valid_class_ids`/`seg_all_class_ids` 两级标签映射（dict + numpy 查表数组）、`scene_idxs` 场景级重复采样，以及训练态把 `dataset` 对象注入 data_info 以支持 LaserMix/PolarMix 混合增强。
+- 分割器组织是「模板 + 重写」：`Base3DSegmentor` 提供三模式入口与 `postprocess_result`（argmax + 写 `pred_pts_seg`/`pts_seg_logits`）；`EncoderDecoder3D` 是逐点 MLP 与体素两条路线的公共模板，体素路线（Cylinder3D/MinkUNet）重写 `extract_feat/loss/predict` 以处理 `voxels` 字典。
+- Cylinder3D 的两大数据结构创新：**柱体分区**（先转柱坐标 \((\rho,\varphi,z)\) 再栅格化，缓解点密度随距离衰减导致的格子失衡）与**不对称卷积**（`(1,3,3)`/`(3,1,3)` 互补 + 高度方向延迟下采样 + DDCM 维度分解注意力）；其 head 用 `SubMConv3d` 做逐体素分类，CE + Lovasz 双损失。
+- MinkUNet 走**立方体量化 + 每体素代表点**路线：`round(p/voxel)` 量化、哈希去重得 `inds` 与 `point2voxel_map`，体素特征/标签都来自代表点；骨干通过「原语工厂」在 torchsparse/spconv/Minkowski Engine 三后端间切换，head 只是一个 `nn.Linear`。
+- 两条路线共有的关键机制是**点↔体素双向映射**：训练时把逐点标签聚合成体素标签算损失，推理时用 `point2voxel_map` 把体素 logits 查回每个点——这是所有「体素化分割器」的通用范式。
 
 ## 7. 下一步学习建议
 
-本讲覆盖了分割主线的数据集、segmentor 与两大模型。建议接下来：
+本讲完成后，你已经见过了 mmdet3d 的第三类顶层任务（检测 → 分割）。建议按以下顺序继续：
 
-1. **u8-l2（接入自定义数据集）**：把 `Seg3DDataset` 的子类化与 converter 实践一遍，检验你对 `seg_label_mapping`、`ignore_index` 契约的掌握。
-2. **阅读 `configs/spvcnn/` 与 `mmdet3d/models/backbones/spvcnn_backone.py`**：SPVCNN 在 MinkUNet 的体素分支之外加了一条点分支，观察它如何复用本讲的三后端封装，作为「对比阅读」练习。
-3. **阅读 `mmdet3d/models/segmentors/seg3d_tta.py`（`Seg3DTTAModel`）**：结合 u7-l4 的 TTA 讲义，看分割 TTA 为何是「softmax 平均」而非 NMS 合并；配套 tta 配置在 [configs/_base_/datasets/semantickitti.py:L129-L181](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/configs/_base_/datasets/semantickitti.py#L129-L181)。
-4. **顺带一览 `mmdet3d/evaluation/metrics/panoptic_seg_metric.py` 与 `instance_seg_metric.py`**：它们与本讲 `SegMetric` 同构，可自行检验「两段式契约」的普适性。
+1. **u8-l2（接入自定义数据集）**：本讲的 `Seg3DDataset` 标签映射体系是自定义分割数据集的模板，先想清楚你的数据 `seg_all_class_ids` 是什么再动手。
+2. **u8-l3（自定义模型与 example_project）**：试着把 `MinkUNetHead` 的 `build_conv_seg` 换成带一次邻域卷积的版本，走一遍注册器 + custom_imports 流程。
+3. **延伸阅读**：
+   - [mmdet3d/evaluation/metrics/seg_metric.py](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/evaluation/metrics/seg_metric.py)（`SegMetric`，L16 起）：看 mIoU 的 per-dataset 计算；
+   - [mmdet3d/models/segmentors/seg3d_tta.py](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/models/segmentors/seg3d_tta.py)：分割版 TTA 如何对多视图 logits 取平均（呼应 [u7-l4](./u7-l4-inferencers-and-tta.md)）；
+   - [mmdet3d/datasets/transforms/transforms_3d.py](https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/datasets/transforms/transforms_3d.py) 中的 `LaserMix`（L2541）与 `PolarMix`（L2373）：体会「按俯仰角切片」与「按类别粘贴」两种混合增强如何同步变换点与逐点标签。
