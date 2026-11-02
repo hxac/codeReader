@@ -2,136 +2,105 @@
 
 ## 1. 本讲目标
 
-本讲是 BitTorrent 单元（单元 6）的第一讲，回答一个问题：**aria2 拿到一个 `.torrent` 文件后、还没连任何 peer 之前，都做了什么？**
+本讲是 BitTorrent 单元（单元 6）的第一讲，回答一个总问题：**一个 `.torrent` 文件里的字节，是如何变成 aria2 能理解的下载任务的？**
 
 学完本讲你应该能够：
 
-1. 读懂 bencode 编码，并说出 aria2 用哪条调用链把 `.torrent` 字节流变成内存中的 `ValueBase` 树。
-2. 跟踪 `bittorrent_helper.cc` 中 `processRootDictionary` 的完整流程：infohash 怎么算、piece 哈希怎么切、文件列表怎么变成 `FileEntry`、以及「piece 数量与总长必须吻合」的一致性校验。
-3. 说出 `AnnounceList`/`AnnounceTier` 的两层结构，解释 aria2 如何用「顺序 + 移动规则」表达 tracker 的优先级（而不是数值权重）。
-4. 列出 `TorrentAttribute` 承载的全部 BT 运行时信息，以及它如何挂载到 `DownloadContext` 的 `CTX_ATTR_BT` 属性槽上。
-
-本讲只讲「静态元数据的解析」，不涉及任何网络交互——握手、peer 交换、announce 请求分别在后续讲义（u6-l3、u6-l4、u6-l7）中展开。
+1. 徒手读懂 bencode 编码（.torrent 文件的本体格式），并说出 `bencode2` 模块的 decode/encode 两条链路。
+2. 跟踪 `bittorrent_helper::load` → `processRootDictionary` 的完整解析流程，说出 torrent 字典每个关键字段（`info`、`infohash`、`piece length`、`pieces`、`files`、`name`、`announce`/`announce-list`、`nodes`）的读取位置与校验规则。
+3. 解释 `TorrentAttribute` 承载哪些 BT 专属运行时信息，以及它与 `DownloadContext` 公共字段的分界。
+4. 理解 `AnnounceList`/`AnnounceTier` 如何组织多 tracker 层级（tier），以及 announce 成功/失败时层级如何轮换。
 
 ## 2. 前置知识
 
-### 2.1 .torrent 文件是什么
+### 2.1 BitTorrent 与 .torrent 文件
 
-`.torrent` 文件（俗称「种子」）是一个 bencode 编码的字典，描述「下载什么、从哪些 tracker 找人、每块数据校验和是什么」。一个最小种子的骨架是：
+BitTorrent 是一种 P2P 文件分发协议：你不再只从服务器下载，而是同时从其他下载者（peer）处获取数据。`.torrent` 文件（也叫 metainfo 文件）就是一份"任务说明书"，它回答三件事：
 
-```text
-d                          <- 字典开始
-  8:announce               <- 键：字符串 "announce"，长度前缀 8
-  30:http://tracker/announce
-  4:info                   <- 键："info"，值是子字典（种子核心）
-  d
-    4:name5:hello          <- 文件名
-    6:lengthi1024e         <- 文件长度：整数 1024
-    12:piece lengthi262144e
-    6:pieces<20×N 字节的二进制 SHA-1>
-  e
-e                          <- 字典结束
-```
+- **下什么**：文件名、文件列表、每个文件多大；
+- **怎么校验**：数据被切成等长的 piece，每个 piece 有一个 SHA-1 哈希；
+- **去哪找同伴**：tracker 服务器列表（以及可选的 DHT 引导节点）。
 
-### 2.2 bencode 语法速览
+### 2.2 bencode 语法速成
 
-bencode 只有四种类型，每种都有明确的定界符：
+.torrent 文件的全部内容就是一个 bencode 编码的字典。bencode 只有四种类型，语法极简：
 
-| 类型 | 编码 | 例子 | 解码结果 |
-|---|---|---|---|
-| 整数 | `i<十进制>e` | `i1024e` | 1024 |
-| 字符串 | `<长度>:<字节>` | `5:hello` | `"hello"` |
-| 列表 | `l<元素...>e` | `l5:helloi1ee` | `["hello", 1]` |
-| 字典 | `d<键1><值1><键2><值2>...e` | `d1:ai1ee` | `{"a": 1}` |
+| 类型 | 语法 | 例子 | 含义 |
+|------|------|------|------|
+| 字符串 | `<十进制长度>:<原始字节>` | `4:spam` | 字符串 "spam" |
+| 整数 | `i<十进制>e` | `i128e` | 整数 128 |
+| 列表 | `l<元素...>e` | `l4:spami1ee` | ["spam", 1] |
+| 字典 | `d<键值对...>e` | `d3:bar4:spam3:fooi42ee` | {"bar":"spam","foo":42} |
 
-两个重要约定：
+字典的键必须是字符串，且规范要求**按键名排序**存放。注意长度前缀说的是**字节数**，不是字符数，所以 bencode 天然是二进制安全的。
 
-- **字典的键必须是字符串，且按字节序排序**（规范要求）。这个约定后来成了 infohash 能「重新编码还原」的关键。
-- 字符串是**原始字节串**，不是文本——`pieces` 字段里存的就是 20 字节一段的二进制 SHA-1，用文本编辑器打开种子会看到乱码，这是正常的。
+### 2.3 ValueBase：内存中的动态类型树
 
-### 2.3 infohash 与 SHA-1
+C++ 没有原生"字典/列表"这种动态类型，aria2 用 `ValueBase` 家族（`String`/`Integer`/`Bool`/`Null`/`List`/`Dict`）在内存里表示解码后的 bencode/JSON 树。其中 `Dict` 底层是 `std::map`（[src/ValueBase.h:247-249](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBase.h#L247-L249)），键始终有序——这一点对本讲的 infohash 计算至关重要。ValueBase 的深入剖析在 u9-l2，本讲只需把它当作"已经解析好的树"来用。
 
-infohash 是整个 `info` 子字典字节串的 SHA-1 摘要（20 字节）：
+### 2.4 承接前讲
 
-\[ \text{infoHash} = \mathrm{SHA1}(\mathrm{bencode}(\text{info 字典})) \]
-
-它在 BT 网络里充当「内容身份证」：DHT 用它做键、magnet 链接里的 `xt=urn:btih:<hex>` 就是它的十六进制、tracker 请求里的 `info_hash` 参数也是它。**info 字典里任何一个字节变了，infohash 就变**，网络会把它当成另一个种子。
-
-### 2.4 tracker 与 tier（层）
-
-tracker 是一台 HTTP/UDP 服务器，客户端向它「报到」（announce）并换取其他下载者的地址。种子可以用两级结构描述多个 tracker：
-
-- 外层：tier（层）列表。**层与层之间是主备关系**——第 1 层全挂了才轮到第 2 层。
-- 内层：同一层内的 tracker 互为镜像，随便挑一个用。
-
-这就是 `announce-list` 的结构：`[[t1, t2], [t3]]` 表示「先试 t1/t2 这层，不行再用 t3」。
-
-### 2.5 与前面讲义的衔接
-
-- u3-l2 讲过 `DownloadContext` 是任务元数据的聚合根，协议专属信息通过 `ContextAttribute`「空基类 + 枚举槽位」挂载，目前只有 `CTX_ATTR_BT` 一个槽——本讲就是这个槽的唯一使用者 `TorrentAttribute` 的诞生地。
-- u3-l3 讲过 `Context` 构造函数按 torrent/metalink/input-file/URI 四级互斥分支调用 `download_helper` 的工厂函数；本讲下钻 `createRequestGroupForBitTorrent` 内部，看它如何调用 `bittorrent::load`。
-- u9-l2 会系统讲 `ValueBase` 动态类型与解析器骨架，本讲只需知道 `ValueBase` 家族是 `String/Integer/List/Dict/Null/Bool`，`Dict` 内部是 `std::map<std::string, std::unique_ptr<ValueBase>>`（见 [src/ValueBase.h:L247-L249](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBase.h#L247-L249)，键天然有序）。
+- u3-l3 讲过：命令行给出 .torrent 文件后，`Context` 构造函数走 `createRequestGroupForBitTorrent` 分支创建 `RequestGroup`。本讲下潜这个分支内部的第一步——解析。
+- u3-l2 讲过：`DownloadContext` 是任务元数据聚合根，`ContextAttribute` 以"空基类加枚举槽位"的方式挂载协议专属信息。本讲的 `TorrentAttribute` 正是 BT 槽位（`CTX_ATTR_BT`）上的对象。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-|---|---|
-| [src/bencode2.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L48-L126) / [src/bencode2.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.h#L44-L62) | bencode 的 decode/encode 门面：解码产出 `ValueBase` 树，编码用 visitor 遍历树输出字节串 |
-| [src/GenericParser.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/GenericParser.h#L45-L115) | 通用增量解析器骨架：`parseUpdate` 喂数据、`parseFinal` 收尾；`parseFile` 自由函数按 4KB 块读文件喂解析器 |
-| [src/ValueBaseBencodeParser.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBaseBencodeParser.h#L46-L47) | `GenericParser` 的 bencode 特化别名，`bittorrent_helper` 与 `download_helper` 都用它 |
-| [src/bittorrent_helper.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L68-L1098) / [src/bittorrent_helper.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L60-L395) | 本讲主角：`load`/`loadFromMemory` 系列入口、`processRootDictionary` 总装流程、infohash/peer id 等工具、`--show-files` 用的 `print` 模板 |
-| [src/AnnounceList.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L45-L278) / [src/AnnounceList.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.h#L50-L138) | 运行时 tracker 选择器：两层迭代器 + 成功/失败移动规则 |
-| [src/AnnounceTier.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.cc#L39-L78) / [src/AnnounceTier.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.h#L45-L71) | 单个 tier：URL 队列 + announce 事件状态机 |
-| [src/TorrentAttribute.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.cc#L39-L47) / [src/TorrentAttribute.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.h#L48-L69) | BT 专属信息的纯数据结构（struct） |
-| [src/Context.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L89-L95) | `--show-files` 处理入口 `showTorrentFile`：构造空 Option + DownloadContext 后调 `bittorrent::load` 再 `print` |
-| [src/download_helper.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L186-L347) | 任务创建侧：`createBtRequestGroup` 调 `loadFromMemory`，`createRequestGroupForBitTorrent` 先 bencode 解码再组装 |
-| [test/BittorrentHelperTest.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/BittorrentHelperTest.cc#L140-L148) / [test/AnnounceListTest.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/AnnounceListTest.cc#L111-L170) / [test/test.torrent](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/test.torrent) | 实践素材：内置测试种子与断言，可直接用来验证你的理解 |
-
-`test/test.torrent` 是仓库自带的迷你种子（约 300 字节），本讲大量实践都基于它。它的原始内容是：
-
-```text
-d8:announce36:http://aria.rednoah.com/announce.php13:announce-listll16:http://tracker1 
-el15:http://tracker2el15:http://tracker3ee7:privatei1e7:comment17:REDNOAH.COM RULES
-13:creation datei1123456789e10:created by5:aria24:infod5:filesld6:lengthi284e4:pathl5:aria2
-3:src6:aria2ceed6:lengthi100e4:pathl19:aria2-0.2.2.tar.bz2eee4:name10:aria2-test
-12:piece lengthi128e6:pieces60:<AAA...BBB...CCC...>ee
-```
-
-注意两个细节：第一个 tracker 字符串长度前缀是 16（`http://tracker1` 只有 15 字符，**末尾多一个空格**，这是测试故意埋的，用来验证解析时的 `strip`）；`announce-list` 是三个单元素 tier，而不是一个三元素 tier。
+|------|------|
+| `src/bencode2.cc` | bencode 编解码门面：`decode` 把字节流转成 ValueBase 树，`encode` 反向 |
+| `src/GenericParser.h` | 通用"流式解析文件"模板 `parseFile`：4KB 缓冲分块喂给解析器 |
+| `src/bittorrent_helper.cc` | 本讲主角：`load`/`loadFromMemory` → `processRootDictionary` 及一族 `extract*` 函数 |
+| `src/bittorrent_helper.h` | 上述函数声明；`print()` 模板实现 `--show-files` 的控制台输出 |
+| `src/TorrentAttribute.h/.cc` | BT 专属属性的纯数据结构定义 |
+| `src/AnnounceList.h/.cc` | 运行期多 tracker 层级游标：轮换、事件判定 |
+| `src/AnnounceTier.h/.cc` | 单个 tier：URL 队列 + announce 事件状态机 |
+| `src/download_helper.cc` | 调用方：种子文件如何被读入并转成 RequestGroup |
+| `src/Context.cc` | `--show-files` 的入口分支与 `showTorrentFile` |
+| `src/DefaultBtAnnounce.cc` | 运行期消费方：从 `TorrentAttribute::announceList` 构造 `AnnounceList` |
+| `test/AnnounceListTest.cc` | tier 轮换行为的权威用例，本讲实践材料 |
+| `test/*.torrent` | 仓库自带的迷你种子文件（test.torrent、single.torrent 等），可直接用于实践 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 bencode2：种子的编解码器
+### 4.1 bencode2：bencode 的编解码门面
 
 #### 4.1.1 概念说明
 
-`bencode2` 命名空间只有两个动词：`decode`（字节串 → `ValueBase` 树）和 `encode`（`ValueBase` 树 → 字节串）。它是纯函数式的工具层，不知道「torrent」为何物——DHT 报文（u7-l2）、BT 扩展消息（u6-l8）也都用它。
+`bencode2` 是一个非常薄的命名空间（不足 130 行），只提供两个能力：
 
-为什么需要「编码」方向？两个用途都和本讲强相关：
+- **decode**：把 bencode 字节流解析成 `ValueBase` 树。真正的逐字节状态机在 `BencodeParser`/`ValueBaseBencodeParser` 里（u9-l2 详讲），`bencode2::decode` 只是"一次性喂完所有字节并取结果"的便捷封装。
+- **encode**：把 `ValueBase` 树重新序列化回 bencode 文本。
 
-1. **计算 infohash**：拿到解析后的 `info` 子字典后要重新编码成字节串再做 SHA-1。
-2. **把 magnet 下载到的 metadata 还原成种子**：`metadata2Torrent`（u6-l9 详讲）。
+为什么需要 encode？因为 **infohash 的定义是 SHA-1( info 字典的 bencode 编码 )**。aria2 解析种子时拿到的是树，想算 infohash 就必须把 `info` 子树重新编码成字节串。
 
 #### 4.1.2 核心流程
 
-解码不是 `bencode2` 自己做的，而是委托给一套「解析器骨架 + 状态机」组合（骨架细节在 u9-l2 展开）：
+decode 链路：
 
 ```text
-.torrent 文件
-   │  GenericParser.h::parseFile()          按 4KB 块读文件
-   ▼
-ValueBaseBencodeParser (= GenericParser<BencodeParser, ValueBaseStructParserStateMachine>)
-   │  parseUpdate() × N  →  增量喂入
-   │  parseFinal()       →  收尾并取结果
-   ▼
-ValueBase 树 (Dict/List/Integer/String)
+调用方
+  └─ bencode2::decode(data, len)
+       └─ ValueBaseBencodeParser::parseFinal(data, len, error)   # 逐字节状态机
+            ├─ error < 0 → 抛 DL_ABORT_EX2(BENCODE_PARSE_ERROR=25)
+            └─ 成功 → 返回 ValueBase 树（String/Integer/List/Dict）
 ```
 
-编码方向则是 visitor 模式：对树的每个节点调用对应 `visit` 重载，按 bencode 文法逐段写入 `ostringstream`。
+encode 链路（访问者模式）：
+
+```text
+bencode2::encode(vlb)
+  └─ BencodeValueBaseVisitor 遍历 ValueBase 树
+       ├─ String  → 写 "<size>:<bytes>"
+       ├─ Integer → 写 "i<value>e"
+       ├─ List    → 写 "l" + 递归各元素 + "e"
+       └─ Dict    → 写 "d" + 按 std::map 有序逐对写 <键><值> + "e"
+```
+
+关键保证：`Dict` 用 `std::map` 存键，遍历天然按字典序输出，所以 `encode(decode(x))` 对规范种子是**字节级还原**的——infohash 因此不会因为"重新编码"而算错。
 
 #### 4.1.3 源码精读
 
-先看解码入口。`decode` 的核心重载在 [src/bencode2.cc:L63-L76](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L63-L76)：构造一个 `ValueBaseBencodeParser`，把整段数据一次性喂给 `parseFinal`；返回值 `error` 为负数说明文法错误，抛出错误码 `BENCODE_PARSE_ERROR` 的异常，否则它记录「实际消费的字节数」（bencode 允许尾部有多余字节，这个数在 magnet 元数据处理里很有用）：
+三参版 `decode` 是核心，两个短重载只是转发（[src/bencode2.cc:50-61](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L50-L61)）：
 
 ```cpp
 std::unique_ptr<ValueBase> decode(const unsigned char* data, size_t len,
@@ -145,135 +114,119 @@ std::unique_ptr<ValueBase> decode(const unsigned char* data, size_t len,
         fmt("Bencode decoding failed: error=%d", static_cast<int>(error)),
         error_code::BENCODE_PARSE_ERROR);
   }
-  end = error;
-  return res;
+  ...
 }
 ```
 
-`ValueBaseBencodeParser` 本身只是个别名，见 [src/ValueBaseBencodeParser.h:L46-L47](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBaseBencodeParser.h#L46-L47)：
+[src/bencode2.cc:63-76](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L63-L76)：把整块内存交给 `parseFinal`；`error < 0` 表示语法错误，抛出错误码 25（`BENCODE_PARSE_ERROR`，见 [src/error_code.h:71](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/error_code.h#L71)）的异常。`end` 出参返回消费的字节数，供"一个 buffer 里有多段 bencode"的场景使用。
+
+encode 侧是一个局部 Visitor 类，对 String/Integer/List/Dict 各有一个 `visit`（[src/bencode2.cc:78-126](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L78-L126)）。String 的写法最能体现 bencode 风格（[src/bencode2.cc:85-90](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L85-L90)）：
 
 ```cpp
-typedef GenericParser<BencodeParser, ValueBaseStructParserStateMachine, true>
-    ValueBaseBencodeParser;
-```
-
-第三个模板参数 `allowEmptyName = true` 允许字典出现空字符串键（对非规范种子更宽容）。
-
-从文件读种子的路径在 [src/GenericParser.h:L91-L115](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/GenericParser.h#L91-L115) 的 `parseFile`：打开文件（容忍 `EINTR` 重试）、按 `4_k`（4KB）块循环 `read` → `parser.parseUpdate`，最后 `parseFinal(0, 0, nproc)` 收尾。**增量式**设计的意义是：同一套骨架既能在启动时一次喂完整个文件，也能在 DHT/网络流场景边收边解析。
-
-编码方向 [src/bencode2.cc:L78-L126](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L78-L126) 是一个 visitor：`String` 输出 `<len>:` 加原始字节；`Integer` 输出 `i<value>e`；`List`/`Dict` 分别用 `l...e`/`d...e` 包裹并递归。关键一行是 `Dict` 分支直接遍历内部 map：
-
-```cpp
-virtual void visit(const Dict& dict) CXX11_OVERRIDE
+virtual void visit(const String& string) CXX11_OVERRIDE
 {
-  out_ << "d";
-  for (const auto& e : dict) {
-    auto& key = e.first;
-    out_ << key.size() << ":";
-    out_.write(key.data(), key.size());
-    e.second->accept(*this);
-  }
-  out_ << "e";
+  const std::string& s = string.s();
+  out_ << s.size() << ":";
+  out_.write(s.data(), s.size());
 }
 ```
 
-由于 `Dict` 的底层容器是 `std::map`（[src/ValueBase.h:L247-L249](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBase.h#L247-L249)），遍历顺序天然是键的字典序——**重新编码的输出与「键已排序的规范种子」逐字节一致**。这正是下一节 infohash 能用「重编码」而不是「切原文」来实现的前提。
+先写十进制长度、冒号，再原样写字节。Dict 的 `visit` 直接 `for (const auto& e : dict)` 顺序遍历 `std::map`，键有序因此无需额外排序（[src/bencode2.cc:109-119](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L109-L119)）。
 
-#### 4.1.4 代码实践：手工解码 test.torrent
+从磁盘读种子文件时，aria2 不把整个文件一次性读进内存，而是用 `GenericParser.h` 的 `parseFile` 模板分块喂数据（[src/GenericParser.h:91-115](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/GenericParser.h#L91-L115)）：
 
-1. **实践目标**：不借助 aria2，亲手把 `test/test.torrent` 的 announce-list 部分解出来，确认它是「三个单元素 tier，且第一个 URL 带尾部空格」。
-2. **操作步骤**：
-   - 用编辑器打开 `test/test.torrent`（它全是 ASCII，可直接读）。
-   - 定位 `13:announce-list` 之后的内容，逐字符手工切分：`l`（外层列表）→ `l`（tier1）→ `16:`（读 16 字节）`http://tracker1 ` → `e`（tier1 结束）→ `l` `15:http://tracker2` `e` → `l` `15:http://tracker3` `e` → `e`（外层结束）。
-   - 想偷懒的话，可以用下面这段「示例代码」（独立小脚本，与 aria2 无关）自动解码：
+```cpp
+std::array<char, 4_k> buf;
+while ((nread = read(fd, buf.data(), buf.size())) > 0) {
+  nproc = parser.parseUpdate(buf.data(), nread);
+  ...
+}
+return parser.parseFinal(0, 0, nproc);
+```
 
-     ```python
-     # 示例代码：最小 bencode 解码器
-     def decode(data, pos):
-         c = data[pos:pos+1]
-         if c == b'i':                              # 整数 i123e
-             end = data.index(b'e', pos)
-             return int(data[pos+1:end]), end + 1
-         if c == b'l':                              # 列表 l...e
-             pos, out = pos + 1, []
-             while data[pos:pos+1] != b'e':
-                 v, pos = decode(data, pos)
-                 out.append(v)
-             return out, pos + 1
-         if c == b'd':                              # 字典 d...e
-             pos, out = pos + 1, {}
-             while data[pos:pos+1] != b'e':
-                 k, pos = decode(data, pos)
-                 v, pos = decode(data, pos)
-                 out[k] = v
-             return out, pos + 1
-         end = data.index(b':', pos)                # 字符串 <len>:...
-         n = int(data[pos:end])
-         return data[end+1:end+1+n], end + 1 + n
+每轮最多读 4KB，交给 `parseUpdate` 增量解析，最后 `parseFinal(0,0,...)` 收尾。这种"推一块、消化一块"的流式设计与 u4-l2 的 `HttpHeaderProcessor` 一脉相承——解析进度全部外置于状态机，天然免疫文件任意切分。
 
-     raw = open('test/test.torrent', 'rb').read()
-     tree, _ = decode(raw, 0)
-     print(tree[b'announce-list'])
-     ```
+#### 4.1.4 代码实践：徒手解码一个真种子
 
-3. **需要观察的现象**：第一个 tier 的元素是 `b'http://tracker1 '`（16 字节，带尾部空格），后两个分别是 `b'http://tracker2'`、`b'http://tracker3'`。
-4. **预期结果**：输出形如 `[[b'http://tracker1 '], [b'http://tracker2'], [b'http://tracker3']]`。这个尾部空格会在 4.2 节的 `extractAnnounce` 里被 `util::strip` 去掉——测试 [test/BittorrentHelperTest.cc:L293-L295](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/BittorrentHelperTest.cc#L293-L295) 断言解析后是干净的 `http://tracker1`。运行结果待本地验证。
+**实践目标**：不借助工具（除了 `xxd`/`cat -v`），人工读出仓库自带迷你种子的结构。
+
+**操作步骤**：
+
+1. 查看单文件种子的原始字节：
+
+   ```bash
+   cat -v test/single.torrent
+   ```
+
+2. 对照 2.2 节的语法表，从第一个字符 `d` 开始逐 token 标注。它的开头是：
+
+   ```text
+   d8:announce37:http://aria.rednoah.com/announce.php 7:comment...
+     17:REDNOAH.COM RULES13:creation datei1123456789e...
+     4:infod4:name19:aria2-0.8.2.tar.bz26:lengthi384e
+     12:piece lengthi128e6:pieces60:AAAA...eeee
+   ```
+
+   注意每个长度前缀都要数一遍字节，例如 `8:announce` 中的 `announce` 恰好 8 个字符。
+
+3. 用 `aria2c` 的 `-S`（`--show-files`）交叉验证你的解读：
+
+   ```bash
+   ./src/aria2c -S test/single.torrent
+   ```
+
+**需要观察的现象**：`pieces` 字段的长度前缀是 `60:`，即 60 字节的哈希串；而 `piece length` 是 `i128e`、`length` 是 `i384e`。
+
+**预期结果**：\( 60 = 3 \times 20 \)，即 3 个 piece、每 piece 哈希 20 字节（SHA-1 摘要长度）；又 \( \lceil 384 / 128 \rceil = 3 \)，两者吻合。`-S` 输出应显示 `Mode: single`、总长 384B、`The Number of Pieces: 3`。具体输出格式待本地验证。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：`i-1e`、`0:`、`le`、`de` 分别解码成什么？
+**练习 1**：bencode 里 `i-3e`、`4:12:e`、`le`、`de` 各是什么？
+**答案**：整数 -3；字符串 `"12:e"`（长度 4，内容就是字符 `1`、`2`、`:`、`e`——冒号后不再有特殊含义）；空列表；空字典。
 
-答案：整数 `-1`；空字符串 `""`；空列表 `[]`；空字典 `{}`。bencode 允许所有「空」容器，aria2 的解析器也接受（`allowEmptyName = true` 甚至允许空键）。
+**练习 2**：`bencode2::encode` 为什么能保证字典键按规范排序输出？
+**答案**：因为 `ValueBase::Dict` 底层是 `std::map<std::string, ...>`（[src/ValueBase.h:247-249](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ValueBase.h#L247-L249)），`std::map` 按键升序遍历，encode 只是照着遍历顺序写，无需额外排序。
 
-**练习 2**：为什么 `bencode2::encode` 不需要「排序」这个步骤？
-
-答案：因为 `ValueBase::Dict` 底层就是 `std::map<std::string, ...>`，遍历即有序；而 bencode 规范本身要求字典键排序，两者恰好对齐，重编码输出与规范种子原文一致。
-
-**练习 3**：`decode(data, len, end)` 里第三个参数 `end` 有什么用？
-
-答案：返回**实际消费的字节数**。bencode 流里顶层元素后面可以跟别的数据（例如 ut_metadata 分片传输），调用方靠 `end` 知道从哪里继续切。
-
-### 4.2 bittorrent_helper：从根字典到 DownloadContext
+### 4.2 bittorrent_helper：从种子字典到 DownloadContext
 
 #### 4.2.1 概念说明
 
-`bittorrent` 命名空间下的 `load`/`loadFromMemory` 家族是种子解析的总入口。无论种子来自磁盘文件、RPC 传入的字节串、magnet 拼出的 ValueBase，最终都汇入同一个私有函数 `processRootDictionary`：它做完整性校验、算 infohash、把公共信息（文件列表、piece 长度、piece 哈希）写进 `DownloadContext`，把 BT 专属信息（announce、nodes、私有标志等）装进 `TorrentAttribute` 再挂到属性槽。
+`bittorrent_helper.cc` 是 BT 子系统的"总装车间"之一，本模块关注它的解析职责。torrent 根字典的键很多，源码把每个键的读取拆成独立小函数，总调度是 `processRootDictionary`。所有键名以常量集中在文件头部（[src/bittorrent_helper.cc:71-88](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L71-L88)）：`info`、`pieces`、`piece length`、`files`、`length`、`name`/`name.utf-8`、`path`/`path.utf-8`、`private`、`url-list`、`announce`、`announce-list`、`nodes`、`creation date`、`comment`、`created by`。
 
-一句话概括分工：**`DownloadContext` 存「所有协议都关心的元数据」，`TorrentAttribute` 存「只有 BT 关心的元数据」**。
+入口是一族 `load*` 函数，区别只在"种子内容从哪来"：
+
+- `load(torrentFile, ...)`：从磁盘文件读（`-S` 展示走这条路）；
+- `loadFromMemory(...)`：从内存字节或**已解析好的 ValueBase 树**装配（正常下载走这条路——调用方 `download_helper` 已先解析过一次文件以提取 infohash）。
 
 #### 4.2.2 核心流程
 
-`processRootDictionary` 的执行顺序（也是下文源码精读的顺序）：
+`processRootDictionary` 的执行顺序（[src/bittorrent_helper.cc:412-529](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L412-L529)）：
 
 ```text
-1. 校验根节点是 Dict、含 "info" 子 Dict          否则 → BITTORRENT_PARSE_ERROR
-2. 对 info 子字典重新 bencode 编码 → SHA-1 → infoHash
-   同时把编码字节串存进 metadata/metadataSize（给 magnet 场景用）
-3. 读 "pieces"        → 每 20 字节切一个 piece 哈希，写入 ctx
-4. 读 "piece length"  → 校验非负，写入 ctx
-5. 读 "private"       → privateTorrent 标志（禁 DHT/PEX 的私有种子）
-6. 读 "url-list"      → HTTP Seeding 的 web-seed URI，并入 FileEntry 的 URI 列表
-7. extractFileEntries → 生成 FileEntry 列表（单文件/多文件两条路径）
-8. 一致性校验：ceil(总长 / piece length) == piece 哈希个数
-9. extractAnnounce    → announce-list（或退化的 announce）→ announceList
-10. extractNodes      → DHT 引导节点列表
-11. 读 creation date / comment / created by
-12. ctx->setAttribute(CTX_ATTR_BT, torrent)  ← 挂载属性槽
+1. 校验根节点是 Dict，取 info 子字典（缺则抛 BITTORRENT_PARSE_ERROR）
+2. infohash = SHA-1(bencode2::encode(info 字典))；同时保存 metadata（info 原文）与 metadataSize
+3. 读 pieces 字符串 → numPieces = len(pieces) / 20
+4. 读 piece length（缺失或为负 → 抛错）；写入 ctx->setPieceLength
+5. extractPieceHash：把 pieces 字符串按 20 字节切段 → ctx 的分块哈希表
+6. 读 private 标志（i1e → 私有种子）
+7. extractUrlList：读 url-list（HTTP web-seed），与外部传入 uris 合并、排序去重
+8. extractFileEntries：读 name + files/length → FileEntry 列表 → ctx
+   └─ 一致性检查：⌈总长/pieceLength⌉ == numPieces，否则抛 "Too few/many piece hash."
+9. extractAnnounce / extractNodes → tracker 层级 / DHT 节点
+10. 读 creation date / comment / created by
+11. ctx->setAttribute(CTX_ATTR_BT, torrent)   ← TorrentAttribute 挂载点
 ```
 
-其中第 8 步的公式（整数除法即向上取整）：
+piece 数一致性公式：
 
-\[ \text{期望 piece 数} = \left\lceil \frac{\text{totalLength}}{\text{pieceLength}} \right\rceil = \frac{\text{totalLength} + \text{pieceLength} - 1}{\text{pieceLength}} \]
+\[ N_{piece} = \left\lceil \frac{L_{total}}{L_{piece}} \right\rceil \]
 
 #### 4.2.3 源码精读
 
-**入口家族**。`load` 有两个重载（[src/bittorrent_helper.cc:L531-L549](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L531-L549)），差别只在于是否携带一组辅助 URI（`--torrent-file` 命令行上额外给的 web-seed）：
+**入口函数**。`load` 用 `ValueBaseBencodeParser` + `parseFile` 流式读文件后交给 `processRootDictionary`（[src/bittorrent_helper.cc:531-539](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L531-L539)）：
 
 ```cpp
-void load(const std::string& torrentFile,
-          const std::shared_ptr<DownloadContext>& ctx,
-          const std::shared_ptr<Option>& option,
-          const std::string& overrideName)
+void load(const std::string& torrentFile, ...)
 {
   ValueBaseBencodeParser parser;
   processRootDictionary(ctx, parseFile(parser, torrentFile).get(), option,
@@ -281,23 +234,11 @@ void load(const std::string& torrentFile,
 }
 ```
 
-注意 `parseFile` 来自 [src/GenericParser.h:L92-L94](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/GenericParser.h#L92-L94)（`aria2::parseFile`，ADL 找到），`.get()` 把 `unique_ptr<ValueBase>` 降级为裸指针——**`ValueBase` 树在这里之后由谁拥有？** 答案：解析结果被逐字段「搬空」后丢弃，存活下来的是 `DownloadContext` 里的字段与 `TorrentAttribute`。
+带 `uris` 参数的重载（[src/bittorrent_helper.cc:541-549](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L541-L549)）把命令行附加 URI 并入 web-seed 列表。`loadFromMemory` 家族（[src/bittorrent_helper.cc:551-601](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L551-L601)）有五个重载，分别接受原始字节、`std::string` 或现成的 `ValueBase*`，最终全部汇入同一个 `processRootDictionary`——**无论种子来自文件、内存还是 magnet 元数据，装配逻辑只有一份**。
 
-`loadFromMemory` 家族（[src/bittorrent_helper.cc:L551-L601](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L551-L601)）覆盖四种来源：内存字节、`std::string`、已经是 `ValueBase*` 的树（RPC `aria2.addTorrent` 走这条），全部汇入 `processRootDictionary`。任务创建侧 `createBtRequestGroup` 用的就是 ValueBase 版本，见 [src/download_helper.cc:L194-L197](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L194-L197)：
-
-```cpp
-auto dctx = std::make_shared<DownloadContext>();
-// may throw exception
-bittorrent::loadFromMemory(torrent, dctx, option, auxUris,
-                           metaInfoUri.empty() ? "default" : metaInfoUri);
-```
-
-**总装车间 `processRootDictionary`** 定义在 [src/bittorrent_helper.cc:L413-L528](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L413-L528)。开头两个防御检查（L420-L429）：根不是字典、没有 `info` 键，都抛错误码 `BITTORRENT_PARSE_ERROR` 的异常（对应退出码层面的解析失败）。
-
-**infohash 计算**（L432-L440）是全文件最关键的 9 行：
+**infohash 计算**是整个流程最关键的三行（[src/bittorrent_helper.cc:432-440](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L432-L440)）：
 
 ```cpp
-// retrieve infoHash
 std::string encodedInfoDict = bencode2::encode(infoDict);
 unsigned char infoHash[INFO_HASH_LENGTH];
 message_digest::digest(infoHash, INFO_HASH_LENGTH,
@@ -305,293 +246,378 @@ message_digest::digest(infoHash, INFO_HASH_LENGTH,
                        encodedInfoDict.size());
 torrent->infoHash.assign(&infoHash[0], &infoHash[INFO_HASH_LENGTH]);
 torrent->metadata = encodedInfoDict;
-torrent->metadataSize = encodedInfoDict.size();
 ```
 
-三件事一次完成：重编码 info 字典 → SHA-1 得 20 字节原始摘要（`INFO_HASH_LENGTH = 20`，见 [src/BtConstants.h:L43](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/BtConstants.h#L43)）→ 原始字节存进 `infoHash`（注意**不是**十六进制文本；要文本用 `getInfoHashString`，见 [src/bittorrent_helper.cc:L629-L632](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L629-L632) 的 `util::toHex`）。`metadata`/`metadataSize` 把 info 字典原文留在手边——magnet 下载（u6-l9）拿到元数据后要靠它校验、落盘成 `.torrent`。
+注意 aria2 **不是**从原文件里"截取" info 的原始字节，而是把解析出的 `info` 子树重新 encode 再哈希。由于 `Dict` 键有序，规范种子下两者字节相同。`INFO_HASH_LENGTH` 为 20（[src/BtConstants.h:43](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/BtConstants.h#L43)）。重新编码的 `info` 原文同时存进 `torrent->metadata`，这是 magnet 下载里 ut_metadata 扩展向其他 peer 分发元数据的原料（u6-l9 详讲）。
 
-**piece 哈希与 piece 长度**（L443-L474）：`pieces` 是一根长字节串，每 `PIECE_HASH_LENGTH = 20` 字节（[src/BtConstants.h:L45](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/BtConstants.h#L45)）是一个 piece 的 SHA-1。个数就是长度整除：`numPieces = piecesData->s().size() / PIECE_HASH_LENGTH`。源码里两段被注释掉的「空 pieces / 零 piece 报错」逻辑是刻意保留的——为了支持 0 字节的怪种子（L448-L456 的注释写明 "Commented out To download 0 length torrent"）。`piece length` 读出后校验非负（L465-L469），然后交给 `extractPieceHash`（[src/bittorrent_helper.cc:L99-L110](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L99-L110)）按 20 字节切片、以 `"sha-1"` 为算法名写入 `ctx->setPieceHashes`——这就是 u5-l5 分块校验数据的来源。
+**pieces 与 piece length**（[src/bittorrent_helper.cc:442-474](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L442-L474)）：`pieces` 是缺失即抛错的可选性最低字段；piece 数就是字节数除以 20。哈希切分由 `extractPieceHash` 完成（[src/bittorrent_helper.cc:99-110](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L99-L110)），把连续字节按 20 字节切片后写入 `DownloadContext` 的分块哈希表——这一步正是 u5-l5 分块校验的数据来源。
 
-**私有种子与 url-list**（L476-L493）：`private` 为整数 1 时置 `privateTorrent = true`（这种种子禁 DHT 与 PEX，u6-l2、u6-l8 会消费这个标志）。`url-list` 遵循 HTTP Seeding 规范（源码注释给出 http://www.getright.com/seedtorrent.html），由 `extractUrlList`（[src/bittorrent_helper.cc:L114-L157](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L114-L157)）解析——它用 visitor 同时兼容「单个字符串」和「字符串列表」两种写法，随后与命令行额外 URI 合并、排序去重。
+**文件条目 `extractFileEntries`**（[src/bittorrent_helper.cc:177-348](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L177-L348)）分两条路：
 
-**文件条目**由 `extractFileEntries` 生成（[src/bittorrent_helper.cc:L178-L347](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L178-L347)），骨架是：
+- 名字解析顺序：`overrideName`（调用方指定，如 RPC 参数）＞ `name.utf-8` ＞ `name` ＞ 兜底 `<种子文件名>.file`（[src/bittorrent_helper.cc:185-211](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L185-L211)）。`*.utf-8` 后缀键是 BEP-47 为非 ASCII 文件名准备的，优先级更高。
+- **多文件模式**：info 里存在 `files` 列表时，每个文件条目是含 `length` 与 `path`（路径按目录层级拆成字符串列表）的字典；代码累加 `offset` 把各文件铺成一条逻辑偏移空间（[src/bittorrent_helper.cc:214-299](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L214-L299)）。这正是 u3-l2 讲过的"多文件首尾相接"的诞生地。
+- **单文件模式**：长度直接取 info 顶层的 `length`（[src/bittorrent_helper.cc:301-341](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L301-L341)）。
+- 两种模式都做**目录穿越防护**：`util::detectDirTraversal` 一旦发现 `..` 之类的路径成分立即抛 `BITTORRENT_PARSE_ERROR`（[src/bittorrent_helper.cc:197-201](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L197-L201)、[src/bittorrent_helper.cc:276-279](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L276-L279)）——恶意种子里一个 `path: ["../../etc"]` 就能让你把文件写到任意目录，所以这是安全底线。
 
-1. 定名字（L185-L211）：`name.utf-8` 优先于 `name`；两者皆无则退化为种子文件名 + `.file`。名字或路径要过 `util::detectDirTraversal` 检查——**恶意种子可以用 `../../` 逃出下载目录**，这里抛 `MSG_DIR_TRAVERSAL_DETECTED`。非 UTF-8 字节经 `util::encodeNonUtf8` 百分号转义。
-2. 多文件分支（L214-L300）：有 `files` 列表即 `BT_FILE_MODE_MULTI`。逐文件读 `length` 与 `path`（`path.utf-8` 优先），把根目录名插到 `pathelem[0]`，拼成 `根/子/文件` 路径；**`offset` 逐文件累加**，把多文件首尾相接成一条逻辑偏移空间——这正是 u3-l2 讲过的「多文件任务的总长 = 尾元素末偏移」的诞生地。每个 `FileEntry` 还会带上 url-list 拼出的 web-seed URI。
-3. 单文件分支（L301-L341）：无 `files` 即 `BT_FILE_MODE_SINGLE`，读顶层 `length` 造一个偏移 0 的 `FileEntry`。
-4. 收尾（L342-L346）：`ctx->setFileEntries(...)`；多文件模式再 `setBasePath`（根目录名），它是 u5-l3 `MultiDiskAdaptor` 摊平目录树的依据。
-
-**一致性校验**（L498-L501）：
+**piece 数一致性检查**（[src/bittorrent_helper.cc:498-501](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L498-L501)）：
 
 ```cpp
 if ((ctx->getTotalLength() + pieceLength - 1) / pieceLength != numPieces) {
-  throw DL_ABORT_EX2("Too few/many piece hash.",
-                     error_code::BITTORRENT_PARSE_ERROR);
+  throw DL_ABORT_EX2("Too few/many piece hash.", error_code::BITTORRENT_PARSE_ERROR);
 }
 ```
 
-piece 哈希个数必须恰好等于总长向上取整的 piece 数。以 `test.torrent` 为例：总长 284 + 100 = 384，piece length 128，\((384 + 128 - 1) \div 128 = 3\)，而 `pieces` 长 60 字节 = 3 个哈希，恰好通过。
+`(a + b - 1) / b` 是整数上取整的惯用写法。种子声称的文件总长必须与哈希条数自洽，否则拒绝。
 
-**announce 与 nodes**（L503-L505）分别委托给下面两个小函数，详见 4.3 与 4.4 节。**杂项**（L507-L525）：`creation date`（整数时间戳）、`comment`/`comment.utf-8`、`created by`。最后一步挂载属性槽（L527）：`ctx->setAttribute(CTX_ATTR_BT, std::move(torrent))`——`CTX_ATTR_BT` 是 [src/ContextAttribute.h:L46-L52](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/ContextAttribute.h#L46-L52) 里枚举的第一个也是唯一一个槽位。
+**announce 与 nodes**。`extractAnnounce`（[src/bittorrent_helper.cc:350-381](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L350-L381)）优先读 `announce-list`（BEP-12 多 tracker），每个 tier 是一个 URL 列表；只有种子没有 `announce-list` 时才退回单值 `announce`。注意它对每个 URL 做了 `util::strip`——本讲实践用的 `test/test.torrent` 里 tracker URL 末尾故意带空格，解析时会被剪掉。`extractNodes`（[src/bittorrent_helper.cc:383-410](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L383-L410)）读 `nodes` 列表（`[["hostname", port], ...]`），这是 DHT 自举节点（BEP-5），端口范围 1~65535 之外静默跳过。
 
-#### 4.2.4 代码实践：加日志观察解析结果
+**校验规则汇总**：
 
-1. **实践目标**：在解析函数里加一行日志，打印 infohash 与 announce 层数，验证与 `--show-files` 的控制台输出一致。
-2. **操作步骤**：
-   - 先跑基线：`./src/aria2c -S test/test.torrent`（`-S` 是 `--show-files` 的短选项），记下输出中的 `Info Hash:` 行。
-   - 在 [src/bittorrent_helper.cc:L497](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L497)（`extractFileEntries` 调用之后）临时插入一行日志（示例代码，验证后请还原）：
+| 校验点 | 位置 | 错误信息 | 错误码 |
+|--------|------|----------|--------|
+| 根节点不是字典 | [src/bittorrent_helper.cc:420-424](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L420-L424) | "torrent file does not contain a root dictionary." | 26 |
+| 缺 info / pieces / piece length / length | 同上函数各分支 | "Missing %s in torrent metainfo."（[src/message.h:153](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/message.h#L153)） | 26 |
+| 长度字段为负 | [src/bittorrent_helper.cc:233-237](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L233-L237)、[src/bittorrent_helper.cc:465-469](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L465-L469) | "Invalid %s ..." | 26 |
+| 目录穿越 | [src/bittorrent_helper.cc:197-201](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L197-L201) | MSG_DIR_TRAVERSAL_DETECTED | 26 |
+| piece 数与总长不符 | [src/bittorrent_helper.cc:498-501](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L498-L501) | "Too few/many piece hash." | 26 |
+| bencode 语法错误 | [src/bencode2.cc:69-73](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bencode2.cc#L69-L73) | "Bencode decoding failed" | 25 |
 
-     ```cpp
-     A2_LOG_INFO(fmt("parsed torrent: infohash=%s, tiers=%zu, pieces=%zu",
-                     util::toHex(torrent->infoHash).c_str(),
-                     torrent->announceList.size(), numPieces));
-     ```
+**调用方视角**（衔接 u3-l3）：正常下载路径上，`createRequestGroupForBitTorrent` 先 `parseFile` 得到 ValueBase 树，校验非空后交给 `createBtRequestGroup`，后者调用 `loadFromMemory(ValueBase*, ...)`（[src/download_helper.cc:305-326](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L305-L326)、[src/download_helper.cc:185-232](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L185-L232)）。解析出的 infohash 在任务启动时还要过一道"重复注册"检查（[src/RequestGroup.cc:280-295](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/RequestGroup.cc#L280-L295)）——同一 infohash 不允许注册两个任务。
 
-     注意此位置 `extractAnnounce` 尚未执行、`announceList` 还是空的——这本身就是个发现（解析顺序：文件条目先于 announce）。要看 tier 数应把这行日志加在 [L505](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L505)（`extractNodes` 调用）之后。
-   - 重新 `make -j$(nproc)`（只改了 `bittorrent_helper.cc`，增量编译很快），带 `--log` 再跑一次：
+#### 4.2.4 代码实践：构造损坏的种子，逐一触发校验分支
 
-     ```bash
-     ./src/aria2c -S test/test.torrent --log=bt.log --log-level=info >/dev/null
-     grep "parsed torrent" bt.log
-     ```
-3. **需要观察的现象**：日志里的 infohash 十六进制与 `-S` 输出的 `Info Hash:` 行完全一致；tiers 数为 3。
-4. **预期结果**：infohash 为 `248d0a1cd08284299de78d5c1ed359bb46717d8c`——这不是猜的，单元测试 [test/BittorrentHelperTest.cc:L140-L148](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/BittorrentHelperTest.cc#L140-L148) 断言了同样的值。piece 数为 3、tier 数为 3。待本地验证。
+**实践目标**：亲眼看到上表中的错误信息从源码里"长出来"，把错误信息和抛出点一一对应。
+
+**操作步骤**：
+
+1. 写一个小脚本（示例代码，放在仓库外任意目录即可），从 `test/single.torrent` 派生三个损坏变体：
+
+   ```python
+   # 示例代码：make_broken_torrents.py
+   data = open("test/single.torrent", "rb").read()
+
+   # 变体1：整个删掉 "12:piece lengthi128e" 这一段（21 字节）
+   open("no_piece_length.torrent", "wb").write(
+       data.replace(b"12:piece lengthi128e", b""))
+   # 变体2：pieces 从 60 字节砍到 40 字节（去掉最后一个 piece 哈希）
+   open("short_pieces.torrent", "wb").write(
+       data.replace(b"6:pieces60:", b"6:pieces40:")[:-20])
+   # 变体3：把 "4:info" 改名成 "4:infx"，让 info 键消失
+   open("no_info.torrent", "wb").write(
+       data.replace(b"4:infod", b"4:infxd"))
+   ```
+
+   由于 bencode 的每个元素都是自定界的，删掉一个完整的键值对后剩余部分仍是合法 bencode，所以这些变体能走到"字段级校验"而不是语法错误。
+
+2. 依次运行：
+
+   ```bash
+   ./src/aria2c -S no_piece_length.torrent
+   ./src/aria2c -S short_pieces.torrent
+   ./src/aria2c -S no_info.torrent
+   ```
+
+**需要观察的现象**：三条命令分别报出不同的错误消息。
+
+**预期结果**：变体 1 报 "Missing piece length in torrent metainfo."（[src/bittorrent_helper.cc:460-463](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L460-L463)）；变体 2 报 "Too few/many piece hash."（总长 384 / 128 向上取整是 3，但 pieces 只剩 2 个哈希）；变体 3 报 "Missing info in torrent metainfo."。`-S` 模式下异常被 `showFiles` 的 try/catch 捕获并打印堆栈（[src/Context.cc:140-142](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L140-L142)），进程最终退出码是否精确等于 26 待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：aria2 算 infohash 时为什么「重新编码」而不是「从原文件里把 info 字典的字节区间切出来」？
+**练习 1**：一个种子总长 1000 字节、piece length 256，`pieces` 字段应当是多少字节？
+**答案**：\( \lceil 1000/256 \rceil = 4 \) 个 piece，每 piece 哈希 20 字节，共 80 字节。若种子给了 100 字节（5 个哈希），就会命中 "Too few/many piece hash."。
 
-答案：增量解析器得到的是树，不保留字节偏移。重新编码可行依赖两个事实：bencode 规范要求字典键排序，而 `ValueBase::Dict` 用 `std::map` 存储、遍历即有序，所以对规范种子而言重编码与原文字节一致。（推论：若某种子键未排序，`SHA1(原文)` 与 `SHA1(重编码)` 会不同——但那种种子本身就不规范，BT 网络以规范编码为准。）
+**练习 2**：为什么 aria2 用"重新编码 info 字典"而不是"从原文件截取 info 字节"来算 infohash？两种方式什么时候结果不同？
+**答案**：解析后手里只有 ValueBase 树，树没有"在原文件中的字节区间"信息，重新编码是最自然的做法。当且仅当原种子的 info 字典键未按字典序排列（违反 bencode 规范的病态种子）时，重编码字节与原文不同，算出的 infohash 也会与其他客户端不一致。规范种子下两者等价。
 
-**练习 2**：一个总长 1000、piece length 512 的种子需要几个 piece 哈希？`pieces` 字段多少字节？
+**练习 3**：`-S` 展示与正常下载分别调用哪个 `load*` 入口？
+**答案**：`-S` 走 `bittorrent::load(文件)`（[src/Context.cc:89-95](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L89-L95)）；正常下载由 `download_helper` 先 `parseFile` 再走 `loadFromMemory(ValueBase*, ...)`（[src/download_helper.cc:196-197](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L196-L197)）。
 
-答案：\(\lceil 1000/512 \rceil = 2\) 个哈希；`pieces` 长 \(2 \times 20 = 40\) 字节。若只有 39 字节，`processRootDictionary` 的一致性校验会抛 "Too few/many piece hash."。
-
-**练习 3**：`extractFileEntries` 里对 `name` 和 `path` 调 `detectDirTraversal` 防的是什么攻击？
-
-答案：目录穿越。恶意种子的文件路径可以写成 `../../etc/cron.d/evil`，若不拦截就会把文件写到下载目录之外。aria2 在名字与每个文件路径两处都检查，命中即拒绝解析（错误码 `BITTORRENT_PARSE_ERROR`）。
-
-### 4.3 AnnounceList 与 AnnounceTier：多 tracker 层级模型
+### 4.3 TorrentAttribute：BT 专属信息的挂载点
 
 #### 4.3.1 概念说明
 
-`TorrentAttribute::announceList` 只是 `vector<vector<string>>` 的静态快照；真正**在运行中决定「下一次 announce 用哪个 tracker」**的是 `AnnounceList`。它把两级列表包装成「双层迭代器 + 移动规则」：
+解析产物分成两半：
 
-- 外层 `tiers_`：`deque<shared_ptr<AnnounceTier>>`，每个 `AnnounceTier` 持有一个 `urls` 队列和一个 `event` 状态（[src/AnnounceTier.h:L45-L58](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.h#L45-L58)）。
-- 内层 `currentTracker_`：指向当前 tier 里下一个要用的 URL。
+- **协议无关的一半**写进 `DownloadContext` 公共字段：`FileEntry` 列表（文件路径、长度、偏移、web-seed URI）、`pieceLength`、分块哈希表——HTTP/FTP 下载同样用这些字段，所以 BT 信息必须"降维"成公共形态才能复用 u5 的存储与校验机制。
+- **BT 专属的一半**装进 `TorrentAttribute`，经 `ctx->setAttribute(CTX_ATTR_BT, ...)` 挂到 `DownloadContext` 的 BT 属性槽上（u3-l2 讲过的"空基类加枚举槽位"机制，目前只有 BT 一个槽）。
 
-关于学习目标里的「tracker 权重」要说清楚：**aria2 没有数值权重字段**。优先级完全由三件事表达——① tier 的排列顺序（前面的层先用）；② 层内 URL 的顺序（会被 `shuffle` 随机打乱，避免所有客户端挤同一个 tracker）；③ 成功/失败后的移动规则（成功者置顶、失败者降级）。这是「用数据结构位置表达优先级」的典型设计。
+这个纯数据结构没有任何行为，字段定义一目了然（[src/TorrentAttribute.h:48-69](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.h#L48-L69)）：
+
+| 字段 | 类型 | 含义 | 填充者 |
+|------|------|------|--------|
+| `name` | string | 种子名（多文件模式的目录名） | extractFileEntries |
+| `mode` | BtFileMode | single / multi / none | extractFileEntries |
+| `announceList` | vector<vector<string>> | tracker 层级（tier × URL） | extractAnnounce / parseMagnet |
+| `nodes` | vector<pair<string,u16>> | DHT 自举节点 | extractNodes |
+| `infoHash` | string | 20 字节原始 SHA-1（非十六进制文本） | processRootDictionary |
+| `metadata` / `metadataSize` | string / size_t | info 字典的 bencode 原文及其长度 | processRootDictionary |
+| `privateTorrent` | bool | 私有种子标志（禁 DHT/PEX） | processRootDictionary |
+| `creationDate` / `comment` / `createdBy` | time_t / string / string | 三项展示性元信息 | processRootDictionary |
+| `urlList` | vector<string> | web-seed 种子服务器列表 | extractUrlList |
+
+构造函数只做零值初始化（[src/TorrentAttribute.cc:39-45](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.cc#L39-L45)）。
 
 #### 4.3.2 核心流程
 
-```text
-构造：torrentAttrs->announceList (vector<vector<string>>)
-   │  AnnounceList::reconfigure()  把每层变成 AnnounceTier，丢弃空层
-   ▼
-初始指针：currentTier_ = 第一层, currentTracker_ = 层内第一个 URL
-   │
-   ├─ getAnnounce()       → 取当前 URL（未初始化或全失败时返回空串）
-   │
-   ├─ announceSuccess()   → 当前 URL 挪到本层队首；指针回到第 1 层第 1 个
-   │
-   ├─ announceFailure()   → 层内右移；层尽头 → 层右移；
-   │                        所有层用尽 → currentTrackerInitialized_ = false
-   │                        （allTiersFailed() 为真，需 resetTier() 重来）
-   │
-   └─ resetTier()         → 回到第 1 层第 1 个，重新开始一轮
-```
-
-tier 自带一个 announce 事件状态机（为什么要记录事件：tracker 协议要求客户端报到时声明 `started/stopped/completed` 等事件，u6-l7 详讲）：
+属性的生命周期：
 
 ```text
-STARTED ──────────► DOWNLOADING      （首次报到成功，进入常规轮询）
-STARTED_AFTER_COMPLETION ─► SEEDING  （做种恢复）
-COMPLETED ────────► SEEDING          （刚下完，转做种）
-STOPPED ──────────► HALTED           （客户端退出，报到结束）
+解析期：processRootDictionary 填充 TorrentAttribute → setAttribute(CTX_ATTR_BT)
+读取期：getTorrentAttrs(dctx) 取回裸指针
+        getInfoHashString(dctx) = util::toHex(infoHash)   ← 供日志与重复检查
+运行期：BtSetup 等模块按需读取（u6-l2 详讲）
+派生期：torrent2Magnet(attrs) 把属性反向拼成 magnet URI
 ```
+
+一个特殊入口是 **magnet**：`parseMagnet`（[src/bittorrent_helper.cc:901-960](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L901-L960)）不读 .torrent 文件，而是从 `magnet:?xt=urn:btih:...` 里解出 infohash（支持 40 位十六进制与 32 位 Base32 两种形态）、`dn`（名字）与 `tr`（tracker），产出一个**只有 infohash/name/announceList 三项有值的极简 TorrentAttribute**（[src/bittorrent_helper.cc:962-966](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L962-L966) 的 `loadMagnet` 直接挂槽）。此时 `metadata` 为空，任务处于"元数据获取模式"，这是 u6-l9 的主线，本讲只需记住这个极简形态。
 
 #### 4.3.3 源码精读
 
-**从静态到运行时**。构造与填充在 [src/AnnounceList.cc:L45-L83](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L45-L83)：`reconfigure(vector<vector<string>>)` 逐层造 `AnnounceTier`，**空层直接跳过**——这是 4.2 节 `extractAnnounce` 丢弃空 tier 之后的第二道保险。真正的消费者是 `DefaultBtAnnounce`，它在构造函数初始化列表里一行完成转换（[src/DefaultBtAnnounce.cc:L70](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/DefaultBtAnnounce.cc#L70)）：
+挂载与读取的对称代码。挂载在 `processRootDictionary` 的最后一行（[src/bittorrent_helper.cc:527](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L527)）：
 
 ```cpp
-announceList_(bittorrent::getTorrentAttrs(downloadContext)->announceList),
+ctx->setAttribute(CTX_ATTR_BT, std::move(torrent));
 ```
 
-**指针初始化**（[src/AnnounceList.cc:L85-L95](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L85-L95)）：`resetIterator` 把两层指针摆到开头；若第一层就没有 URL，则 `currentTrackerInitialized_ = false`，此后 `getAnnounce()` 一律返回空串（[L97-L105](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L97-L105)）——「无 tracker 种子」因此天然合法，只能靠 DHT/PEX 找 peer。
-
-**成功路径**（[src/AnnounceList.cc:L107-L117](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L107-L117)）：三步——`nextEvent()` 推进事件机；把当前 URL `erase` 后 `push_front` 回本层队首（**成功的 tracker 升为层内第一**）；指针整体回到第 1 层第 1 个（**成功即「归位」**，下次还是从全局最优开始）：
+读取的一对便捷函数（[src/bittorrent_helper.cc:603-611](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L603-L611)）：
 
 ```cpp
-void AnnounceList::announceSuccess()
+TorrentAttribute* getTorrentAttrs(DownloadContext* dctx)
 {
-  if (currentTrackerInitialized_) {
-    (*currentTier_)->nextEvent();
-    auto url = *currentTracker_;
-    (*currentTier_)->urls.erase(currentTracker_);
-    (*currentTier_)->urls.push_front(std::move(url));
-    currentTier_ = std::begin(tiers_);
-    currentTracker_ = std::begin((*currentTier_)->urls);
-  }
+  return static_cast<TorrentAttribute*>(dctx->getAttribute(CTX_ATTR_BT).get());
 }
 ```
 
-**失败路径**（[src/AnnounceList.cc:L119-L135](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L119-L135)）：层内 `++currentTracker_`；走到层尾则 `nextEventIfAfterStarted()` 推进事件并 `++currentTier_` 换层；所有层用尽就把 `currentTrackerInitialized_` 置 false，同时 `currentTier_` 停在 `end(tiers_)`——这正是 `allTiersFailed()` 的判定（[L252-L255](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L252-L255)）。之后可 `resetTier()` 重来一轮（等价于重新 `resetIterator`）。
+注意头文件里特意注释"不要把返回值接进 `std::shared_ptr`"（[src/bittorrent_helper.h:157-159](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L157-L159)）——返回的是共享指针内部的裸指针，生命周期归 `DownloadContext` 所有。`getInfoHashString` 是最常用的读取口，把 20 字节原始哈希转成 40 字符十六进制（[src/bittorrent_helper.cc:629-632](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L629-L632)）。
 
-**层内洗牌**（[src/AnnounceList.cc:L243-L250](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L243-L250)）：`shuffle` 对每层 URL 用全局 `SimpleRandomizer` 洗牌。注意它**不打乱层间顺序**——主备关系保持，只随机层内镜像的选择。
+`torrent2Magnet` 展示了属性的"反向序列化"：xt 取大写十六进制 infohash、dn 取名字、每个 tier 的每个 URL 都展开成一个 `tr=` 参数（[src/bittorrent_helper.cc:993-1014](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L993-L1014)）。`-S` 输出的最后一行 `Magnet URI:` 就来自它。
 
-**事件的层级过滤**。`stopped`/`completed` 事件不是每层都能发：两个谓词 functor（[src/AnnounceList.cc:L174-L206](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L174-L206)）按 `event` 状态筛层，`countStoppedAllowedTier`/`countCompletedAllowedTier`（[L208-L218](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L208-L218)）计数，`moveToStoppedAllowedTier`（[L229-L241](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L229-L241)）用 `find_wrap_if` 从当前位置**环形**找一个可发该事件的层。直觉：已经 `HALTED` 的层不该再收 stopped，刚 STARTED 的层不该收 completed。
+`--show-files` 的输出则把 TorrentAttribute 与公共字段一起打印，模板函数 `print` 位于 [src/bittorrent_helper.h:341-394](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L341-L394)：
 
-**tier 的事件状态机**在 [src/AnnounceTier.cc:L46-L78](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.cc#L46-L78)：`nextEvent` 按上文迁移表推进；`nextEventIfAfterStarted` 只处理 `STOPPED→HALTED`、`COMPLETED→SEEDING` 两条——它是「整层 tracker 都失败、被迫换层」时调用的，语义上只允许已经工作过的层发生状态跃迁。
+```cpp
+o.printf("Info Hash: %s\n", util::toHex(torrentAttrs->infoHash).c_str());
+o.printf("Piece Length: %sB\n", util::abbrevSize(dctx->getPieceLength()).c_str());
+```
 
-**announce 数据的提取**回到 `extractAnnounce`（[src/bittorrent_helper.cc:L351-L380](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L351-L380)）：**`announce-list` 存在则完全忽略顶层 `announce`**；每层收集字符串时做 `strip`（去首尾空白——test.torrent 那个尾部空格就在这里被吃掉）加 `encodeNonUtf8`，空层丢弃。没有 `announce-list` 时退化为单 URL 组成一个单元素层。另外解析完成后还有一次**选项驱动的增删**：`adjustAnnounceUri`（[src/bittorrent_helper.cc:L1069-L1082](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1069-L1082)）按 `--bt-exclude-tracker`（`removeAnnounceUri`，[L1029-L1057](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1029-L1057)，支持 `*` 通配全删）和 `--bt-tracker`（`addAnnounceUri`，[L1059-L1067](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1059-L1067)，**每个追加 URI 独立成层**）修正 announceList。
+[src/bittorrent_helper.h:367-371](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L367-L371)：这两行正好一属性一公共字段，是"分界"最直观的注脚。`-S` 的完整触发链：`Context` 构造函数发现 `PREF_SHOW_FILES` 为真 → `showTorrentFile` → `bittorrent::load` + `print`（[src/Context.cc:89-95](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L89-L95)、[src/Context.cc:249-253](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L249-L253)）；若参数是普通 URI 则先经 `ProtocolDetector` 嗅探文件类型再分派（[src/Context.cc:113-144](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L113-L144)）。
 
-#### 4.3.4 代码实践：推演 AnnounceListTest
+#### 4.3.4 代码实践：`-S` 输出与字段的一一对照
 
-1. **实践目标**：不看断言，先手工推演两个测试用例中 `getAnnounce()` 的返回序列，理解移动规则。
-2. **操作步骤**：
-   - 打开 [test/AnnounceListTest.cc:L145-L170](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/AnnounceListTest.cc#L145-L170)（`testSingleAndMulti`），输入是 `ll8:tracker18:tracker2el8:tracker3ee`，即层结构 `[[tracker1, tracker2], [tracker3]]`。
-   - 只看调用序列 `getAnnounce / announceSuccess / announceFailure ...`，在纸上写下你预期的每次返回值，再对照断言。
-   - 也可以直接跑测试验证（在构建目录）：`make check TESTS=aria2-test` 后关注 `AnnounceListTest`，或用 `test/aria2-test` 配合 CppUnit 的测试名过滤。
-3. **需要观察的现象**：`announceSuccess()` 之后 `getAnnounce()` 返回的是 **tracker1**（成功者置顶+归位），而失败推进是「层内优先、层尽换层」。
-4. **预期结果**：与源码断言一致——依次 `tracker1` → (success) `tracker1` → (failure) `tracker2` → (failure) `tracker3` → (success) `tracker1`。最后一步正是注释 "tracker1 returns because after the announce to tracker3 succeeds, list pointer points to the first list" 所说的归位行为。待本地验证。
+**实践目标**：把 `aria2c -S` 的每一行输出钉到 `TorrentAttribute` 的具体字段或 `DownloadContext` 的公共字段上，固化"分界"认知。
+
+**操作步骤**：
+
+1. 运行三个仓库自带种子，观察输出差异：
+
+   ```bash
+   ./src/aria2c -S test/test.torrent        # 多文件 + announce-list + comment
+   ./src/aria2c -S test/single.torrent      # 单文件，只有单值 announce
+   ./src/aria2c -S test/url-list-singleFile.torrent   # 带 web-seed url-list
+   ```
+
+2. 对照下表填写来源（答案列已给出，先自己填再核对）：
+
+| `-S` 输出行 | 来源字段 |
+|-------------|----------|
+| Comment: | `TorrentAttribute::comment` |
+| Creation Date: | `TorrentAttribute::creationDate` |
+| Created By: | `TorrentAttribute::createdBy` |
+| Mode: | `TorrentAttribute::mode`（经 getModeString，[src/bittorrent_helper.cc:1084-1094](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1084-L1094)） |
+| Announce: | `TorrentAttribute::announceList`（每行一个 tier） |
+| Info Hash: | `TorrentAttribute::infoHash` 的十六进制 |
+| Piece Length: | `DownloadContext` 公共字段 |
+| The Number of Pieces: | 公共字段（分块哈希表长度） |
+| Total Length: | 公共字段（FileEntry 总长） |
+| URL List: | `TorrentAttribute::urlList` |
+| Nodes: | `TorrentAttribute::nodes` |
+| Name: | `TorrentAttribute::name` |
+| Magnet URI: | 由 `torrent2Magnet(attrs)` 现算 |
+| 文件清单 | `DownloadContext` 的 FileEntry 列表 |
+
+**需要观察的现象**：`test.torrent` 的 Announce 区域只列出 `http://tracker1/2/3` 三个 tier，而种子里的 `announce` 主键（`http://aria.rednoah.com/announce.php`）没有出现——因为 `announce-list` 存在时主键被忽略（4.2.3 节的优先级规则）。
+
+**预期结果**：三个种子的 Mode 分别为 multi / single / single；`url-list-singleFile.torrent` 会多出 URL List 区域。具体每行的值待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：种子只有顶层 `announce` 没有 `announce-list`，`AnnounceList` 里会有几层？
+**练习 1**：为什么 piece 哈希表放进 `DownloadContext` 公共字段而不是 `TorrentAttribute`？
+**答案**：分块校验机制（u5-l5 的 ChunkChecksumValidator）对 HTTP（Metalink 分块哈希）和 BT 是同一套，piece 哈希是协议无关的公共数据；放进公共字段后 PieceStorage/校验器无需感知 BT。
 
-答案：一层，且层内一个 URL。`extractAnnounce` 的退化分支（[src/bittorrent_helper.cc:L372-L379](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L372-L379)）把单 URI 包成一个单元素层，后续逻辑无需特判。仓库里的 `test/single.torrent` 就是这种种子（测试 [test/BittorrentHelperTest.cc:L272-L283](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/BittorrentHelperTest.cc#L272-L283) 断言 1 层 1 URL）。
+**练习 2**：magnet 任务刚创建时，`TorrentAttribute` 里哪些字段有值？
+**答案**：只有 `infoHash`、`name`（`[METADATA]` 前缀，缺 dn 时用 infohash 十六进制兜底）和 `announceList`（每个 `tr=` 一个 tier），见 [src/bittorrent_helper.cc:940-959](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L940-L959)。`metadata` 为空——这正是判断"元数据获取模式"的依据（[src/RequestGroup.cc:282](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/RequestGroup.cc#L282)）。
 
-**练习 2**：为什么 `announceFailure` 在换层前要调 `nextEventIfAfterStarted()` 而不是 `nextEvent()`？
-
-答案：换层发生在「本层 URL 全部失败」时。`nextEventIfAfterStarted` 只允许 `STOPPED→HALTED`、`COMPLETED→SEEDING` 两条跃迁，不会把还没成功报到过的层（STARTED）错误推进到 DOWNLOADING；而 `nextEvent` 无条件按表推进，会把「从未成功」的层标成已进入常规轮询，语义错误。
-
-**练习 3**：`--bt-tracker=a,b` 追加的两个 tracker 在 `AnnounceList` 里如何排布？
-
-答案：各自独立成层（`addAnnounceUri` 对每个 URI 单独 `push_back` 一层），排在种子原有层之后。它们不会并入已有层，因为它们与原层 tracker 没有镜像关系，失败退避也应独立进行。
-
-### 4.4 TorrentAttribute：BT 运行时信息的载体
+### 4.4 AnnounceList 与 AnnounceTier：多 tracker 层级
 
 #### 4.4.1 概念说明
 
-`TorrentAttribute` 是个纯数据 struct（没有行为），继承自空基类 `ContextAttribute`。它是「BT 协议在一颗种子里的一切私有信息」的集合体，也是 `DownloadContext` 属性槽 `CTX_ATTR_BT` 的唯一住户。把它与 u3-l2 的 `DownloadContext` 职责对照记忆：**文件列表、piece 长度、piece 哈希等「通用下载语义」放 ctx；infohash、announce、nodes 等「BT 语义」放属性**。
+`TorrentAttribute::announceList` 是**解析期的静态快照**（`vector<vector<string>>`），描述"这个种子有哪些 tracker"。到了运行期，tracker 交互（u6-l7）需要的是一台"游标机"：当前该向谁 announce、失败了下一个找谁、全部失败了吗、这一轮该报 started 还是 stopped 事件。这台游标机就是 `AnnounceList`，它的一个构造重载正好接受解析期的快照（[src/AnnounceList.cc:47-52](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L47-L52)）。
+
+层级语义来自 BEP-12 多 tracker 规范：
+
+- **tier（层）内的 tracker 互为镜像备份**：正常情况下它们跟踪同一群 peer，失败一个换同层下一个；
+- **tier 之间是并列的多台 tracker**：一层全挂才降级到下一层；
+- 每个 tier 附带一个**事件状态机**（`AnnounceTier::event`），记录本轮 announce 处于生命周期哪个阶段。
 
 #### 4.4.2 核心流程
 
-`TorrentAttribute` 的两条生命路径：
+两个核心游标操作：
 
 ```text
-路径 A（本讲）：.torrent / addTorrent / magnet 元数据
-   processRootDictionary 填充全部字段
-   → ctx->setAttribute(CTX_ATTR_BT, torrent)
+announceSuccess() （tracker 应答成功）
+  1. 当前 tier 的 event 前进一步（STARTED→DOWNLOADING 等）
+  2. 把成功的 URL 从原位摘出，插到本 tier 队首   ← 下次优先用它
+  3. 游标整体回到第一个 tier 的第一个 URL
 
-路径 B（u6-l9 预告）：magnet:?xt=urn:btih:...
-   parseMagnet 只填 3 个字段（infoHash / name / announceList）
-   → loadMagnet 挂到 ctx
-   → 元数据从 peer 处收齐后，再走路径 A 补全其余字段
+announceFailure() （tracker 失败）
+  1. currentTracker_ 前移一位（同 tier 换备份）
+  2. 若同层用尽 → tier 的 event 强制推进（nextEventIfAfterStarted）
+     → currentTier_ 降级到下一 tier 的首个 URL
+  3. 若所有 tier 用尽 → currentTrackerInitialized_ = false
+     → allTiersFailed() 返回 true
+```
+
+事件状态机（[src/AnnounceTier.cc:46-64](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.cc#L46-L64)）：
+
+```text
+STARTED ──成功──▶ DOWNLOADING（此后周期性 announce 不带事件参数）
+STARTED_AFTER_COMPLETION ──▶ SEEDING
+COMPLETED ──▶ SEEDING
+STOPPED ──▶ HALTED
 ```
 
 #### 4.4.3 源码精读
 
-**字段清单**（[src/TorrentAttribute.h:L48-L69](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.h#L48-L69)）逐个对应种子的来源：
+**数据成员**只有四个（[src/AnnounceList.h:50-59](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.h#L50-L59)）：tier 队列 `tiers_`、双游标 `currentTier_`/`currentTracker_`、以及有效性标志 `currentTrackerInitialized_`。tier 本体是"URL 双端队列 + 事件枚举"（[src/AnnounceTier.h:57-58](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.h#L57-L58)），构造时 event 固定为 `STARTED`（[src/AnnounceTier.cc:39-42](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.cc#L39-L42)）。
 
-| 字段 | 类型 | 来源/含义 |
-|---|---|---|
-| `name` | `string` | info 的 `name`/`name.utf-8`，多文件模式即根目录名 |
-| `mode` | `BtFileMode` | `SINGLE`/`MULTI`/`NONE`，由有无 `files` 决定；`getModeString`（[src/bittorrent_helper.cc:L1084-L1094](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1084-L1094)）转文本 |
-| `announceList` | `vector<vector<string>>` | 4.3 节的静态层级快照 |
-| `nodes` | `vector<pair<string, uint16_t>>` | `nodes` 字段的 DHT 引导节点，端口合法范围 (0, 65536)（[src/bittorrent_helper.cc:L384-L409](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L384-L409)） |
-| `infoHash` | `string` | 20 字节**原始** SHA-1（注释明确 "raw hash value 20 bytes"） |
-| `metadata` / `metadataSize` | `string` / `size_t` | info 字典的 bencode 原文及其长度，magnet 场景的核心（u6-l9） |
-| `privateTorrent` | `bool` | info 的 `private == 1` |
-| `creationDate` / `comment` / `createdBy` | — | 根字典的三个杂项 |
-| `urlList` | `vector<string>` | HTTP Seeding 的 web-seed URI |
+**构造**：`reconfigure` 把 `vector<vector<string>>` 逐层转成 `AnnounceTier`（空层直接丢弃），随后 `resetIterator` 把游标放到第一层第一个（[src/AnnounceList.cc:63-95](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L63-L95)）。
 
-构造函数只做零值初始化（[src/TorrentAttribute.cc:L39-L45](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.cc#L39-L45)）。整个类型禁止拷贝（` TorrentAttribute(const TorrentAttribute&) = delete`），一律经 `shared_ptr` 共享。
-
-**读取便捷函数**。全代码库取 BT 属性都走这两个窄门（[src/bittorrent_helper.cc:L603-L611](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L603-L611) 与 [L624-L632](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L624-L632)）：`getTorrentAttrs` 做属性槽的 `static_cast`（头文件 L157-L159 特意注释 "Don't allow copying"，提醒不要把返回值装进 `shared_ptr`——那会导致二次释放），`getInfoHashString` 把原始 20 字节转十六进制文本：
+**announceSuccess**（[src/AnnounceList.cc:107-117](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L107-L117)）：
 
 ```cpp
-std::string getInfoHashString(DownloadContext* dctx)
-{
-  return util::toHex(getTorrentAttrs(dctx)->infoHash);
-}
+(*currentTier_)->nextEvent();
+auto url = *currentTracker_;
+(*currentTier_)->urls.erase(currentTracker_);
+(*currentTier_)->urls.push_front(std::move(url));
+currentTier_ = std::begin(tiers_);
+currentTracker_ = std::begin((*currentTier_)->urls);
 ```
 
-**magnet 路径**。`parseMagnet`（[src/bittorrent_helper.cc:L901-L960](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L901-L960)）解析 `magnet:?xt=urn:btih:...&dn=...&tr=...`：`xt` 支持 40 位十六进制与 32 位 Base32 两种 infohash 写法；每个 `tr` 参数独立成层塞进 `announceList`；`name` 缺省拼成 `[METADATA]<infohash>`。`loadMagnet`（[L962-L966](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L962-L966)）把它挂上属性槽——此时除 infoHash/name/announceList 外全是零值，「文件多长、几个 piece、叫什么」统统未知，这正是 u6-l9「先下元数据再下数据」两阶段任务的起点。
+四步对应 4.4.2 流程的 1-2-3：摘下成功 URL 插到队首，再把游标整体归位到第一层。**这解释了 aria2 的 tracker 偏好：谁最近成功过就一直用谁，直到它失败。**
 
-**反向转换**。`torrent2Magnet`（[src/bittorrent_helper.cc:L993-L1014](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L993-L1014)）把属性拼回 magnet 链接（infohash 转大写 hex、`dn`/`tr` 百分号编码）；`metadata2Torrent`（[L968-L991](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L968-L991)）用 `metadata` 原文拼出 `d13:announce-list...4:info<metadata>e` 的种子字节串——`--show-files` 输出里的 `Magnet URI:` 行就来自前者。
+**announceFailure**（[src/AnnounceList.cc:119-135](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L119-L135)）：同层耗尽才降层，降层时顺手 `nextEventIfAfterStarted()` 推进事件（只对 STOPPED/COMPLETED 生效，[src/AnnounceTier.cc:66-78](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceTier.cc#L66-L78)）。
 
-**--show-files 的输出侧**。`showTorrentFile`（[src/Context.cc:L89-L95](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L89-L95)）是 `-S` 的入口——造一个**空 Option**（`make_shared<Option>()`，所以 `PREF_DIR` 为空、路径按相对路径显示）和空 `DownloadContext`，调 `bittorrent::load` 后交给 `bittorrent::print` 模板（[src/bittorrent_helper.h:L341-L394](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L341-L394)）逐行打印 Comment/Creation Date/Created By/Mode/Announce（每层一行、层内空格分隔）/Info Hash/Piece Length/Piece 数/Total Length/URL List/Nodes/Name/Magnet URI，最后 `util::toStream` 按 `idx|path/length` 表格列出文件（格式见 [src/util.h:L366-L384](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/util.h#L366-L384)）。`Context` 构造函数里 `-S` 与正常下载互斥、打印后直接 `return`（[src/Context.cc:L249-L258](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L249-L258)），所以 `-S` 不会创建任何 RequestGroup。
+**事件的"层资格"判定**：退出/完成事件不是每层都能发。两个仿函数 `FindStoppedAllowedTier`/`FindCompletedAllowedTier` 按当前 event 判断该层是否接受 stopped/completed 事件（[src/AnnounceList.cc:174-206](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L174-L206)），配套的 `countStoppedAllowedTier`/`moveToStoppedAllowedTier` 等（[src/AnnounceList.cc:208-241](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L208-L241)）在退出前把游标 wrap-around 挪到合法层。例如刚降到第二层（event 仍是 STARTED）时要发 stopped，就得先 `moveToStoppedAllowedTier` 找一个已在 DOWNLOADING/SEEDING 状态的层。运行期消费方 `DefaultBtAnnounce` 持有 `AnnounceList announceList_`，构造自 `torrentAttrs->announceList`（[src/DefaultBtAnnounce.cc:70](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/DefaultBtAnnounce.cc#L70)），并在每次 announce 前用上述 API 校准事件（[src/DefaultBtAnnounce.cc:119-146](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/DefaultBtAnnounce.cc#L119-L146)）。
 
-#### 4.4.4 代码实践：验证 torrent2Magnet
+**解析期与运行期的桥**：`adjustAnnounceUri` 在创建 RequestGroup 时按 `--bt-exclude-tracker`/`--bt-tracker` 两个选项改造**解析期**的 `TorrentAttribute::announceList`（先删后加，每个新 URI 自成一层，`*` 通配全部删除；[src/bittorrent_helper.cc:1029-1082](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1029-L1082)），调用点在 [src/download_helper.cc:209-211](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/download_helper.cc#L209-L211)。`AnnounceList::shuffle`（[src/AnnounceList.cc:243-250](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L243-L250)）则把每层 URL 随机洗牌，避免全体客户端同时压垮层内第一个 tracker。
 
-1. **实践目标**：确认 `--show-files` 输出的 Magnet URI 行确实由 `torrent2Magnet` 的规则拼出。
-2. **操作步骤**：
-   - 运行 `./src/aria2c -S test/test.torrent`，抄下 `Magnet URI:` 一行。
-   - 对照 [src/bittorrent_helper.cc:L993-L1014](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L993-L1014) 逐段核对：`xt=urn:btih:` 后应是大写十六进制 infohash；`&dn=aria2-test`；三个 `&tr=` 依三层 announce 顺序出现，URL 中的 `:` 与 `/` 被百分号转义。
-   - 再用一个真实种子重复一次，观察 `tr` 数量与层数的关系。
-3. **需要观察的现象**：magnet 里的 `xt` 与 `Info Hash:` 行内容相同（仅大小写差异——`Info Hash` 行是小写 `util::toHex`，`xt` 是 `toUpper` 后的大写）。
-4. **预期结果**：`magnet:?xt=urn:btih:248D0A1CD08284299DE78D5C1ED359BB46717D8C&dn=aria2-test&tr=http%3A%2F%2Ftracker1&tr=...`（确切转义细节待本地验证）。把这条 magnet 交给 `aria2c` 下载（u6-l9 的流程），`parseMagnet` 应能解出与原种子相同的 infohash——属性结构在两个方向间闭环。
+#### 4.4.4 代码实践：用单元测试推演 tier 轮换
+
+**实践目标**：不运行 aria2 也能准确预测 announceSuccess/Failure 对游标的影响，用测试用例验证预测。
+
+**操作步骤**：
+
+1. 阅读 [test/AnnounceListTest.cc:64-109](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/AnnounceListTest.cc#L64-L109) 的 `testSingleElementList`：bencode 串 `ll8:tracker1el8:tracker2el8:tracker3ee` 表示三个各自只有一个 URL 的 tier。
+2. 先遮住断言，只看操作序列，自己在纸上推演每次 `announceFailure()`/`announceSuccess()` 后 `getAnnounce()` 的返回值与 `getEventString()`。
+3. 编译并运行测试验证（测试二进制是 `test/aria2c`，会用 CppUnit 跑全部用例，从输出中过滤关心的类即可）：
+
+   ```bash
+   make -C src -j$(nproc) && make -C test check 2>&1 | grep -i announce
+   ```
+
+**需要观察的现象**：三次 `announceFailure()` 后 `allTiersFailed()` 为真；`resetTier()` 后游标回到 tracker1；随后对 tracker2 `announceSuccess()`，游标跳回 tracker1（第一层优先）。
+
+**预期结果**：与你的手推完全一致。最值得注意的一步：游标已因两次失败停在第二层的 tracker2，此时 `announceSuccess()` 之后 `getAnnounce()` 返回的却是 **tracker1**——成功者只被提升到"自己所在层"的队首，而游标整体归位到**第一层**的第一个 URL。另一个彩蛋：`testSingleElementList` 末尾 `getEventString()` 变成空串，因为 `announceSuccess` 已把该层事件推进到 DOWNLOADING，而 DOWNLOADING 状态的常规 announce 不携带事件参数（[src/AnnounceList.cc:154-172](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L154-L172) 的 switch 默认分支返回空串）。make check 的具体过滤输出待本地验证。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`TorrentAttribute::infoHash` 里存的是十六进制字符串还是原始字节？怎么看出 来？
+**练习 1**：`announce-list` 为 `[[A1,A2],[B1]]`，A1、A2 依次失败后下一次 announce 是谁？之后 B1 也失败呢？
+**答案**：A1 失败 → A2（同层备份）；A2 失败 → B1（降层）；B1 失败 → `currentTrackerInitialized_ = false`，`allTiersFailed()` 为真，本轮不再 announce，等下个周期 `resetTier()` 从头再来。这正是 `testSingleAndMulti` 用例（[test/AnnounceListTest.cc:145-165](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/test/AnnounceListTest.cc#L145-L165)）覆盖的形态。
 
-答案：原始 20 字节。字段注释 "raw hash value 20 bytes"（[src/TorrentAttribute.h:L53-L54](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TorrentAttribute.h#L53-L54)），且 `getInfoHashString` 需要再过一次 `util::toHex` 才得到 40 字符文本。DHT 与 tracker 报文里携带的也是原始字节形式。
+**练习 2**：`--bt-tracker` 追加的 tracker 为什么拿不到 `AnnounceList::shuffle` 的洗牌待遇？
+**答案**：洗牌发生在运行期 `AnnounceList` 上（如 BtSetup 阶段），而 `--bt-tracker` 的追加发生在更早的解析期——`adjustAnnounceUri` 直接往 `TorrentAttribute::announceList` 追加单元素层（[src/bittorrent_helper.cc:1059-1067](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L1059-L1067)）。单元素层内部无序可洗；层间顺序保持"追加在尾"。
 
-**练习 2**：`getTorrentAttrs` 的头文件注释为什么强调「不要把返回值收进 `std::shared_ptr`」？
+**练习 3**：为什么 stopped 事件的发送资格要用 `FindStoppedAllowedTier` 限制，而不是对所有 tier 都发一遍？
+**答案**：stopped 表示"我要下线了"，只对曾经成功 announce 过（进入 DOWNLOADING/SEEDING 等状态）的层才有意义；对一个从未成功连接的层发 stopped 只是无意义的流量。运行期代码用 `countStoppedAllowedTier` 判断是否存在可发层、`moveToStoppedAllowedTier` 把游标 wrap 到最近的合法层（[src/AnnounceList.cc:208-241](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AnnounceList.cc#L208-L241)）。
 
-答案：它返回的是属性槽内 `shared_ptr<ContextAttribute>` 的**裸指针**（`.get()` 后 `static_cast`），所有权仍在 `DownloadContext`。若用另一个 `shared_ptr<TorrentAttribute>` 接住返回值，两处 `shared_ptr` 各自计数，先析构一方就会把对象释放，另一方悬空。
+## 5. 综合实践：独立复现 aria2 的 infohash
 
-**练习 3**：magnet 解析得到的 `TorrentAttribute` 里 `metadataSize` 是多少？为什么？
+本讲所有模块可以串成一个任务：**不依赖 aria2 的解析代码，用约 20 行 Python 独立解析一个种子并算出与 aria2 完全相同的 infohash**。能做完，说明你真正吃透了 bencode、infohash 定义与解析流程。
 
-答案：0（构造函数零初始化，`parseMagnet` 不填它）。magnet 只携带 infohash，info 字典根本不存在；`metadataSize` 要等 u6-l9 的 ut_metadata 扩展把元数据收齐、走完 `processRootDictionary` 后才有值。
+**任务步骤**：
 
-## 5. 综合实践：给 test.torrent 做一次「全息体检」
+1. 写一个极简 bencode 解码器（示例代码）：
 
-把本讲四个模块串起来，完成一次从字节到运行时结构的完整验证（需要一个可编译的 aria2 环境，见 u1-l2）。
+   ```python
+   # 示例代码：my_torrent_info.py
+   import hashlib, sys
 
-**任务**：对仓库自带的 `test/test.torrent` 完成以下三步，并写一份对照笔记。
+   def decode(buf, pos):
+       c = buf[pos:pos+1]
+       if c == b'i':                       # 整数
+           end = buf.index(b'e', pos)
+           return int(buf[pos+1:end]), end + 1
+       if c == b'l':                       # 列表
+           pos, out = pos + 1, []
+           while buf[pos:pos+1] != b'e':
+               v, pos = decode(buf, pos); out.append(v)
+           return out, pos + 1
+       if c == b'd':                       # 字典
+           pos, out = pos + 1, {}
+           while buf[pos:pos+1] != b'e':
+               k, pos = decode(buf, pos)
+               v, pos = decode(buf, pos); out[k] = v
+           return out, pos + 1
+       end = buf.index(b':', pos)          # 字符串
+       n = int(buf[pos:end])
+       return buf[end+1:end+1+n], end + 1 + n
 
-1. **读字节**（4.1）：用 4.1.4 的解码脚本（或手工）解出根字典的 7 个键：`announce`、`announce-list`、`private`、`comment`、`creation date`、`created by`、`info`（`info` 内还有 `files/name/piece length/pieces` 四个键）。
-2. **看输出**（4.2、4.4）：
+   def encode(v):                          # 只需覆盖 dict/str/int
+       if isinstance(v, dict):
+           return b'd' + b''.join(
+               encode(k) + encode(v[k]) for k in sorted(v)) + b'e'
+       if isinstance(v, bytes):
+           return str(len(v)).encode() + b':' + v
+       return b'i' + str(v).encode() + b'e'
+
+   buf = open(sys.argv[1], 'rb').read()
+   root, _ = decode(buf, 0)
+   info = root[b'info']
+   print('infohash =', hashlib.sha1(encode(info)).hexdigest().upper())
+   print('name =', info[b'name'].decode('utf-8', 'replace'))
+   print('piece length =', info[b'piece length'])
+   print('num pieces =', len(info[b'pieces']) // 20)
+   ```
+
+2. 对仓库自带种子与任一真实种子各跑一次，再与 aria2 对照：
 
    ```bash
+   python3 my_torrent_info.py test/test.torrent
    ./src/aria2c -S test/test.torrent
    ```
 
-   把输出的每一行与 `bittorrent::print`（[src/bittorrent_helper.h:L341-L394](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.h#L341-L394)）里的 `printf` 逐一对应，回答：
-   - `Mode:` 为什么是 `multi`？（info 里存在 `files` 列表）
-   - `Announce:` 为什么是三行、每行一个 URL，而不是一行三个？（announce-list 是三个单元素 tier；print 逐层换行）
-   - `Info Hash:` 为什么不是种子里「某个字段」的值？（它是重编码 info 字典后 SHA-1 的计算结果，种子里没有这个字段）
-   - 文件表里两个文件的路径前缀 `aria2-test/` 从哪来？（extractFileEntries 把 `name` 插入 `pathelem[0]`）
-3. **改一字节，验 infohash**（4.2 的核心结论）：
+3. 比对两边的 infohash、name、piece length、piece 数。
 
-   ```bash
-   cp test/test.torrent /tmp/t2.torrent
-   printf 'X' | dd of=/tmp/t2.torrent bs=1 seek=<info字典内任一偏移> conv=notrunc
-   ./src/aria2c -S /tmp/t2.torrent
-   ```
+**验收标准**：
 
-   在 `/tmp` 的副本上（**不要改动仓库文件**）把 info 字典里的任意一个字节改掉（比如 `name` 里的一个字符），对比两次 `-S` 输出：`Info Hash:` 变了，`Magnet URI:` 的 `xt` 同步变化；而只改 info 之外的 `comment` 则 infohash 不变。这直接印证 \(\text{infoHash} = \mathrm{SHA1}(\mathrm{bencode}(\text{info}))\) 的边界——**哈希只覆盖 info 子字典**。
+- 两边 infohash 逐字符一致（`encode` 中 `sorted(v)` 这一步就是 aria2 侧 `std::map` 有序键的对应物，漏掉它对多数种子不报错、对键未排序的病态种子会算错——想明白为什么）；
+- piece 数满足 \( \lceil 总长 / pieceLength \rceil \)，与 4.2 节的一致性检查呼应；
+- （可选进阶）在 `src/bittorrent_helper.cc` 的 `processRootDictionary` 中 `torrent->infoHash.assign(...)` 之后（[src/bittorrent_helper.cc:438-440](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/bittorrent_helper.cc#L438-L440) 附近）插入一行日志并在 `extractAnnounce` 的 `push_back` 之后打印各层 URL，重新编译后用 `./src/aria2c -S test/test.torrent` 验证三方一致：
 
-**预期结果**：改 info 内字节 → infohash 变；改 comment 字节 → infohash 不变。若把 `pieces` 改短导致哈希数不再等于 \(\lceil 384/128 \rceil = 3\)，aria2 会直接报 "Too few/many piece hash." 拒绝解析。全部现象待本地验证。
+  ```cpp
+  // 示例代码：需同时在文件头部补 #include "LogFactory.h"
+  A2_LOG_NOTICE(fmt("MYLOG infohash=%s",
+                    util::toHex(torrent->infoHash).c_str()));
+  ```
+
+  注意默认控制台日志级别是 NOTICE（[src/OptionHandlerFactory.cc:188](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/OptionHandlerFactory.cc#L188)），所以示例特意用 `A2_LOG_NOTICE` 而非 `A2_LOG_INFO`，后者需加 `--console-log-level=info` 才可见。加日志的编译与显示效果待本地验证。
 
 ## 6. 本讲小结
 
-- `.torrent` 是 bencode 编码的字典；`bencode2::decode` 委托 `GenericParser` 骨架增量解析成 `ValueBase` 树，`encode` 用 visitor 重编码，`Dict` 的 `std::map` 底座保证键有序、重编码与规范种子原文一致。
-- `processRootDictionary` 是总装车间：infohash = SHA-1(重编码的 info 字典)，`pieces` 按 20 字节切成 piece 哈希表写入 `DownloadContext`，文件列表变成带累加 offset 的 `FileEntry`（多文件模式再设 basePath），最后用 \(\lceil\)总长/piece 长\(\rceil\) 校验哈希个数，全部通过才把 `TorrentAttribute` 挂上 `CTX_ATTR_BT` 槽。
-- 防御贯穿解析全程：根/info 字典缺失、负长度、目录穿越、piece 哈希数不符都会抛 `BITTORRENT_PARSE_ERROR`；空 tier、非法端口节点、非字符串路径元素则被静默跳过或报错。
-- `AnnounceList`/`AnnounceTier` 用「两层迭代器 + 成功置顶归位、失败层内右移层尽换层」的移动规则表达 tracker 优先级，没有数值权重；tier 自带 started→downloading/seeding/halted 事件状态机，stopped/completed 事件只发给状态允许的层。
-- `TorrentAttribute` 是 BT 专属信息的纯数据聚合（infohash、metadata、announceList、nodes、private 等 11 个字段）；magnet 路径只填 infoHash/name/announceList 三项，其余等元数据收齐后补全，为 u6-l9 埋下伏笔。
-- `--show-files`（`-S`）是本讲最好的实验台：`showTorrentFile` → `load` → `print`，每一行输出都能在源码里找到对应的 `printf`。
+- .torrent 文件本体是一个 bencode 字典；`bencode2::decode/encode` 是它的双向门面，`Dict` 基于 `std::map` 保证键有序，使"重新编码 info 字典再取 SHA-1"得到的 infohash 与原文截取一致。
+- `bittorrent_helper` 的 `load/loadFromMemory` 家族殊途同归到 `processRootDictionary`：校验根/info 字典 → 算 infohash 与 metadata → 读 pieces（每 20 字节一个 piece 哈希）与 piece length → 装配 FileEntry（含目录穿越防护与 `⌈总长/pieceLength⌉ == numPieces` 一致性检查）→ 读 announce/nodes/杂项 → 挂载属性。
+- 解析产物按"公共 vs 专属"分流：文件列表、piece 长度、分块哈希进 `DownloadContext` 公共字段（供 u5 存储/校验复用）；infohash、tracker 层级、metadata、私有标志等进 `TorrentAttribute`（BT 属性槽）；magnet 只产出仅含 infohash/name/announceList 的极简属性。
+- `AnnounceList` 是解析期快照之上的运行期游标机：tier 内互为备份、失败降层、成功者提至队首并整体归位第一层、全部失败即 `allTiersFailed`；每个 tier 的 `AnnounceTier::event` 状态机（STARTED→DOWNLOADING→…→HALTED）决定本轮 announce 的事件参数与 stopped/completed 的发送资格。
 
 ## 7. 下一步学习建议
 
-本讲结束于「静态元数据就绪」。下一讲 **u6-l2 BtRegistry 与 BtSetup** 讲这些元数据如何驱动 BT 运行时对象的装配（PeerStorage、PieceStorage、BtInteractive 等十余个对象如何在下载开始时挂到注册表）。后续衔接：
-
-- 想看 infohash 在网络协议里怎么用：u6-l3（握手消息里交换 infohash 校验身份）、u6-l7（tracker 请求的 `info_hash` 参数）、u7（DHT 以 infohash 为键存 peer）。
-- 想看 `metadata`/`metadataSize` 的真正用途：u6-l9 magnet 与 ut_metadata。
-- 想深入解析器骨架（`StructParserStateMachine`、增量状态机）：u9-l2 ValueBase 与解析器骨架。
-- 想验证理解最直接的方式：给 `test/BittorrentHelperTest.cc` 仿照 `testLoadFromMemory` 补一个用例（例如断言 `privateTorrent == true`），跑 `make check`（测试体系见 u9-l5）。
+本讲结束时，种子已经被"读明白"成 `DownloadContext` + `TorrentAttribute`，但还没有任何运行时对象。下一讲 **u6-l2 BtRegistry 与 BtSetup：BT 运行时的装配** 讲这些解析产物如何被装配成 PeerStorage、PieceStorage、BtInteractive 等一整套运行时对象，并以 infohash 为键注册进全局 `BtRegistry`。阅读建议：提前浏览 [src/BtSetup.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/BtSetup.cc) 的 `setup()` 函数，数一数它创建了多少个以 `torrentAttrs`/`downloadContext` 为原料的对象；对 tracker 轮换机制意犹未尽的读者可提前看 u6-l7 的 `DefaultBtAnnounce`（本讲 4.4 已埋下伏笔）。

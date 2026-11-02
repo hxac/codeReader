@@ -192,7 +192,7 @@ for frame_idx in selected_idx:
 - [dataset_mapper.py:L120-L153](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L120-L153)：构造器保存五个采样相关参数：`sampling_frame_num`（默认 2）、`sampling_frame_range`（默认 5，注意配置层默认是 20，见 [config.py:L10](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/config.py#L10)）、`sampling_frame_shuffle`、`num_classes`（来自 `SEM_SEG_HEAD.NUM_CLASSES`，YTVIS 为 40）。顺带一提：`use_instance_mask` 只被存起来，`__call__` 里从未读它——又一个「存而不用」的旋钮。
 - [dataset_mapper.py:L155-L174](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L155-L174)：`from_config` 把 `INPUT.SAMPLING_FRAME_NUM/RANGE/SHUFFLE` 三个键（u9-l1 的三个视频数据配置中的三个）读进来；增强列表由 `build_augmentation` 组装。
 - [dataset_mapper.py:L187-L199](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L187-L199)：采帧主逻辑，对应上面伪代码的 1-4 步。两个值得注意的细节：**其一**，[L194-L197](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L194-L197) 的 `np.random.choice` 没写 `replace=False`，是**有放回采样**——T=2 时只抽 1 帧无所谓，T>2 时同一帧可能在一个 clip 里出现两次（IFC 移植以来如此，算历史行为而非刻意设计）。**其二**，参考帧一定入选，保证 clip 不会全部落在远离标注密集区的位置。
-- [dataset_mapper.py:L200-L203](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L200-L203)：默认 `sorted` 恢复时间先后（时空管道的方向性对监督有意义）；开 `sampling_frame_shuffle` 则打乱——等价于把视频当无序帧集合训练，官方配置未开启。
+- [dataset_mapper.py:L199-L203](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L199-L203)：默认 `sorted` 恢复时间先后（时空管道的方向性对监督有意义）；开 `sampling_frame_shuffle` 则打乱——等价于把视频当无序帧集合训练，官方配置未开启；`else` 分支即推理侧的全帧 `range(video_length)`。
 - [dataset_mapper.py:L205-L206](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L205-L206)：`pop("annotations")` 与 `pop("file_names")`——从 dataset dict 里摘出来逐帧消费，避免它们残留在输出里被 DataLoader pickle。
 - [dataset_mapper.py:L216-L234](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L216-L234)：逐帧读图。[L224](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L224) 的 `check_image_size` 要求每帧实尺寸等于视频级 `width/height`——**YTVIS 假设一段视频内分辨率恒定**。[L234](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L234) 转成 CHW 连续 Tensor（注释解释了 DataLoader 对 Tensor 走共享内存、对大杂烩走 pickle 的效率差异，与图像版 mapper 同款注释）。
 - [dataset_mapper.py:L236-L237](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L236-L237)：`if (video_annos is None) or (not self.is_train): continue`——推理分支到此为止，只装图片不装标注；所以测试样本没有 `instances` 键。
@@ -304,24 +304,28 @@ masks 堆叠成 (N, T, H_pad, W_pad)；labels 取 gt_classes[valid]
 
 ```python
 # 示例代码：用假标注直接驱动 ytvis_annotations_to_instances
-import numpy as np, torch
-from mask2former_video.data_video.dataset_mapper import (
-    ytvis_annotations_to_instances, _get_dummy_anno,
-)
+import numpy as np
+from mask2former_video.data_video.dataset_mapper import ytvis_annotations_to_instances
 
 H, W = 48, 64
 def mask_a():                      # 轨道 1：左上角 12x12
     m = np.zeros((H, W), dtype=bool); m[5:17, 5:17] = True;  return m
 def mask_b():                      # 轨道 2：右下角 10x10
     m = np.zeros((H, W), dtype=bool); m[30:40, 30:40] = True; return m
+def dummy_anno():                  # 缺席占位：四个字段的语义与 _get_dummy_anno 完全一致，
+    return {                       # 但 segmentation 必须是 2D 全零位掩码（见下方注意）
+        "bbox": [0, 0, 0, 0], "bbox_mode": 0,
+        "category_id": 40, "id": -1,
+        "segmentation": np.zeros((H, W), dtype=bool),
+    }
 
 frame0 = [  # 两轨道都在场（category_id 已是连续 id；id 为 json 轨道 id）
     {"bbox": [5,5,12,12], "bbox_mode": 0, "category_id": 0, "id": 101, "segmentation": mask_a()},
     {"bbox": [30,30,10,10], "bbox_mode": 0, "category_id": 1, "id": 202, "segmentation": mask_b()},
 ]
-frame1 = [  # 轨道 1 在场；轨道 2 用 dummy 占位
+frame1 = [  # 轨道 1 在场；轨道 2 缺席，用 dummy 占住第 2 行
     {"bbox": [7,6,12,12], "bbox_mode": 0, "category_id": 0, "id": 101, "segmentation": mask_a()},
-    _get_dummy_anno(num_classes=40),
+    dummy_anno(),
 ]
 
 for name, annos in [("frame0", frame0), ("frame1", frame1)]:
@@ -339,7 +343,7 @@ for name, annos in [("frame0", frame0), ("frame1", frame1)]:
 - `frame1`：`gt_classes = [0, 40]`（dummy 的越界类别），`gt_ids = [101, -1]`（dummy 的缺席标记），mask 形状仍为 `(2, 48, 64)`、第二行全零——**行数与行序和 frame0 对齐**，这正是消费端能按行堆叠的原因。
 - `gt_boxes` 自动由 bbox 转成 XYXY（[L84](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L84)），dummy 行是 `[0,0,0,0]`。
 
-**注意**：`bbox_mode` 此处直接用了枚举值 `0`（`BoxMode.XYXY_ABS`）；示例刻意直接给 2D 位掩码来满足该函数的断言——若把 polygon 列表传进去会在 [L100](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L100) 处断言失败，这本身就是「该函数为何不在主流程」的最好证明。
+**注意（本实践最有价值的一步）**：示例里的缺席占位**没有**直接用 `_get_dummy_anno`——它的 `segmentation` 是退化多边形列表 `[np.array([0.0] * 6)]`，传进本函数会在 [L100](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/dataset_mapper.py#L100) 处崩溃（Python list 没有 `.ndim` 属性，先于断言抛 `AttributeError`）。所以必须手工造一个「字段语义相同、但给 2D 位掩码」的 dummy。这本身就是「该函数为何不在主流程」的最好证明：主路径标注里的 segmentation 是 polygon/RLE，只有 detectron2 的 `utils.annotations_to_instances` 能栅格化它们。另外 `bbox_mode` 直接用了枚举值 `0`（`BoxMode.XYXY_ABS`）。可以把 `_get_dummy_anno(40)` 替换进 `frame1` 重跑一次，亲眼看这次崩溃——「遗产件为什么被旁置」就浓缩在这一行报错里。
 
 #### 4.3.5 小练习与答案
 
@@ -532,7 +536,7 @@ for seed in range(6):                  # 多跑几次覆盖不同采样结果
 
 **需要观察的现象 / 预期结果**（按源码推演，待本地验证）：
 
-1. `out["image"]` 长度 2，每帧 `(3, 720, 960)` 左右（ResizeShortestEdge 把 48 提到 360，长边按 64/48 比例放大）。两帧 shape 完全相同——本例里这是「平凡成立」的（同一张图、固定目标尺寸）；换成随机尺寸范围或加上翻转时，就必须靠仓库改造版增强的 `clip_frame_cnt` 计数器（4.2.3）来强制帧间参数一致了。
+1. `out["image"]` 长度 2，每帧 `(3, 360, 480)`——`ResizeShortestEdge(360, 640)` 把短边 48 放大到 360（缩放系数 7.5），长边 64 随之到 480，未触及 640 上限。两帧 shape 完全相同——本例里这是「平凡成立」的（同一张图、固定目标尺寸）；换成随机尺寸范围或加上翻转时，就必须靠仓库改造版增强的 `clip_frame_cnt` 计数器（4.2.3）来强制帧间参数一致了。
 2. **采到第 0 帧**的 seed：每帧 `Instances` 都是 2 行；第 0 帧 `gt_ids=[101, 202]`（顺序由 set 遍历决定，也可能是 `[202, 101]`，但**两帧的行序一致**）；另一帧轨道 202 所在行为 dummy——`gt_id=-1`、`gt_class=40`、mask 全零。
 3. **没采到第 0 帧**的 seed：`_ids` 只含轨道 101，每帧只有 1 行，`gt_ids=[101]`——轨道集合由**采样到的帧**决定，这正是 4.3 练习 3 的结论落地。
 4. `gt_ids` 里的 101/202 是 json 原始轨道 id，从未被映射成 0/1。
@@ -549,4 +553,4 @@ for seed in range(6):                  # 多跑几次覆盖不同采样结果
 
 ## 7. 下一步学习建议
 
-数据侧就位后，下一讲 **u9-l4（视频损失与 YTVIS 评估）** 讲这批 `{"labels", "ids", "masks"}` 目标如何被消费：`VideoSetCriterion` 与 `VideoHungarianMatcher` 怎么把 `(N, T, H, W)` 的管道整体送去匹配和逐点监督（对照 u5-l1/u5-l2 的图像版），以及 `YTVISEvaluator` 如何基于 `ytvis_api` 输出官方指标。读码顺序建议：先对照 [mask2former_video/modeling/matcher.py:L95-L154](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/modeling/matcher.py#L95-L154) 与图像版 matcher 找出「匹配粒度从 mask 变 tube」的那几行，再读本讲的下游 `prepare_targets`（已读）衔接。若想继续在数据侧深挖，可以读 [ytvis_eval.py](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/ytvis_eval.py) 看 `YTVISEvaluator` 如何反向把 `Instances` 序列化回 YTVIS json——那是本讲管线的逆过程。
+数据侧就位后，下一讲 **u9-l4（视频损失与 YTVIS 评估）** 讲这批 `{"labels", "ids", "masks"}` 目标如何被消费：`VideoSetCriterion` 与 `VideoHungarianMatcher` 怎么把 `(N, T, H, W)` 的管道整体送去匹配和逐点监督（对照 u5-l1/u5-l2 的图像版），以及 `YTVISEvaluator` 如何基于 `ytvis_api` 输出官方指标。读码顺序建议：先对照 [mask2former_video/modeling/matcher.py:L96-L158](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/modeling/matcher.py#L96-L158) 与图像版 matcher 找出「匹配粒度从 mask 变 tube」的那几行，再读本讲的下游 `prepare_targets`（已读）衔接。若想继续在数据侧深挖，可以读 [ytvis_eval.py](https://github.com/facebookresearch/Mask2Former/blob/9b0651c6c1d5b3af2e6da0589b719c514ec0d69a/mask2former_video/data_video/ytvis_eval.py) 看 `YTVISEvaluator` 如何反向把 `Instances` 序列化回 YTVIS json——那是本讲管线的逆过程。
