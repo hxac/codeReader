@@ -4,323 +4,412 @@
 
 学完本讲，你应该能够：
 
-1. 说出 `TLSContext` 与 `TLSSession` 两个抽象类各自的职责边界，以及「一个进程里到底会有几个 TLS 上下文、几个 TLS 会话」。
-2. 解释 `TLS_ERR_OK / TLS_ERR_ERROR / TLS_ERR_WOULDBLOCK` 三值返回约定如何让 TLS 这种「阻塞式状态机」融入 aria2 的非阻塞事件循环。
-3. 对比 OpenSSL、GnuTLS、AppleTLS（Secure Transport）、WinTLS（Schannel）四个后端在证书加载、信任库、证书校验位置上的差异。
-4. 通过 `aria2c --version` 的 Enabled Features 与 Libraries 两行输出，反推当前二进制是用哪个 configure 配置、哪个 TLS 后端编译出来的。
-5. 完成「自签名证书 + `--check-certificate=true/false`」对照实验，并在握手验证分支处加日志观察两条路径的分叉点。
+1. 说出 `TLSContext` 与 `TLSSession` 两个抽象类各自的职责边界，以及它们为什么被拆成两个对象。
+2. 解释 aria2「链接期单选、运行期多态」的双层抽象手法：四个 TLS 后端如何在编译期互斥地各自定义同一个 `make` 工厂函数。
+3. 跟踪一次 HTTPS 握手的完整链路：`--check-certificate` 选项如何一路传到某个后端的 `tlsConnect` 验证分支。
+4. 对比 OpenSSL、GnuTLS、Apple（SecureTransport）、Windows（Schannel）四个后端在证书加载、信任库、证书校验位置、握手模型上的差异。
+5. 用 `aria2c --version` 的 `Enabled Features` 与 `Libraries` 两行输出，反推当前二进制链接的是哪个 TLS 后端。
 
 ## 2. 前置知识
 
-本讲默认你已读过 u4-l1（HTTP 下载命令链）与 u4-l2（HttpConnection 报文解析），知道 TLS 握手发生在 `HttpRequestCommand` 建连之后、发请求之前。在此之上，补充几个 TLS 侧的概念：
+本讲是「专家层」讲义，默认你已学过 u1-l2（构建系统）、u4-l2（HTTP 协议实现）与 u2-l2（EventPoll）。再用三段话补齐 TLS 领域的最低背景：
 
-- **X.509 证书与信任链**：HTTPS 站点出示一张证书（含域名 SAN/CN、公钥、有效期），浏览器/客户端需要沿「站点证书 → 中间 CA → 根 CA」逐级验签。根 CA 存放在**系统信任库**里（Linux 常见路径是 `/etc/ssl/certs`，Windows 是证书存储，macOS 是 KeyChain）。
-- **PEM 与 PKCS12**：两种把「证书 + 私钥」打包成文件的格式。PEM 是 Base64 文本（`-----BEGIN CERTIFICATE-----`），证书和私钥通常分成两个文件；PKCS12（`.p12`/`.pfx`）是二进制格式，把证书、私钥、中间链打成一个文件，通常带口令。aria2 作为 RPC 服务端（`--rpc-certificate`）或客户端双向认证（`--certificate`）时都要加载它们。
-- **SNI（Server Name Indication）**：客户端在握手第一个包里明文写出要访问的主机名，让同一 IP 上托管多个证书的服务器知道该出示哪张。这就是 `TLSSession::setSNIHostname` 存在的原因。
-- **非阻塞 socket 上的 TLS**：TLS 握手和记录读写内部需要多次网络往返。socket 是非阻塞的，底层库每次「想读但没数据 / 想写但缓冲满」时都会返回一个「稍后再试」信号（OpenSSL 的 `SSL_ERROR_WANT_READ/WRITE`、GnuTLS 的 `GNUTLS_E_AGAIN`）。上层必须据此向 EventPoll 注册读或写事件，等事件到来再重试——这正是 u2-l4 讲过的 `wantRead_`/`wantWrite_` 机制在 TLS 层的翻版。
-- **编译期单选（compile-time single choice）**：C++ 没有运行时接口注册的惯例设施，aria2 的做法是让四个后端各自定义同名的工厂函数 `TLSContext::make` / `TLSSession::make`，由构建系统保证**恰好只有一个后端的源文件被编译**。这是理解整个 TLS 模块的钥匙。
+**TLS 握手在做什么。** TLS（Transport Layer Security）是插在 TCP 之上、HTTP 之下的加密层。连接建立后，双方先交换若干「握手消息」：协商协议版本与加密套件、互相验证证书、交换密钥材料，之后应用数据才被加密传输。对我们最重要的是两点：其一，握手要来回多趟，所以在一个非阻塞 socket 上握手必然「走一步、歇一步」；其二，「验证对方证书」是客户端的职责，这一步的松紧决定了你是否会被中间人攻击。
+
+**证书与信任链。** 服务端证书由 CA（证书颁发机构）签发，浏览器/下载器内置一批「根 CA 证书」作为信任起点。验证要做三件事：证书链能追溯到受信任的根（`SSL_get_verify_result` 一类接口返回的就是这个结论）、证书在有效期内、证书上的名字（SAN/CN 字段）与实际访问的主机名匹配。**自签名证书**没有 CA 背书，链验证必然失败——这就是本讲实践环节要用它做实验的原因。
+
+**非阻塞三值约定。** 回顾 u2-l2/u2-l3：aria2 全程非阻塞，任何网络操作都可能「没就绪」。TLS 抽象因此约定三个返回值：`TLS_ERR_OK`（成功）、`TLS_ERR_WOULDBLOCK`（没就绪，稍后再来）、`TLS_ERR_ERROR`（致命失败）。配合 `checkDirection()` 回答「下次该等读还是等写」，就能把 TLS 嫁接到 EventPoll 的事件循环上。
+
+另有一个贯穿全讲的编译期概念：**同一个符号的四份定义**。C++ 里一个非内联函数只能有一份定义，但 aria2 让四个后端源文件各自定义 `TLSContext::make`，靠 Makefile 的条件编译保证最终只有一份被编进产物——这是理解「多后端矩阵」的钥匙。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| `src/TLSContext.h` | TLS 上下文抽象接口：证书加载、信任库加载、verifyPeer 开关 |
-| `src/TLSSession.h` | TLS 会话抽象接口：握手、读写、SNI、三值错误约定 |
-| `src/LibsslTLSContext.cc` / `LibsslTLSSession.cc` | OpenSSL 后端实现 |
-| `src/LibgnutlsTLSContext.cc` / `LibgnutlsTLSSession.cc` | GnuTLS 后端实现 |
-| `src/AppleTLSContext.cc` / `AppleTLSSession.cc` | macOS Secure Transport 后端（KeyChain） |
-| `src/WinTLSContext.cc` / `WinTLSSession.cc` | Windows Schannel 后端 |
-| `src/SocketCore.cc` | TLS 会话的宿主：`tlsHandshake` 状态机把抽象接口接入命令链 |
-| `src/MultiUrlRequestInfo.cc` | TLS 上下文的装配点：客户端与 RPC 服务端各一个 |
-| `src/FeatureConfig.cc` / `.h` | 编译期特性上报：`--version` 输出的数据来源 |
-| `src/version_usage.cc` | `--version` 的打印逻辑 |
-| `src/a2netcompat.h` | 平台兼容层：`sock_t` 等类型差异抹平 |
-| `configure.ac` | 四后端的探测顺序与互斥闸门 |
-| `src/Makefile.am` | 按宏条件编译对应后端源文件 |
+|---|---|
+| [src/TLSContext.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSContext.h#L53-L72) | TLS「配置工厂」抽象接口：证书加载、信任库、验证开关 |
+| [src/TLSSession.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L54-L120) | TLS「单连接会话」抽象接口：握手、读写、方向查询 |
+| [src/LibsslTLSContext.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc) / [src/LibsslTLSSession.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc) | OpenSSL 后端（Linux/BSD 等通用平台的主力后端） |
+| [src/LibgnutlsTLSContext.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc) / [src/LibgnutlsTLSSession.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc) | GnuTLS 后端（configure 默认优先探测的 TLS 库） |
+| [src/AppleTLSContext.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc) / [src/AppleTLSSession.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSSession.cc) | Apple SecureTransport 后端（macOS 专用） |
+| [src/WinTLSContext.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc) / [src/WinTLSSession.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc) | Windows Schannel 后端 |
+| [src/SocketCore.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L903-L1034) | 握手驱动器：`tlsHandshake` 状态机，承接 u2-l4 的 SocketCore |
+| [src/MultiUrlRequestInfo.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L177-L274) | TLS 上下文的装配点：把选项翻译成 TLSContext 配置 |
+| [src/FeatureConfig.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc) / [src/FeatureConfig.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.h#L47-L58) | 编译期特性上报：`--version` 的 Features/Libraries 输出来源 |
+| [src/version_usage.cc](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/version_usage.cc#L53-L82) | `--version` 的打印实现 |
+| [src/a2netcompat.h](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/a2netcompat.h#L95-L99) | 平台兼容层：`sock_t` 等类型在 POSIX/Windows 间的统一 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 TLS 抽象接口：TLSContext 与 TLSSession
+本讲拆成四个最小模块：**TLS 抽象接口**、**握手驱动链路**、**四个平台后端**、**FeatureConfig 能力上报**。
+
+### 4.1 模块一：TLS 抽象接口——TLSContext 与 TLSSession
 
 #### 4.1.1 概念说明
 
-aria2 把 TLS 拆成两个生命周期完全不同的抽象：
+aria2 把 TLS 拆成两个生命周期完全不同的对象：
 
-- **`TLSContext`（上下文）——进程级、可复用的「配置袋」**。它持有证书与私钥（本端身份）、信任的 CA（如何验证对端）、以及 `verifyPeer` 开关。整个进程只有两个实例：一个客户端上下文（所有 HTTPS 下载共用）和一个服务端上下文（仅 `--enable-rpc --rpc-secure` 时创建）。
-- **`TLSSession`（会话）——每连接一个的「握手与读写状态机」**。每条 TLS 连接各自创建、各自销毁，握手成功后的收发数据都走它。
+- **`TLSContext` 是进程级配置对象**——回答「我有哪些证书、信任哪些 CA、要不要验证对方」。一个进程最多两个实例：一个客户端身份（下载用）、一个服务端身份（`--rpc-secure` 开启 RPC over HTTPS 时用）。它像一张「身份证 + 信任清单」，内容在整个进程运行期间基本不变。
+- **`TLSSession` 是连接级会话对象**——每条 TLS 连接一个，负责这条连接上的握手、加解密读写与关闭。连接关闭即销毁。
 
-两个类都是纯虚接口，`TLSSession.h` 里有一句直白的注释点明了设计意图：
+为什么要拆开？因为 TLS 库本身就这样分层（OpenSSL 的 `SSL_CTX`/`SSL`、GnuTLS 的 credentials/session 都是成对出现）：配置重（加载证书、建信任库），会话轻（引用配置即可）。上层代码只在「创建连接」时调 `TLSSession::make(ctx)`，完全不必关心用的是哪家库。
 
-> To create another SSL/TLS backend, implement TLSSession class below.
-
-（要创建另一个 SSL/TLS 后端，实现下面的 TLSSession 类即可。）
+这个抽象还有个隐藏设计：头文件里 [TLSSession.h:52](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L52-L52) 写着一句注释——"To create another SSL/TLS backend, implement TLSSession class below"（要创建新的 TLS 后端，实现下面的 TLSSession 类即可）。整份接口就是为「再加一个后端」预留的插槽。
 
 #### 4.1.2 核心流程
 
-一次 HTTPS 下载中 TLS 相关对象的完整协作流程：
+`TLSContext` 的接口只有七个方法，按用途分三组：
 
 ```text
-进程启动（MultiUrlRequestInfo::prepare）
-  ├─ TLSContext::make(TLS_CLIENT, minTLSVer)        # 进程唯一客户端上下文
-  ├─ 按选项装证书/信任库：addCredentialFile /
-  │  addTrustedCACertFile / addSystemTrustedCACerts
-  ├─ setVerifyPeer(--check-certificate 的值)
-  └─ SocketCore::setClientTLSContext(clTlsContext)   # 存进静态成员
-
-每条 HTTPS 连接（命令链视角）
-  HttpRequestCommand（u4-l1）
-    └─ SocketCore::tlsConnect(hostname)              # SocketCore.cc:910
-        └─ tlsHandshake(clTlsContext_, hostname)     # 三态状态机
-            ├─ A2_TLS_NONE：TLSSession::make + init(sockfd)
-            │            + setSNIHostname(hostname)
-            ├─ A2_TLS_HANDSHAKING：tlsSession_->tlsConnect(...)
-            │   返回 WOULDBLOCK → 命令读事件后重来，直到 OK
-            └─ A2_TLS_CONNECTED：此后读写全部改走 tlsSession_
+TLSContext（配置工厂）
+├── 身份：addCredentialFile(certfile, keyfile)   加载本端证书+私钥（客户端证书/RPC 服务端证书）
+├── 信任：addSystemTrustedCACerts()               加载操作系统信任的根 CA
+│         addTrustedCACertFile(certfile)          加载 --ca-certificate 指定的 PEM 包
+└── 状态：good() / getSide() / getVerifyPeer() / setVerifyPeer(bool)
 ```
 
-关键约定是**三值返回**：`TLS_ERR_OK`（完成）、`TLS_ERR_ERROR`（失败）、`TLS_ERR_WOULDBLOCK`（底层阻塞，需要等事件再来）。配合 `checkDirection()` 返回 `TLS_WANT_READ` / `TLS_WANT_WRITE`，上层就知道该向 EventPoll 注册哪个方向的兴趣——这与 u2-l4 的 `wantRead_`/`wantWrite_` 完全同构。
+`TLSSession` 的接口围绕「一次非阻塞握手 + 加解密读写」：
+
+```text
+TLSSession（单连接会话）
+├── 建立：init(sockfd)                绑定底层 socket
+│         setSNIHostname(hostname)    设置 SNI（服务器名称指示）扩展
+├── 握手：tlsConnect(hostname, version, handshakeErr)   客户端方向
+│         tlsAccept(version)                              服务端方向
+│         checkDirection() → TLS_WANT_READ / TLS_WANT_WRITE
+├── 数据：writeData / readData        密文世界与明文世界的桥梁
+└── 收尾：closeConnection() / getLastErrorString() / getRecvBufferedLength()
+```
+
+握手期间一次调用的返回语义：
+
+```text
+tlsConnect() 返回 TLS_ERR_OK         → 握手完成，version 里是协商出的协议版本
+tlsConnect() 返回 TLS_ERR_WOULDBLOCK → 没就绪；调 checkDirection() 问下次等读还是等写
+tlsConnect() 返回 TLS_ERR_ERROR      → 失败；handshakeErr 里是人类可读的原因
+                                     （专用于「证书验证失败」这类需要展示的场景）
+```
+
+注意 `writeData`/`readData` 返回 `ssize_t`（字节数），而错误码是负数（`TLS_ERR_ERROR = -1`、`TLS_ERR_WOULDBLOCK = -2`），字节数与错误共用一个返回通道，这是 C 风格接口的惯用法。
 
 #### 4.1.3 源码精读
 
-**接口契约一：TLSContext**。先看两个前置枚举与类的七个纯虚方法（[src/TLSContext.h:L44-L72](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSContext.h#L44-L72)）。`TLSSessionSide` 区分客户端/服务端角色；`TLSVersion` 表达最低协议版本（TLS1.1/1.2/1.3）；静态工厂 `make` 是唯一创建入口。注意 `addCredentialFile` 的注释：私钥文件必须是**未加密**的。
+**TLSContext 的完整契约**在 [src/TLSContext.h:44-72](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSContext.h#L44-L72)：先定义两个公共枚举——会话方向 `TLS_CLIENT`/`TLS_SERVER` 与最低协议版本 `TLS_PROTO_TLS11/12/13`，然后是七个纯虚方法。其中 `addCredentialFile` 的注释很关键：「private key `keyfile' must be decrypted」（私钥文件必须是未加密的）、「certfile can contain multiple certificates」（证书文件可含整条证书链）——这两句约束来自后端实现的真实限制。
 
-**接口契约二：TLSSession 与三值错误码**（[src/TLSSession.h:L44-L56](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L44-L56)）定义了 `TLSErrorCode` 三值与「实现 TLSSession 即可新增后端」的注释；完整方法表在 [src/TLSSession.h:L60-L112](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L60-L112)：`init` 绑定 socket、`tlsConnect/tlsAccept` 做两个方向的握手、`writeData/readData` 语义与非阻塞 `send/recv` 对齐（成功返回字节数，阻塞返回 `TLS_ERR_WOULDBLOCK`）、`getRecvBufferedLength` 汇报库内部已缓冲的可读字节数。
+**TLSSession 的完整契约**在 [src/TLSSession.h:44-56](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L44-L56)：两个枚举给出三值错误码与方向码；静态工厂 `make(TLSContext* ctx)` 是唯一的创建入口。`tlsConnect` 的签名注释（[src/TLSSession.h:93-100](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L93-L100)）明确要求：返回 `TLS_ERR_ERROR` 时必须把证书验证错误填进 `handshakeErr`——这就是你在终端里看到的 `SSL/TLS handshake failure: ...` 消息的来源。
 
-**装配点**。客户端上下文在 `MultiUrlRequestInfo::prepare` 中创建（[src/MultiUrlRequestInfo.cc:L252-L274](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L252-L274)）：`--min-tls-version` 经 `util::toTLSVersion` 转成枚举（不认识的值回落 TLS1.2，见 [src/util.cc:L2471-L2483](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/util.cc#L2471-L2483)）；`--ca-certificate` 与系统信任库是二选一关系；最后 `setVerifyPeer(PREF_CHECK_CERTIFICATE)` 把 `--check-certificate` 的值写进上下文并存入 `SocketCore` 的静态成员。服务端上下文仅在 `--rpc-secure` 时创建（[src/MultiUrlRequestInfo.cc:L183-L203](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L183-L203)），必须提供 `--rpc-certificate`，且要在 `DownloadEngine` 创建**之前**塞进 `SocketCore`——因为 RPC 监听命令一出生就要用它做 `tlsAccept`。
+接下来是本讲最重要的一处设计。四个后端文件里**各自定义了同一个静态方法**：
 
-**宿主状态机**。`SocketCore` 内部用一个三态枚举管理每连接的 TLS 进度（[src/SocketCore.cc:L119-L128](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L119-L128)，注意值跳过了 1）。核心是 `tlsHandshake`（[src/SocketCore.cc:L915-L961](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L915-L961)）：`A2_TLS_NONE` 时创建会话、`init` 绑定 fd，并且只在「客户端 + 主机名非纯数字/IP + 含点」时设置 SNI（对 `localhost` 这类名字发 SNI 反而会招致 GnuTLS 告警，注释里写明了原因）；`A2_TLS_HANDSHAKING` 时按角色调 `tlsConnect` 或 `tlsAccept`，阻塞则整体返回 false，由命令层等事件后重入。命令链的触发点在 [src/HttpRequestCommand.cc:L129](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/HttpRequestCommand.cc#L129)：`getSocket()->tlsConnect(getRequest()->getHost())` 返回 false 就重排自己等读写事件，这正好接上 u4-l1 的握手棒次。
+- [src/LibsslTLSContext.cc:95-98](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L95-L98) — `TLSContext::make` 返回 `new OpenSSLTLSContext(...)`
+- [src/LibgnutlsTLSContext.cc:52-55](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L52-L55) — 返回 `new GnuTLSContext(...)`
+- [src/AppleTLSContext.cc:179-182](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L179-L182) — 返回 `new AppleTLSContext(...)`
+- [src/WinTLSContext.cc:110-113](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L110-L113) — 返回 `new WinTLSContext(...)`
 
-#### 4.1.4 代码实践
+`TLSContext::make` 在四个互斥编译单元中各有一份定义——这就是「链接期单选、运行期多态」的双层抽象，分别对应两张编排表：
 
-**实践目标**：不运行任何程序，仅靠源码画出「一次 HTTPS 下载中 TLS 对象的创建时序图」，验证你对抽象层与宿主层的理解。
+- 编译期（互斥单选）：[src/Makefile.am:324-342](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Makefile.am#L324-L342) 的 `ENABLE_SSL` 块先收编两个抽象头文件，随后 `HAVE_APPLETLS`、`HAVE_WINTLS`、`HAVE_LIBGNUTLS` 三个条件块各收编一对后端源码；[src/Makefile.am:388-400](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Makefile.am#L388-L400) 的 `HAVE_OPENSSL` 块里，Libssl 那对文件还额外套了 `if !HAVE_APPLETLS`——macOS 上即使链接了 OpenSSL（仍用于消息摘要/DH），TLS 也强制走 Apple 后端。
+- 运行期（虚接口多态）：上层只持有 `TLSContext*`/`TLSSession*`，所有调用经虚表分发，与具体库解耦。
 
-**操作步骤**：
+对比一下你熟悉的两条路线：这既不是 u2-l2 EventPoll 那种「运行期 new 哪个后端类」的选择，也不是简单的 `#ifdef` 散落各处——而是把「选择」压缩进链接期，让运行期代码完全干净。
 
-1. 从 [src/HttpRequestCommand.cc:L129](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/HttpRequestCommand.cc#L129) 出发，向下追 `tlsConnect` → `tlsHandshake`，标出 `TLSSession::make`、`init`、`setSNIHostname`、`tlsConnect` 各自被调用的条件分支。
-2. 向上追 `SocketCore::setClientTLSContext` 的调用点（[src/MultiUrlRequestInfo.cc:L273](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L273)），确认客户端上下文在引擎创建前就已装配。
-3. 用 `Grep` 搜索 `tlsSession_->readData` 与 `tlsSession_->writeData` 在 `SocketCore.cc` 中的位置，确认握手完成后普通读写如何被透明替换为 TLS 读写。
+#### 4.1.4 代码实践：找出四份 make 定义并验证互斥
 
-**需要观察的现象**：你画出的图里应当出现「1 个 `TLSContext`（客户端）+ N 个 `TLSSession`（每连接一个）」的数量关系，以及 WOULDBLOCK 导致同一条命令被反复重排的回环。
-
-**预期结果**：时序图与 4.1.2 的文字流程一致；若不一致，回到源码检查你漏掉的分支。（本实践为源码阅读型，无需运行，结论可直接由源码验证。）
+1. **实践目标**：亲眼确认「同一符号四份定义、靠构建系统保证唯一」这一机制。
+2. **操作步骤**：
+   ```bash
+   cd <aria2 源码根目录>
+   grep -n "TLSContext::make" src/*.cc
+   grep -n "TLSSession::make" src/*.cc
+   # 再看 Makefile.am 的四个条件块
+   sed -n '324,342p;360,364p;388,400p' src/Makefile.am
+   ```
+3. **需要观察的现象**：`TLSContext::make` 恰好命中四行，分别位于 Libssl/Libgnutls/Apple/Win 四个 Context 文件；`TLSSession::make` 同样四处，位于对应的四个 Session 文件。
+4. **预期结果**：结合 Makefile.am 的 `if HAVE_APPLETLS` / `if HAVE_WINTLS` / `if HAVE_LIBGNUTLS` / `if HAVE_OPENSSL`（且 `!HAVE_APPLETLS`）四个互斥块，说明任意一份 configure 产物只会编入其中一对。若你本地编译过 aria2，还可用 `nm -C src/aria2c | grep 'TLSContext::make'` 看最终二进制里只保留了一份定义（待本地验证）。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `TLSContext` 只有两个实例，而 `TLSSession` 每条连接一个？
+**练习 1**：为什么 `addSystemTrustedCACerts` 与 `addTrustedCACertFile` 是两个方法，而不是一个带参数的？
+**答案**：两者语义完全不同——前者是「导入操作系统自带的所有根 CA」（来源由后端决定：OpenSSL 用默认路径、GnuTLS 用系统信任库、Apple 是钥匙串、Windows 是系统证书存储），后者是「导入用户用 `--ca-certificate` 指定的一个 PEM 文件」。调用方 [MultiUrlRequestInfo.cc:261-271](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L261-L271) 逻辑是「给了 ca 文件就只导它，否则若开验证才导系统库」，拆开的方法正好一一对应两条互斥分支，且允许后端声明「我不支持 CA bundle 文件」（Apple/Windows 就这么干）。
 
-**参考答案**：`TLSContext` 承载的是可跨连接复用的配置（证书、信任库、verifyPeer），创建成本高（要解析证书文件、加载整个信任库），且对所有连接语义相同；`TLSSession` 封装的是单条连接的握手状态与记录层缓冲，连接之间不可共享。这是 TLS 库的通用模式：OpenSSL 的 `SSL_CTX`/`SSL`、GnuTLS 的 credentials/session 都是同样的两级结构。
+**练习 2**：`checkDirection()` 什么时候会被调用？它的返回值被翻译成了什么？
+**答案**：在握手或读写返回 `TLS_ERR_WOULDBLOCK` 之后。以 OpenSSL 后端为例，[src/LibsslTLSSession.cc:107-117](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L107-L117) 用 `SSL_get_error` 判断是 `SSL_ERROR_WANT_WRITE` 还是其他（默认按 WANT_READ 处理）。上层 SocketCore 拿到方向后置 `wantRead_`/`wantWrite_` 标志（见 4.2.3），最终翻译成 EventPoll 的读/写事件注册——这正是 u2-l2 讲过的「回调只置位、不执行」机制在 TLS 上的应用。
 
-**练习 2**：`tlsConnect` 返回 `TLS_ERR_WOULDBLOCK` 后，aria2 怎么知道接下来该等读事件还是等写事件？
+**练习 3**：`getRecvBufferedLength()` 是做什么用的？为什么 TLS 连接特别需要它？
+**答案**：它返回「TLS 库内部已经解密、但上层还没取走」的数据长度（OpenSSL 后端继承基类默认返回 0，WinTLS 后端返回 `decBuf_.size()`，见 [src/WinTLSSession.cc:834](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L834-L834)）。因为 TLS 解密是按记录（record）进行的，一次可能解出比上层请求更多的数据，这些数据留在库缓冲里、不占用 socket 接收缓冲。调用方（如 [src/AbstractCommand.cc:152](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AbstractCommand.cc#L152-L152)）据此判断「还有没消费完的数据」，避免误判连接空闲。
 
-**参考答案**：调用 `TLSSession::checkDirection()`。以 OpenSSL 后端为例（[src/LibsslTLSSession.cc:L107-L117](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L107-L117)），它用 `SSL_get_error` 判断上一次返回是否为 `SSL_ERROR_WANT_WRITE`，是则 `TLS_WANT_WRITE`，否则一律 `TLS_WANT_READ`。`SocketCore` 据此设置 `wantRead_`/`wantWrite_`，命令层再翻译成 EventPoll 的事件注册。
-
-**练习 3**：`SocketCore` 的 TLS 状态枚举为什么取值 0、2、3，缺了 1？
-
-**参考答案**：源码只给出了三个状态而没有解释缺口（[src/SocketCore.cc:L119-L128](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L119-L128)），最可能是历史演进中删掉过一个中间状态（例如独立的「写中」态）后编号未重排。对学习者的启示是：不要从魔法数字反推语义，以枚举名为准。（此题属于「待确认」的历史细节。）
-
-### 4.2 四个平台后端：OpenSSL / GnuTLS / AppleTLS / WinTLS
+### 4.2 模块二：握手驱动链路——从 --check-certificate 到 tlsConnect
 
 #### 4.2.1 概念说明
 
-四个后端解决同一个问题，但哲学不同：
+抽象接口只是插槽，还得有人插电。这条链路回答三个问题：
 
-- **OpenSSL（Libssl\*）**：功能最全的通用后端。证书校验**不信任库的自动验证**，握手成功后由 aria2 亲手取对端证书、查验证结果、提取 SAN/CN 做主机名匹配——校验逻辑在 aria2 手里，行为跨版本最稳定。
-- **GnuTLS（Libgnutls\*）**：同样是通用后端，但把证书链验证交给 `gnutls_certificate_verify_peers`，并用**目的（purpose/EKU）参数**限定「这张证书必须允许用作 TLS 服务器」（2025 年的提交 `44aa33d4` 补上了这一校验），之后再做主机名匹配。
-- **AppleTLS**：macOS 原生 Secure Transport。证书**存在 KeyChain 里**，支持「按证书指纹引用 KeyChain 中的身份」这种苹果特有玩法；验证由系统 API 完成。
-- **WinTLS**：Windows 原生 Schannel。证书校验用一组 `SCH_CRED_*` 标志表达（自动验证/手动验证/吊销检查），凭证只认 PFX/PKCS12。
+1. **谁创建 TLSContext？** —— `MultiUrlRequestInfo::prepare()`（u1-l3 讲过的 `execute()` 三段骨架的第一段），在下载引擎创建之前把选项翻译成 TLS 配置。
+2. **谁创建 TLSSession 并驱动握手？** —— `SocketCore::tlsHandshake`，一个三状态小状态机，被 HTTP 命令链在需要时反复调用。
+3. **`--check-certificate` 走到哪？** —— 它最终落在 `TLSContext::setVerifyPeer(bool)`，再被各后端的 `tlsConnect` 读取，决定要不要走证书验证分支。
 
 #### 4.2.2 核心流程
 
-每个后端都要回答同样五个问题：
+装配期（进程启动，一次）：
 
 ```text
-① 工厂怎么写？       TLSContext::make / TLSSession::make → new 各自实现类
-② 本端证书怎么加载？  PEM 双文件？PKCS12 单文件？KeyChain 指纹？
-③ 信任库怎么来？      系统信任库？CA bundle 文件？还是压根不支持？
-④ 协议版本怎么限？    OpenSSL 用 SSL_OP_NO_*；GnuTLS 用优先级字符串；
-                      Win 用 SP_PROT_* 位掩码；Apple 用 SSLSetProtocolVersion*
-⑤ 对端证书怎么验？    自己验（OpenSSL）/ 库验+purpose（GnuTLS）/
-                      系统验（Apple/Win）
+MultiUrlRequestInfo::prepare()
+├── [--rpc-secure 且 --rpc-certificate 非空]
+│     TLSContext::make(TLS_SERVER, minTLSVer)
+│     addCredentialFile(rpc-certificate, rpc-private-key)
+│     → SocketCore::setServerTLSContext()          # RPC 服务器身份
+└── [ENABLE_SSL]
+      TLSContext::make(TLS_CLIENT, minTLSVer)
+      ├── [--certificate 非空] addCredentialFile(certificate, private-key)
+      ├── [--ca-certificate 非空] addTrustedCACertFile(...)   # 用户 CA 包优先
+      ├── [否则且 --check-certificate=true] addSystemTrustedCACerts()
+      ├── setVerifyPeer(--check-certificate)
+      └── → SocketCore::setClientTLSContext()      # 下载客户端身份
 ```
 
-问题③的答案差异最大，直接体现为 `addSystemTrustedCACerts` 与 `addTrustedCACertFile` 两个虚方法在各后端的实现取舍（见 4.2.3 的对照表）。
+连接期（每条 HTTPS 连接）：
+
+```text
+HttpRequestCommand::executeInternal()   (u4-l1 命令链的第三棒)
+  └── SocketCore::tlsConnect(hostname)
+        └── tlsHandshake(ctx, hostname) 状态机：
+              A2_TLS_NONE ──首次──► 创建 TLSSession、init(sockfd)、设 SNI
+              A2_TLS_HANDSHAKING ──► tlsConnect()/tlsAccept()
+                  ├── OK         → A2_TLS_CONNECTED，返回 true
+                  ├── WOULDBLOCK → 置 wantRead_/wantWrite_，返回 false（命令 requeue）
+                  └── ERROR      → 抛 DL_ABORT_EX("SSL/TLS handshake failure: ...")
+```
 
 #### 4.2.3 源码精读
 
-**① 工厂与「编译期单选」**。四个后端各自定义同名工厂，例如 OpenSSL 后端（[src/LibsslTLSContext.cc:L95-L98](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L95-L98)）、GnuTLS 后端（[src/LibgnutlsTLSContext.cc:L52-L55](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L52-L55)）、Apple 后端（[src/AppleTLSContext.cc:L179-L182](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L179-L182)）、Windows 后端（[src/WinTLSContext.cc:L110-L113](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L110-L113)）。由于符号同名，构建系统必须保证只编译一个后端——[src/Makefile.am:L325-L400](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Makefile.am#L325-L400) 用 `if HAVE_APPLETLS` / `if HAVE_WINTLS` / `if HAVE_LIBGNUTLS` / `if HAVE_OPENSSL` 四个条件块拼装：抽象头文件 `TLSContext.h TLSSession.h` 恒在编译清单里，具体实现按宏二选一（Libssl 块还叠加了 `if !HAVE_APPLETLS` 的防御性条件）。选择权在 configure：[configure.ac:L325-L430](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L325-L430) 按 **Apple → Win → GnuTLS → OpenSSL** 的固定顺序探测（四个都是 `ARIA2_ARG_WITHOUT`，默认探测，见 [configure.ac:L55-L61](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L55-L61)），一旦某个后端成功就置 `have_ssl=yes`，后续探测块全部被 `have_ssl != yes` 闸门挡住——首中即赢、至多一个。
+**装配点的客户端分支**在 [src/MultiUrlRequestInfo.cc:252-274](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L252-L274)：注意三个选项的优先级——`--ca-certificate` 给了就只导它；否则 `--check-certificate=true`（默认值就是 true，见 [src/OptionHandlerFactory.cc:1048-1050](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/OptionHandlerFactory.cc#L1048-L1050)）才导入系统信任库；最后 `setVerifyPeer` 一锤定音。最低协议版本由 `--min-tls-version`（默认 `TLSv1.2`，[src/OptionHandlerFactory.cc:514](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/OptionHandlerFactory.cc#L514-L514)）经 [src/util.cc:2471-2484](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/util.cc#L2471-L2484) 的 `toTLSVersion` 翻译成枚举。服务器分支在 [src/MultiUrlRequestInfo.cc:183-203](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L183-L203)，只在 `--rpc-secure` 时创建，服务于 u8-l3 讲过的 RPC over HTTPS。
 
-**② OpenSSL 后端**。构造函数（[src/LibsslTLSContext.cc:L100-L169](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L100-L169)）以 `SSLv23_method()` 起步（这个名字是历史遗留，实际表示「协商最高可用版本」），再用 `switch` 的**贯穿（fall-through）**把最低版本以下的所有协议逐一加 `SSL_OP_NO_*` 关掉——`TLS_PROTO_TLS13` 会连带关掉 1.2、1.1、1.0、SSLv3，以此类推；随后设 `SSL_OP_ALL`（兼容性 workaround 大礼包）、禁压缩、限密码套件为 `HIGH:!aNULL:!eNULL`，并对 1.0.x 系列手工启用 P-256 ECDH（3.x 起不再需要）。证书加载是「双路」（[src/LibsslTLSContext.cc:L175-L197](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L175-L197)）：给了 keyfile 就走 PEM（私钥文件 + 证书链文件分别加载），keyfile 为空则把 certfile 当 PKCS12 整体解析（[src/LibsslTLSContext.cc:L198-L274](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L198-L274)，先读进内存再 `d2i_PKCS12_bio` + `PKCS12_parse`，口令固定为空串）。信任库两个入口（[src/LibsslTLSContext.cc:L276-L300](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L276-L300)）分别映射 `SSL_CTX_set_default_verify_paths`（系统路径）与 `SSL_CTX_load_verify_locations`（指定 bundle 文件）。
+**状态机本体**在 [src/SocketCore.cc:915-1034](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L915-L1034)，三段值得细读：
 
-**③ OpenSSL 的验证分支（本讲综合实践的主战场）**。会话侧 `tlsConnect`（[src/LibsslTLSSession.cc:L224-L332](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L224-L332)）先驱动 `SSL_connect`（在 [src/LibsslTLSSession.cc:L171-L222](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L171-L222) 的 `handshake` 中，`WANT_READ/WRITE` 翻译为 `TLS_ERR_WOULDBLOCK`，并顺带用 `SSL_version` 回填协商到的版本号）。握手成功后进入本讲最关键的一个 `if`：`side == TLS_CLIENT && getVerifyPeer()`（[src/LibsslTLSSession.cc:L234-L251](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234-L251)）——取对端证书（OpenSSL 3.0 起函数改名 `SSL_get1_peer_certificate`，代码用版本宏二选一，这是跨版本兼容的典型写法）、`SSL_get_verify_result` 非 `X509_V_OK` 即失败并把 `X509_verify_cert_error_string` 的文案写进 `handshakeErr`；随后（[src/LibsslTLSSession.cc:L252-L328](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L252-L328)）解析 SAN 里的 DNS 名与 IP 地址、兜底取 CN（结尾的点会被剥掉），最后交给 `net::verifyHostname` 做主机名匹配，不匹配则报 `hostname does not match`。**换句话说：`--check-certificate=false` 时 aria2 根本不调 `SSL_get_verify_result`，自签名证书的下载就能通过。**
+- 初始装配段 [src/SocketCore.cc:925-948](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L925-L948)：`TLSSession::make` → `init(sockfd_)`；SNI 有个讲究——只对「非纯数字且带点」的主机名设置（[src/SocketCore.cc:937-944](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L937-L944)），因为对 IP 地址或 `localhost` 发 SNI 会触发 GnuTLS 告警。
+- 就绪段 [src/SocketCore.cc:1002-1015](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L1002-L1015)：`WOULDBLOCK` 时按 `checkDirection()` 置 `wantRead_`/`wantWrite_` 后**返回 false 而非 true**——注释写得很清楚：这样该函数会在缓冲处理完毕后被再次调用。
+- 失败段 [src/SocketCore.cc:1017-1023](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L1017-L1023)：抛 `DL_ABORT_EX`，优先展示后端填好的 `handshakeErr`（证书验证失败的具体原因），没有才退到 `getLastErrorString()`。
 
-**④ GnuTLS 后端**。上下文构造（[src/LibgnutlsTLSContext.cc:L57-L72](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L57-L72)）分配 certificate credentials 并放宽为允许 X509 v1 的 CA 证书；PEM 与 PKCS12 双路加载（[src/LibgnutlsTLSContext.cc:L83-L127](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L83-L127)，PKCS12 走内存接口 `gnutls_certificate_set_x509_simple_pkcs12_mem`）。最有教学价值的是 `addSystemTrustedCACerts`（[src/LibgnutlsTLSContext.cc:L129-L146](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L129-L146)）：`gnutls_certificate_set_x509_system_trust` 是 GnuTLS 3.3 才有的函数，configure 用 `AC_CHECK_FUNCS` 探测成 `HAVE_GNUTLS_CERTIFICATE_SET_X509_SYSTEM_TRUST`（[configure.ac:L395](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L395)），老版本编译出来的 aria2 会日志提示 "System certificates not supported" 并返回 false——同一个虚方法，功能随库版本浮动。会话侧 `init`（[src/LibgnutlsTLSSession.cc:L99-L168](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L99-L168)）展示了协议版本限定的另一种表达：优先级字符串 `"SECURE128:+SIGN-RSA-SHA1"` 再按最低版本追加 `:-VERS-TLS1.1` 之类的排除项（若 configure 启用了 `USE_GNUTLS_SYSTEM_CRYPTO_POLICY` 则直接用 `@SYSTEM`），并针对 GnuTLS 3.1.3–3.2.8 的 OCSP 非阻塞 bug 做了编译期 workaround（文件顶部 L85–L97 的注释值得一看）。验证分支（[src/LibgnutlsTLSSession.cc:L237-L301](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L237-L301)）：`gnutls_handshake` 循环里 `GNUTLS_E_AGAIN` 翻译为 WOULDBLOCK；验证用 `gnutls_certificate_verify_peers` 并传入 `GNUTLS_DT_KEY_PURPOSE_OID = GNUTLS_KP_TLS_WWW_SERVER`——证书除了链有效还必须**声明可用于 TLS 服务器**（EKU/ExtendedKeyUsage 校验）；状态位逐个翻译成人话（`issuer is not known`、`expired`……）拼进 `handshakeErr`。
+**命令链触发点**回到 [src/HttpRequestCommand.cc:127-135](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/HttpRequestCommand.cc#L127-L135)：协议是 `https` 就先 `tlsConnect`，没握完则按 want 标志注册读写事件并 `addCommandSelf()` 自我重排——把 u2-l3 的命令接力与 u4-l1 的 HTTP 命令链缝在了一起。
 
-**⑤ AppleTLS 后端**。`addCredentialFile`（[src/AppleTLSContext.cc:L192-L209](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L192-L209)）先当指纹试、再当 PKCS12 试，都失败则警告只支持这两种。指纹玩法（[src/AppleTLSContext.cc:L220-L315](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L220-L315)）：把参数当十六进制指纹规范化，先校验长度是否是任一支持哈希的合法长度，然后构造 KeyChain 查询（`SecPolicyCreateSSL` + `SecItemCopyMatching`）枚举全部身份，对每个身份的证书**依次用所有支持的哈希算法算摘要**与指纹比对——所以 SHA-1/SHA-256 指纹都能用。CA bundle 直接不支持（[src/AppleTLSContext.cc:L211-L216](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L211-L216)），让你去 KeyChain 里管理。会话侧把 `verifyPeer` 翻译成系统选项：10.8+ 上若不验证则设 `kSSLSessionOptionBreakOnServerAuth`（[src/AppleTLSSession.cc:L435-L443](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSSession.cc#L435-L443)），否则用 `SSLSetEnableCertVerify` 交给系统验证。
+#### 4.2.4 代码实践：用日志观察一次真实握手
 
-**⑥ WinTLS 后端**。构造函数（[src/WinTLSContext.cc:L70-L108](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L70-L108)）把最低版本翻译成 `SP_PROT_TLS1_1_CLIENT/SERVER` 等位掩码，并设最小加密强度 128 位。`setVerifyPeer`（[src/WinTLSContext.cc:L128-L155](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L128-L155)）是四后端里「验证开关」表达最特别的一个：`SCH_CRED_AUTO_CRED_VALIDATION | SCH_CRED_REVOCATION_CHECK_CHAIN` 表示让 Schannel 自动验证并查吊销；服务端或用户关掉验证时改设 `SCH_CRED_MANUAL_CRED_VALIDATION` 等一组「跳过」标志。真正的凭据句柄惰性创建（[src/WinTLSContext.cc:L157-L191](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L157-L191)，`AcquireCredentialsHandleW`，且在 `setVerifyPeer` 改标志后 `cred_.reset()` 作废重建）。凭证只认 PFX（[src/WinTLSContext.cc:L193-L229](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L193-L229)，`PFXIsPFXBlob` + `PFXImportCertStore`，先试空口令再试无口令），CA bundle 同样不支持（[src/WinTLSContext.cc:L231-L236](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L231-L236)，改用系统信任库）。会话侧握手是 Schannel 的 `InitializeSecurityContext/AcceptSecurityContext` 状态机（[src/WinTLSSession.cc:L199-L205](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L199-L205)），读写还要自己处理记录的加密解密缓冲（`checkDirection` 按内部状态 `st_handshake_read/write` 判断方向，[src/WinTLSSession.cc:L232-L241](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L232-L241)），是四个后端中实现最重的一个。
-
-**四后端能力对照表**（依据上文各处源码归纳）：
-
-| 维度 | OpenSSL | GnuTLS | AppleTLS | WinTLS |
-| --- | --- | --- | --- | --- |
-| 本端证书格式 | PEM 双文件 + PKCS12 | PEM 双文件 + PKCS12 | KeyChain 指纹 + PKCS12 | 仅 PFX/PKCS12 |
-| CA bundle 文件 | 支持 | 支持 | 不支持（用 KeyChain） | 不支持（用系统库） |
-| 系统信任库 | 支持 | 视 GnuTLS 版本（≥3.3） | 隐含（KeyChain） | 隐含（证书存储） |
-| 对端验证位置 | aria2 亲手验（verify_result + SAN/CN） | 库验 + EKU purpose，aria2 补主机名匹配 | 系统 API 验 | Schannel 标志驱动 |
-| 最低版本表达 | `SSL_OP_NO_*` 位 | 优先级字符串排除项 | `SSLSetProtocolVersion*` | `SP_PROT_*` 位掩码 |
-| 哈希后端联动 | OpenSSL MD | nettle/gcrypt 内部 | Apple MD（CommonCrypto） | Windows MD |
-
-最后一行呼应 u1-l2 讲过的「依赖优先级」：`configure.ac:L520-L542` 里消息摘要后端的选择与 TLS 后端绑定——选了 AppleTLS 就用 `USE_APPLE_MD`，选了 OpenSSL 才有 `USE_OPENSSL_MD`，native TLS（Apple/Win）会排斥 nettle/gcrypt（`have_nativetls` 闸门，[configure.ac:L432-L485](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L432-L485)）。
-
-#### 4.2.4 代码实践
-
-**实践目标**：在一份源码里同时看清「同一虚方法的四种实现」，训练按接口读实现的能力。
-
-**操作步骤**：
-
-1. 打开 `TLSContext.h` 的四个虚方法声明，做一张空表（方法 × 后端）。
-2. 依次打开四个 `*TLSContext.cc`，逐格填写每个方法的行为，重点标注「返回 false 并打 WARN」的格子（Apple 与 Win 的 `addTrustedCACertFile`、老版本 GnuTLS 的 `addSystemTrustedCACerts`）。
-3. 追一个问题：`MultiUrlRequestInfo.cc:L261-L271` 在 `--ca-certificate` 加载失败时只打 `MSG_WARN_NO_CA_CERT` 继续跑，那么在 AppleTLS/WinTLS 上配了 `--ca-certificate` 会发生什么？（提示：看返回 false 的分支与日志级别。）
-
-**需要观察的现象**：你会发现在 Apple/Windows 上 `--ca-certificate` 实际上是「静默降级」的选项——文件被读、函数返回 false、日志记一条 INFO/WARN，下载继续用系统信任库。
-
-**预期结果**：对照表填完后与 4.2.3 末尾的表格一致；第三个问题的答案：`addTrustedCACertFile` 返回 false 触发 [src/MultiUrlRequestInfo.cc:L261-L266](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L261-L266) 的 `A2_LOG_INFO(MSG_WARN_NO_CA_CERT)`，进程不会失败。（本实践为源码阅读型；若手头有 macOS/Windows 机器可编译验证，标注「待本地验证」。）
+1. **实践目标**：不开调试器，仅凭日志看清「SNI 设置 → 握手成功 → 协商版本」三个时刻。
+2. **操作步骤**：
+   ```bash
+   ./src/aria2c --version          # 先确认 Features 里有 HTTPS（见 4.4）
+   ./src/aria2c -l tls.log --log-level=debug -d /tmp https://example.com/
+   grep -n "TLS\|Securely connected" tls.log
+   ```
+3. **需要观察的现象**：日志里应出现 `Creating TLS session`、`TLS Handshaking`（[src/SocketCore.cc:927](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L927-L947) 的两条 debug 日志）以及最终的 `Securely connected to example.com (93.184.216.34:443) with TLSv1.x`（[src/SocketCore.cc:994](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L994-L995)）。
+4. **预期结果**：`with` 后面的版本串由 [src/SocketCore.cc:976-990](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L976-L990) 的 switch 从 `tlsConnect` 带回的 `TLSVersion` 枚举翻译而来——现代环境下通常是 `TLSv1.3`。若你的网络环境无法访问该站点，可换任意 HTTPS URL；具体日志行内容待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 `LibsslTLSContext.cc` 里 `TLS_PROTO_TLS13` 分支的 `case` 没有独立的 `break`，而是特意标注 fall through？
+**练习 1**：`--check-certificate=false` 时，aria2 还会加载系统 CA 证书吗？
+**答案**：不会。看 [src/MultiUrlRequestInfo.cc:267-271](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/MultiUrlRequestInfo.cc#L267-L271)：`addSystemTrustedCACerts` 只在「没给 `--ca-certificate` 且 `check-certificate` 为真」时调用。关掉验证开关后既不导入系统库、也不导入用户 CA 包，`setVerifyPeer(false)` 让各后端握手时直接跳过证书验证分支——省内存也更「坦诚」。
 
-**参考答案**：最低版本语义是「禁用低于它的所有版本」。选 TLS1.3 就必须同时禁 1.2、1.1、1.0、SSLv3，让 case 贯穿即可让 `ver_opts` 逐层累加 `SSL_OP_NO_*`（[src/LibsslTLSContext.cc:L114-L131](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L114-L131)）。GnuTLS 的优先级字符串追加 `:-VERS-*`（[src/LibgnutlsTLSSession.cc:L136-L152](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L136-L152)）是同一思想的另一种语法。
+**练习 2**：SocketCore 的 `tlsHandshake` 为什么要保存 `secure_` 状态而不是一口气握完？
+**答案**：因为 socket 是非阻塞的：TLS 握手要多个来回，任何一步都可能 `WOULDBLOCK`，此时必须返回 false、把控制权交还事件循环，等 EventPoll 报告 socket 可读/可写后再进来继续。`secure_` 的三个取值（`A2_TLS_NONE`/`A2_TLS_HANDSHAKING`/`A2_TLS_CONNECTED`，[src/SocketCore.cc:920-950](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L920-L950)）分别对应「还没开始」「握到一半」「已完成」，`A2_TLS_CONNECTED` 还兼做幂等短路：连接池复用连接时再调 `tlsConnect` 直接返回 true。
 
-**练习 2**：四个后端都定义了 `TLSContext::make`，为什么链接期不会重定义冲突？
+**练习 3**：为什么「对 localhost 不发 SNI」？
+**答案**：见 [src/SocketCore.cc:935-938](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L935-L938) 的注释：SNI 的语义是把「要访问哪个虚拟主机」告诉服务器，只对域名有意义；对 IP 地址或 `localhost` 这类无点主机名发 SNI，GnuTLS 会产生 TLS alert。所以条件是 `!isNumericHost(hostname) && hostname 含 '.'`。
 
-**参考答案**：因为 `src/Makefile.am` 的条件块保证至多编译一个后端的源文件（[src/Makefile.am:L332-L400](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Makefile.am#L332-L400)）；而 configure 的 `have_ssl` 闸门（[configure.ac:L384-L430](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L384-L430)）保证 Apple/Win/GnuSSL/OpenSSL 四个 `have_*` 变量至多一个为 yes。这是「编译期单选」策略：换后端必须重新 configure + 编译，不能运行时切换。
-
-**练习 3**：同样叫「验证对端证书」，OpenSSL 后端与 GnuTLS 后端的分工有何不同？
-
-**参考答案**：OpenSSL 后端里 aria2 亲自完成全流程——`SSL_connect` 期间库只做链构建，握手成功后 aria2 调 `SSL_get_verify_result` 拿链验证结论、再自己解析 SAN/CN 调 `net::verifyHostname`（[src/LibsslTLSSession.cc:L234-L328](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234-L328)）。GnuTLS 后端把链验证整体交给 `gnutls_certificate_verify_peers`（含 EKU purpose 参数），aria2 只负责把状态位翻译成错误文案并补做主机名匹配（[src/LibgnutlsTLSSession.cc:L253-L301](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L253-L301)）。抽象接口的价值正在于此：实现策略可以完全不同，`SocketCore` 与命令链毫不感知。
-
-### 4.3 FeatureConfig 能力上报与平台兼容层
+### 4.3 模块三：四个平台后端对比
 
 #### 4.3.1 概念说明
 
-u1-l1 建立过一条链路：configure 探测 → `AC_DEFINE` 宏 → 条件编译 → `--version` 上报。本讲把这条链路的「上报端」拆开看：
+四个后端面对同一份契约，交出了四份截然不同的答卷。差异的根源在于**底层 TLS 库的 API 形态**：
 
-- **`strSupportedFeature`**：一个 switch，每个 `FEATURE_*` 枚举位在 `#ifdef` 保护下要么返回特性名字符串、要么返回 `nullptr`（表示「本构建不支持」）。它是**编译期事实在运行期的唯一投影点**。
-- **`featureSummary`**：把非 nullptr 的名字用逗号拼成一行。
-- **`usedLibs`**：类似地按宏拼接**第三方库及版本号**，TLS 后端也在此上报——这是判断「到底编了哪个 TLS 后端」最直接的办法。
-
-「Enabled Features 里有 HTTPS」只说明 `ENABLE_SSL` 开着（某个 TLS 后端中选了）；「Libraries 里出现 `GnuTLS/3.8.x` 还是 `OpenSSL/3.x.y`」才回答了是哪个后端。两个输出互相配合，缺一不可。
+- **OpenSSL / GnuTLS**：通用 C 库，原生支持非阻塞（`SSL_connect`/`gnutls_handshake` 在非阻塞 fd 上返回 WANT_READ/WRITE），aria2 只做薄封装；证书验证由 aria2 **自己做**（提 SAN/CN、比对主机名），保证行为跨后端一致。
+- **Apple SecureTransport / Windows Schannel**：操作系统组件，API 偏同步、与系统证书存储（钥匙串/证书存储）深度绑定；验证交给系统库做，aria2 通过库的开关项控制；Apple 后端甚至直接从钥匙串按指纹找证书。
+- **Windows Schannel** 最特殊：它的握手 API 一次调用只推进一小步且不管网络收发，于是 WinTLS 后端不得不**自己维护读写缓冲、手写一台显式握手状态机**。
 
 #### 4.3.2 核心流程
 
-```text
-configure 探测（首中即赢）
-  have_appletls / have_wintls / have_libgnutls / have_openssl
-        │ AC_DEFINE
-        ▼
-config.h 宏（HAVE_APPLETLS / HAVE_WINTLS / HAVE_LIBGNUTLS / HAVE_OPENSSL / ENABLE_SSL）
-        │ #ifdef
-        ▼
-FeatureConfig.cc 编进不同的字符串分支
-        │
-        ▼
-aria2c --version ──► "Enabled Features: ... HTTPS ..."
-                     "Libraries: ... GnuTLS/3.8.6 ..."   ← 后端判定依据
-```
+四种握手模型对照（伪代码）：
 
-`--version` 还有一个容易忽略的兄弟：`Context` 构造时会 `A2_LOG_INFO(usedLibs())` 把库清单写进日志（[src/Context.cc:L185](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L185)），所以**看日志头部也能确认后端**，不必非得跑 `--version`。
+```text
+OpenSSL：   repeat { rv = SSL_connect(ssl) }      # 库记住中间状态，重入即可
+GnuTLS：    for(;;) { rv = gnutls_handshake(sess)  # 非致命警告继续循环
+              if fatal → ERROR; if again → WOULDBLOCK }
+Apple：     rv = SSLHandshake(ctx)                 # 同步推进
+            if wouldBlock → WOULDBLOCK
+            if serverAuthCompleted → 递归再调一次（验证完成的钩子点）
+Windows：   st_initialized → 组初始消息 → st_handshake_write
+            → st_handshake_read → 解析 →（循环 write/read）→ st_handshake_done
+            # 每步自己 send()/recv()，缓冲全自管
+```
 
 #### 4.3.3 源码精读
 
-**特性枚举与开关**（[src/FeatureConfig.h:L47-L65](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.h#L47-L65)）：九个特性位加 `MAX_FEATURE` 哨兵。HTTPS 特性直接绑定 `ENABLE_SSL` 宏（[src/FeatureConfig.cc:L150-L156](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L150-L156)）——注意这里看不出是哪个后端，四后端在 `ENABLE_SSL` 这一层已经被抹平。`featureSummary` 是简单的跳过空位拼接循环（[src/FeatureConfig.cc:L96-L113](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L96-L113)）。
+**OpenSSL 后端。** Context 构造 [src/LibsslTLSContext.cc:100-152](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L100-L152) 是一份「安全加固清单」：`SSLv23_method()` 建立方法对象（名字古老，实为「协商可用版本」）；最低版本经 fall-through 累积 `SSL_OP_NO_*` 位（选 TLS1.3 就依次关掉 1.2/1.1/1.0/SSLv3，[src/LibsslTLSContext.cc:114-131](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L114-L131)——注意每个 case 都不 break、往下渗透，这是位掩码叠加的惯用写法）；再叠加 `SSL_OP_ALL`（兼容性 workaround）、禁 SSLv2、禁压缩、`SSL_MODE_AUTO_RETRY|PARTIAL_WRITE`、`RELEASE_BUFFERS` 省内存，最后 cipher list 限定 `"HIGH:!aNULL:!eNULL"`（[src/LibsslTLSContext.cc:148](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L148-L152)）。信任库两个方法分别映射 `SSL_CTX_set_default_verify_paths`（[src/LibsslTLSContext.cc:276-287](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L276-L287)）与 `SSL_CTX_load_verify_locations`（[src/LibsslTLSContext.cc:289-300](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L289-L300)）。
 
-**库清单**（[src/FeatureConfig.cc:L191-L248](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L191-L248)）：TLS 相关的四段值得对照读——AppleTLS/WinTLS 只报名字（系统组件无版本宏可取），GnuTLS 报 `GNUTLS_VERSION`，OpenSSL 则要从一个十六进制拼装宏 `OPENSSL_VERSION_NUMBER` 里手工移位出主次修订号、并按 patch 字节换算出老式字母后缀（如 `3.5.1a`）。nettle 那段注释「头文件里没有库版本」道尽了版本上报的现实困难。
+OpenSSL 的**手工证书验证**是本讲的实践锚点，位于 [src/LibsslTLSSession.cc:234-328](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234-L328)，结构是「三连问」：
 
-**打印端**（[src/version_usage.cc:L55-L81](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/version_usage.cc#L55-L81)）：`showVersion` 依次输出 Enabled Features、Hash Algorithms（来自 u5-l5 讲过的 MessageDigest）、Libraries、Compiler、System 五行。
+1. 对端给了证书吗？——`SSL_get1_peer_certificate`（OpenSSL 3.0+；旧版叫 `SSL_get_peer_certificate`，见 [src/LibsslTLSSession.cc:236-244](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L236-L244) 的版本条件编译）。没有 → `handshakeErr = "certificate not found"`。
+2. 证书链验证通过吗？——`SSL_get_verify_result` ≠ `X509_V_OK` 就把错误码翻译成人话（[src/LibsslTLSSession.cc:247-251](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L247-L251)）。自签名证书在这里死掉，典型错误串如 `self-signed certificate` / `self signed certificate`。
+3. 名字对得上吗？——从证书提 SAN 的 DNS 名与 IP 地址（[src/LibsslTLSSession.cc:255-291](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L255-L291)）与 CommonName（[src/LibsslTLSSession.cc:292-324](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L292-L324)），交给公共函数 `net::verifyHostname` 比对（[src/LibsslTLSSession.cc:325-328](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L325-L328)），失败 → `handshakeErr = "hostname does not match"`。
 
-**平台兼容层**。TLS 后端能「一套抽象吃四个平台」，离不开更底层的一组 shim 头文件。`TLSSession.h` 自己就 `#include "a2netcompat.h"`（[src/TLSSession.h:L38-L40](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/TLSSession.h#L38-L40)），因为 `init(sock_t sockfd)` 的参数类型必须跨平台一致：Windows 上 `sock_t` 是 `SOCKET`（句柄），POSIX 上是 `int`（[src/a2netcompat.h:L96-L100](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/a2netcompat.h#L96-L100)）；同一文件还抹平了 `setsockopt` 的第 4 参类型（`a2_sockopt_t`，char\* vs void\*，[src/a2netcompat.h:L46-L55](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/a2netcompat.h#L46-L55)）以及缺 `getaddrinfo` 的古老平台（内置替代实现）。`a2netcompat.h` 又叠在 `a2io.h` 之上（`a2io.h` 负责 `a2_write` 之类的文件 I/O 差异）。WinTLS 后端正是靠这套约定才能直接拿 `sock_t` 去喂 Schannel。
+注意这整段被 `if (... getSide() == TLS_CLIENT && getVerifyPeer())` 包着——`--check-certificate=false` 就是把这道闸门打开、整段跳过。
 
-**configure 汇总表**。configure 结束时打印的四行 TLS 探测结果（[configure.ac:L1095-L1098](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L1095-L1098)）与 `--version` 输出一一对应，构建期与运行期可以互证——这是 u1-l2 结论在 TLS 上的落地。
+**GnuTLS 后端。** 握手是一个 for(;;) 循环（[src/LibgnutlsTLSSession.cc:241-252](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L241-L252)）：`GNUTLS_E_AGAIN/E_INTERRUPTED` 翻成 WOULDBLOCK，`gnutls_error_is_fatal` 为真才报 ERROR——**警告类返回值会继续循环**，这是 GnuTLS 特有的语义。验证同样是手工三连问，但第一问用的是 `gnutls_certificate_verify_peers` 且带上了扩展密钥用途（EKU）参数 `GNUTLS_KP_TLS_WWW_SERVER`（[src/LibgnutlsTLSSession.cc:253-264](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L253-L264)——这正是最近一次提交 `gnutls: Perform ExtendedKeyUsage validation` 引入的加固：证书即使链合法，用途不是「TLS 服务器」也要拒）。状态位翻译成可读错误串的段落见 [src/LibgnutlsTLSSession.cc:268-296](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L268-L296)。Context 侧，系统信任库依赖较新的 GnuTLS 版本，旧版干脆打日志 `"System certificates not supported"` 返回 false（[src/LibgnutlsTLSContext.cc:129-146](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSContext.cc#L129-L146)）——同一个抽象方法在不同后端可能「合法地失败」，调用方须容忍。
 
-#### 4.3.4 代码实践
+**Apple 后端。** 最有个性的两个方法：`addCredentialFile` 不直接读文件，而是「先当指纹试、再当 PKCS12 试」（[src/AppleTLSContext.cc:192-209](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L192-L209)）——指纹路线会用该串去**钥匙串里查询**身份证书（[src/AppleTLSContext.cc:220-278](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L220-L278)）；`addTrustedCACertFile` 直接宣布不支持（[src/AppleTLSContext.cc:211-216](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSContext.cc#L211-L216)），让你用钥匙串管理证书。握手是同步式 `SSLHandshake`，`errSSLWouldBlock` 翻 WOULDBLOCK，收到 `errSSLServerAuthCompleted`（证书验证完成的钩子事件）就递归再推进一次（[src/AppleTLSSession.cc:733-748](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/AppleTLSSession.cc#L733-L748)）。证书校验本身交给 SecureTransport（配置阶段已设好验证开关），aria2 不重复实现。
 
-**实践目标**：从 `aria2c --version` 的输出反推出该二进制的 TLS 后端与 configure 配置。
+**Windows 后端。** Context 的本体是一个 `SCHANNEL_CRED` 结构：版本开关用 `SP_PROT_TLS1_x_CLIENT/SERVER` 位累积（[src/WinTLSContext.cc:76-101](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L76-L101)），**switch 里只有 TLS1.1/1.2 两个 case**——传 TLS1.3 会落进 `default: abort()`，即 WinTLS 后端不支持 TLS 1.3。`verifyPeer` 的实现是纯标志位：开验证就上 `SCH_CRED_AUTO_CRED_VALIDATION`（系统库自动验），关验证就换 `SCH_CRED_MANUAL_CRED_VALIDATION` 一组手动标志（[src/WinTLSContext.cc:128-155](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L128-L155)）。凭据句柄惰性创建于 `getCredHandle`（[src/WinTLSContext.cc:157-191](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L157-L191)）。客户端证书只认 PFX/PKCS12（`PFXIsPFXBlob` + `PFXImportCertStore`，[src/WinTLSContext.cc:193-229](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L193-L229)）。Session 侧则是一台货真价实的显式状态机：`st_initialized → st_handshake_write → st_handshake_read → ... → st_handshake_done`，读写全部自己 `send()`/`recv()`（[src/WinTLSSession.cc:575-657](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L575-L657)）——因为 Schannel 的 `InitializeSecurityContext` 每次只吐出「该发什么」和「还差什么」，网络搬运得调用者自己干。
 
-**操作步骤**：
+把四家答案排成一张矩阵（建议你动手核对每一格）：
 
-1. 在已编译的仓库里运行 `./src/aria2c --version`（未编译则阅读 [src/version_usage.cc:L55-L81](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/version_usage.cc#L55-L81) 想象输出，或安装发行版的 aria2c 对照）。
-2. 找到 "Enabled Features" 行，检查有无 `HTTPS`；再找 "Libraries" 行，检查出现的是 `GnuTLS/x.y.z`、`OpenSSL/x.y.z`、`AppleTLS` 还是 `WinTLS`。
-3. 回到 `FeatureConfig.cc` 的 `usedLibs`，确认你看到的每个库名对应哪个 `#ifdef`；再回到 configure.ac 确认该后端中选时的探测顺序与闸门。
+| 维度 | OpenSSL (Libssl) | GnuTLS | Apple (SecureTransport) | Windows (Schannel) |
+|---|---|---|---|---|
+| Context 本体 | `SSL_CTX` | `gnutls_certificate_credentials_t` | `SecIdentityRef`（钥匙串身份） | `SCHANNEL_CRED` + 惰性 `CredHandle` |
+| 客户端证书 | PEM 双文件或 PKCS12 | PEM 双文件或 PKCS12 | 仅 PKCS12（空密码）或钥匙串指纹 | 仅 PFX/PKCS12 |
+| 系统信任库 | `set_default_verify_paths` | `set_x509_system_trust`（版本门槛） | 钥匙串即系统库 | 系统证书存储（隐式） |
+| `--ca-certificate` | 支持 | 支持 | **不支持**（WARN） | **不支持**（WARN，用系统库） |
+| 证书校验在哪做 | aria2 手工三连问 | aria2 手工三连问 + EKU | 系统库内 | 系统库内 |
+| 主机名匹配 | `net::verifyHostname` | `net::verifyHostname` | 系统库内 | 系统库内 |
+| 握手模型 | 库内重入（`SSL_connect`） | 库内循环 + 警告容忍 | 同步 `SSLHandshake` | **自管缓冲的显式状态机** |
+| TLS 1.3 | 支持（编译期探测宏） | 依库版本 | 支持 | **不支持**（switch 无此分支） |
 
-**需要观察的现象**：例如在 Ubuntu 上典型输出是 `Enabled Features: ... HTTPS ...` 且 `Libraries` 含 `GnuTLS/3.x`——据此可推断 configure 时 gnutls 探测先于 openssl 命中（apple/wintls 因平台不符直接出局）。
+最后看**公共的主机名匹配器** `net::verifyHostname`（[src/SocketCore.cc:1536-1569](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L1536-L1569)）：主机名是数字地址（IP）时走 IP SAN 的二进制比对；否则**若证书带 DNS SAN 就只看 SAN、完全忽略 CN**（这是 RFC 6125 的推荐做法），只有证书没有 SAN 时才退回 CN 匹配。OpenSSL 与 GnuTLS 两个手工验证后端共用这一个函数，保证行为一致。
 
-**预期结果**：能不看 `config.log` 说出「本二进制的 TLS 后端是 X，因为 usedLibs 的第 X 个 ifdef 分支被编入」。若手头二进制与本仓库源码不是同一次构建产物，结论需标注「待本地验证」。
+#### 4.3.4 代码实践：源码对比阅读
+
+1. **实践目标**：亲手填满上面那张矩阵，体会「同一契约、四种实现」。
+2. **操作步骤**：对四个后端各做三件事——
+   ```bash
+   # ① 各后端 addTrustedCACertFile 的态度
+   grep -n -A6 "addTrustedCACertFile" src/LibsslTLSContext.cc src/LibgnutlsTLSContext.cc \
+                                            src/AppleTLSContext.cc src/WinTLSContext.cc
+   # ② 各后端验证分支的入口判断
+   grep -n "getVerifyPeer" src/LibsslTLSSession.cc src/LibgnutlsTLSSession.cc \
+                                src/AppleTLSSession.cc src/WinTLS*.cc
+   # ③ TLS 1.3 的处理
+   grep -n "TLS13\|TLS_PROTO_TLS13" src/LibsslTLSContext.cc src/LibsslTLSSession.cc \
+                                     src/WinTLSContext.cc src/AppleTLSSession.cc
+   ```
+3. **需要观察的现象**：Libssl/Libgnutls 在 Session 的 `tlsConnect` 里手工验证；Apple/Win 在 Context 阶段就把验证策略配成库开关；`TLS_PROTO_TLS13` 在 WinTLSContext 的 switch 中没有任何 case。
+4. **预期结果**：与你填写的矩阵一致。特别注意 ②：OpenSSL 与 GnuTLS 命中于握手函数内部（真验证分支），Apple/Windows 命中于 Context 的配置阶段（`setVerifyPeer` 等）——「校验位置」一行的源码证据就在这里。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么判断 TLS 后端要看 Libraries 行而不是 Enabled Features 行？
+**练习 1**：为什么 OpenSSL/GnuTLS 后端要自己提 SAN/CN 做主机名匹配，而 Apple/Windows 不用？
+**答案**：四个后端都能让库验证证书链，但「主机名匹配」的内置程度不同。SecureTransport 与 Schannel 把主机名验证整合在凭据验证流程里（配置好标志位即可，Schannel 还会在 `InitializeSecurityContext` 时传入主机名参数）；而 OpenSSL 传统上需要应用层自己做（历史上也可用 `SSL_set1_host`，aria2 选择手工实现），GnuTLS 亦然。aria2 把匹配逻辑统一写在 `net::verifyHostname`（[src/SocketCore.cc:1536](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L1536-L1569)），两个手工后端共用，保证「带 SAN 时忽略 CN」等细节跨后端一致。
 
-**参考答案**：`FEATURE_HTTPS` 只绑定 `ENABLE_SSL`（[src/FeatureConfig.cc:L150-L156](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L150-L156)），四个后端在抽象层之下已不可区分；而 `usedLibs` 按 `HAVE_APPLETLS/HAVE_WINTLS/HAVE_LIBGNUTLS/HAVE_OPENSSL` 四个互斥宏分别上报（[src/FeatureConfig.cc:L207-L224](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L207-L224)），能唯一指认后端。
+**练习 2**：`--min-tls-version=TLSv1.3` 在四个后端上分别会发生什么？
+**答案**：`toTLSVersion` 返回 `TLS_PROTO_TLS13`（[src/util.cc:2479-2480](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/util.cc#L2479-L2480)）。OpenSSL 后端在构造时叠加 `SSL_OP_NO_TLSv1_2`（且仅在编译环境有 `TLS1_3_VERSION` 宏时才有这个 case，[src/LibsslTLSContext.cc:116-120](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSContext.cc#L116-L120)）；GnuTLS 把 minVer 存下来交给会话层；Apple 在会话层映射协议枚举；**Windows 后端没有 TLS1.3 的 case，直接 `default: abort()`**（[src/WinTLSContext.cc:84-86](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSContext.cc#L84-L86)）——这是矩阵里「WinTLS 不支持 TLS 1.3」的源码证据。
 
-**练习 2**：`--disable-ssl` 之后 `--version` 的两行输出各自会发生什么变化？
+**练习 3**：WinTLS 为什么需要 `writeBuf_`/`readBuf_` 这样的自管缓冲，而 OpenSSL 后端不需要？
+**答案**：OpenSSL 的 `SSL_connect` 直接绑定 socket fd（`SSL_set_fd`，[src/LibsslTLSSession.cc:73-85](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L73-L85)），库内部替你收发并记住中间状态，遇到非阻塞就返回 WANT_READ/WRITE。Schannel 的 `InitializeSecurityContext` 却是「纯计算」：吐出一段该发送的数据、或要求你补充一段收到的数据，网络 I/O 一概不管。于是 [src/WinTLSSession.cc:628-648](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L628-L648) 的握手状态机必须自己 `send()` 写缓冲、[src/WinTLSSession.cc:660-693](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/WinTLSSession.cc#L660-L693) 自己 `recv()` 填读缓冲，用 `st_handshake_write`/`st_handshake_read` 状态显式记录「下一步该收还是该发」。
 
-**参考答案**：configure 中 `enable_ssl != yes` 会把四个 `with_*` 全部置 no（[configure.ac:L316-L323](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/configure.ac#L316-L323)），于是 `ENABLE_SSL` 未定义：Enabled Features 行失去 `HTTPS`，Libraries 行失去对应 TLS 条目；同时源码里所有 `#ifdef ENABLE_SSL` 的路径（TLS 上下文装配、SocketCore 的 TLS 方法）整体消失，HTTPS/BT 的 TLS tracker 能力不可用。
+### 4.4 模块四：FeatureConfig 能力上报与平台兼容层
 
-**练习 3**：`nettle` 为什么在 Libraries 里没有版本号？
+#### 4.4.1 概念说明
 
-**参考答案**：`usedLibs` 中该分支的注释写明「头文件里没有库版本」（[src/FeatureConfig.cc:L225-L228](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L225-L228)）。版本上报依赖库在公共头文件里暴露版本宏（如 `GNUTLS_VERSION`、`OPENSSL_VERSION_NUMBER`），nettle 没有提供，只能报名字。
+TLS 后端是编译期决定的，用户（和排查问题的你）需要一个运行期窗口看清「这个二进制到底链了谁」。这就是 `FeatureConfig` 的职责：它把 `configure` 探测结果产生的编译宏，翻译成 `aria2c --version` 里两行人类可读的输出——`Enabled Features` 与 `Libraries`。这套机制在 u1-l1/u1-l2 已建立（「功能与第三方库一一绑定」），本讲落到 TLS 的具体呈现。
 
-## 5. 综合实践
+顺带认识 `a2io.h`/`a2netcompat.h` 这层「平台方言翻译」：TLS 抽象接口里出现的 `sock_t`、`ssize_t` 等类型，都是这层兼容层统一出来的。
 
-综合实践把本讲三个模块串成一个完整实验：**用自签名证书制造一次「必然失败的握手」，再亲手关掉验证让它成功，最后在源码里看清分叉点**。
+#### 4.4.2 核心流程
 
-1. **准备一个自签名 HTTPS 站点**（示例命令，细节可按发行版调整）：
+```text
+configure 探测 → AC_DEFINE 编译宏（config.h）→ 条件编译进 FeatureConfig.cc
+    ENABLE_SSL          → Features 里的 "HTTPS"
+    HAVE_APPLETLS       → Libraries 里的 "AppleTLS"
+    HAVE_WINTLS         → Libraries 里的 "WinTLS"
+    HAVE_LIBGNUTLS      → Libraries 里的 "GnuTLS/<版本>"
+    HAVE_OPENSSL        → Libraries 里的 "OpenSSL/<版本>"
 
+aria2c --version（version_usage.cc::showVersion）
+    "Enabled Features": featureSummary()   ← 枚举遍历 + 宏过滤
+    "Libraries":       usedLibs()          ← 宏过滤 + 版本号拼接
+启动日志（Context 构造）也会 A2_LOG_INFO(usedLibs())
+```
+
+#### 4.4.3 源码精读
+
+特性枚举只有九项（[src/FeatureConfig.h:47-58](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.h#L47-L58)）。`strSupportedFeature` 是「一特性一函数分支」的查表：HTTPS 特性分支在 [src/FeatureConfig.cc:150-156](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L150-L156)——编译宏 `ENABLE_SSL` 存在就返回 `"HTTPS"`，否则返回 `nullptr` 表示「此构建无此特性」。`featureSummary`（[src/FeatureConfig.cc:96-113](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L96-L113)）就是遍历这张表把非空项用逗号拼起来。
+
+TLS 后端的归属上报在 `usedLibs`：四个后端宏各自拼一段（[src/FeatureConfig.cc:207-224](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/FeatureConfig.cc#L207-L224)）——AppleTLS/WinTLS 没有版本号概念只报名字；GnuTLS 用 `GNUTLS_VERSION` 字符串；OpenSSL 的版本号是一个长整型位域，代码把它逐段位移拆出主/次/修版本与字母后缀。打印出口是 [src/version_usage.cc:53-82](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/version_usage.cc#L53-L82) 的 `showVersion`，另外 [src/Context.cc:185](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L185-L185) 在进程启动时也把 `usedLibs()` 写进日志——所以**翻旧日志也能知道当时的二进制链的是哪个后端**。
+
+平台兼容层的样例：`sock_t` 在 Windows 是 `SOCKET`（句柄型）、否则是 `int`（[src/a2netcompat.h:95-99](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/a2netcompat.h#L95-L99)）；mingw 下 `a2_sockopt_t` 要换成 `char*`（[src/a2netcompat.h:46-55](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/a2netcompat.h#L46-L55)）。`TLSSession::init(sock_t sockfd)` 的签名因此才能在两个世界通用。这与 TLS 后端矩阵是同一主题的两半：**后端差异走条件编译 + 链接期单选，平台差异走宏翻译 + 类型别名**。
+
+#### 4.4.4 代码实践：configure 输出与 --version 互证
+
+1. **实践目标**：验证「configure 汇总表、`--version` 输出、源码宏」三方同源。
+2. **操作步骤**：
    ```bash
-   # 生成自签名证书（CN 必须与访问主机名一致，否则会命中 hostname 不匹配分支）
-   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
-     -days 2 -nodes -subj "/CN=localhost"
-   # 起一个最简 HTTPS 服务并放一个测试文件
-   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 2 \
-     -nodes -subj "/CN=localhost" && echo hello > index.html
-   python3 -m http.server --ssl-certfile cert.pem --ssl-keyfile key.pem 8443
+   ./configure > configure.log 2>&1   # 或翻看你构建时留下的日志
+   grep -iE "openssl|gnutls|tls" configure.log | head -20
+   ./src/aria2c --version | grep -A1 "Enabled Features"
    ```
+3. **需要观察的现象**：configure 末尾的汇总表里 TLS 相关行（如 `OpenSSL: yes` 或 `GnuTLS: yes`）与你构建出的 `aria2c --version` 的 `Libraries` 行一致；Features 行含 `HTTPS` 当且仅当 TLS 后端启用。
+4. **预期结果**：三处信息互相印证。若你按 u1-l2 的方式用 `--without-*` 裁剪过依赖，这里的差异会直接显现；不同机器编译的二进制输出可能不同。具体输出内容待本地验证。
 
-   （若无 python3 现代版本，可换用 `openssl s_server -WWW -accept 8443 -key key.pem -cert cert.pem`，效果等同。）
+#### 4.4.5 小练习与答案
 
-2. **验证特性与后端**：运行 `./src/aria2c --version`，按 4.3.4 的方法记录 Enabled Features 与 Libraries 中 TLS 相关条目。
+**练习 1**：一个二进制能同时上报 GnuTLS 和 OpenSSL 吗？能同时用两者做 TLS 吗？
+**答案**：`usedLibs` 是条件宏拼接，`HAVE_LIBGNUTLS` 与 `HAVE_OPENSSL` 同时定义时两段都会出现，所以**上报层面可以共存**（例如 OpenSSL 用于消息摘要、GnuTLS 用于 TLS 的构建）。但 TLS 抽象的 `make` 工厂在链接期只能解析到一份定义，**做 TLS 的后端永远只有一个**；macOS 上甚至会出现「Libraries 报了 OpenSSL、TLS 实际走 AppleTLS」的组合（Makefile.am 的 `if !HAVE_APPLETLS` 保证了这一点）。
 
-3. **两次对照下载**（待本地验证）：
+**练习 2**：用户报障说「aria2 下载 HTTPS 报 handshake failure」，但没说是哪个平台的二进制，你的第一句话问什么？
+**答案**：让他跑 `aria2c --version`。`Libraries` 行直接给出 TLS 后端与版本（OpenSSL/GnuTLS/AppleTLS/WinTLS），`Enabled Features` 确认 HTTPS 是否启用；再让他用 `-l xxx.log --log-level=debug` 复现，启动日志第一段就有 `usedLibs()` 的输出（[src/Context.cc:185](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/Context.cc#L185-L185)），握手失败的 `handshakeErr` 内容也因后端而异（例如 GnuTLS 会给出逐项状态位拼接的串）。后端不同，排查路径完全不同。
 
+**练习 3**：为什么 `FEATURE_HTTPS` 映射的宏叫 `ENABLE_SSL` 而不是 `HAVE_OPENSSL`？
+**答案**：`ENABLE_SSL` 是「具备 HTTPS 能力」这一**功能**的语义宏，与具体后端解耦；`HAVE_OPENSSL` 只是「探测到 OpenSSL 库」这一**依赖**事实。四个后端无论哪个被启用都会定义 `ENABLE_SSL`（这正是 u1-l2 讲过的「特性推导」）。把功能宏与依赖宏分层，是让「同一功能、多后端」在构建系统里保持可组合的关键——如果特性判断写死 `HAVE_OPENSSL`，GnuTLS 构建的 aria2 就会错误地报告不支持 HTTPS。
+
+## 5. 综合实践：自签名证书攻防实验
+
+把本讲四个模块串成一个完整实验：亲手搭一个自签名 HTTPS 服务，观察 `--check-certificate` 开关在源码验证分支上的真实效果，并在验证分支加日志。
+
+1. **实践目标**：
+   - 确认本机 aria2 的 TLS 后端（模块四）。
+   - 观察验证开关如何改变同一条握手链路的结局（模块二）。
+   - 亲手在 OpenSSL 后端验证分支加日志（模块一/三）。
+2. **准备材料**：装有 openssl 命令行工具的环境、可运行的 aria2c（按 u1-l2 构建）。
+3. **操作步骤**：
    ```bash
-   ./src/aria2c https://localhost:8443/index.html -d /tmp/a2t --allow-overwrite=true
-   ./src/aria2c --check-certificate=false https://localhost:8443/index.html \
-     -d /tmp/a2t2
+   # ① 确认后端
+   ./src/aria2c --version | sed -n '/Enabled Features/,+2p'
+
+   # ② 生成自签名证书并起一个本地 HTTPS 服务（-www 会回一个状态页）
+   mkdir -p /tmp/tls-lab && cd /tmp/tls-lab
+   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 1 -nodes \
+          -subj "/CN=localhost"
+   openssl s_server -accept 18443 -cert cert.pem -key key.pem -www &
+
+   # ③ 默认（--check-certificate=true）下载
+   ./src/aria2c -d /tmp/tls-lab -o default.out https://localhost:18443/ ; echo "exit=$?"
+
+   # ④ 关闭验证再试
+   ./src/aria2c --check-certificate=false -d /tmp/tls-lab -o nocheck.out \
+          https://localhost:18443/ ; echo "exit=$?"
    ```
-
-   预期：第一次失败，报证书错误（OpenSSL 后端典型文案含 `certificate verification failed` 或 `hostname does not match`，取决于证书细节）；第二次成功下载 `hello`。
-
-4. **定位分叉点**：给失败的那次加上 `-l /tmp/a2t/log.txt --log-level=debug`，从日志行头的 CUID 找到抛错的命令（u9-l3 的诊断方法）。然后按你的后端在源码分叉处加一行日志：
-   - OpenSSL 后端：在 [src/LibsslTLSSession.cc:L234](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234) 的 `if (tlsContext_->getSide() == TLS_CLIENT && tlsContext_->getVerifyPeer()) {` 之前插入 `A2_LOG_INFO("verifyPeer branch entered");`，重新编译 `make -j$(nproc)` 后重复第 3 步两次下载。
-   - GnuTLS 后端：在 [src/LibgnutlsTLSSession.cc:L253](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L253) 的 `if (tlsContext_->getVerifyPeer()) {` 前插入同样的日志。
-
-5. **观察与解释**：`--check-certificate=false` 那次日志中**不应出现**你加的这行——因为 `getVerifyPeer()` 为 false，整个验证块被跳过，这就是「关掉验证」在源码里的全部含义。把两次运行的日志差异、`--version` 的后端结论、以及你画的 4.1.4 时序图整理成一页实验报告。
-
-注意：改源码加日志仅用于本地学习，请勿把调试改动提交；实验后用 `git checkout -- src/` 恢复。
+   然后**改源码加日志**：在 [src/LibsslTLSSession.cc:234](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234-L235) 的 `if` 之前插入一行（示例代码，非项目原有代码）：
+   ```cpp
+   A2_LOG_INFO(fmt("tlsConnect: verifyPeer=%s hostname=%s",
+                   tlsContext_->getVerifyPeer() ? "true" : "false",
+                   hostname.c_str()));
+   ```
+   重新 `make` 后重复 ③④。
+4. **需要观察的现象**：
+   - ③ 应当失败，退出码非 0，错误信息形如 `SSL/TLS handshake failure: ... self ... certificate`（由 [src/SocketCore.cc:1017-1022](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L1017-L1022) 抛出，`handshakeErr` 来自 OpenSSL 后端「三连问」的第二问）。
+   - ④ 应当成功落盘，且新增日志行恒为 `verifyPeer=false`——证明关掉开关后整个验证分支被跳过。
+   - 加日志后，③ 的日志行是 `verifyPeer=true`，随后紧接 `SSL_get_verify_result` 的失败路径。
+5. **预期结果**：一次开关切换，恰好对应 [src/LibsslTLSSession.cc:234](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibsslTLSSession.cc#L234-L235) 那道 `if` 闸门的开与关；若你的后端是 GnuTLS，现象等价，但失败串换成 GnuTLS 状态位拼接的长句（见 [src/LibgnutlsTLSSession.cc:268-296](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L268-L296)）。具体输出文本待本地验证。
+6. **思考题**：为什么 ④ 成功后文件内容是 HTML 状态页？`localhost` 没有点号，SNI 被跳过了（[src/SocketCore.cc:937](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/SocketCore.cc#L937-L938)），这对单证书的 `s_server` 有影响吗？
 
 ## 6. 本讲小结
 
-- aria2 以 `TLSContext`（进程级配置袋，全进程至多两个实例）与 `TLSSession`（每连接一个的握手/读写状态机）两个纯虚接口抹平 TLS 后端差异；`SocketCore::tlsHandshake` 的三态状态机（NONE→HANDSHAKING→CONNECTED）是抽象接口接入命令链的宿主。
-- `TLS_ERR_OK/ERROR/WOULDBLOCK` 三值约定加上 `checkDirection()`，把各库五花八门的「稍后再试」信号统一成 EventPoll 可理解的读/写事件需求，与非阻塞 socket 的处理方式完全同构。
-- 四后端「编译期单选」：configure 按 Apple→Win→GnuTLS→OpenSSL 顺序探测、`have_ssl` 闸门首中即赢，四组源文件由 Makefile.am 条件块互斥编译，每个后端各自定义同名工厂 `TLSContext::make`/`TLSSession::make`。
-- 后端能力差异集中在证书与信任库：OpenSSL/GnuTLS 支持 PEM+PKCS12 与 CA bundle，Apple 走 KeyChain（含指纹引用身份的特有玩法），Win 只认 PFX 且 CA bundle 一律回退系统库；验证策略从「aria2 亲手验」（OpenSSL）到「库验+EKU purpose」（GnuTLS）再到「系统标志驱动」（Apple/Win）各不相同。
-- `--version` 的 Enabled Features 只报 `ENABLE_SSL` 有无，判具体后端要看 Libraries 行（或日志头部的 `usedLibs()` 输出）；FeatureConfig 是编译期探测结果在运行期的唯一投影点。
-- 平台兼容层（`a2netcompat.h`/`a2io.h`）用 `sock_t`、`a2_sockopt_t` 这类小别名承接差异，是四个后端能共享同一抽象的底座。
+- aria2 把 TLS 拆成**进程级配置**（`TLSContext`：证书、信任库、验证开关）与**连接级会话**（`TLSSession`：握手、加解密、方向查询）两个抽象，头文件注释明言这就是新后端的插槽。
+- 四个后端各自定义同一个 `TLSContext::make`/`TLSSession::make`，靠 Makefile.am 的互斥条件块实现**链接期单选**，再经虚接口获得运行期多态——「选择」被压缩进构建系统，运行期代码零分支。
+- 握手由 `SocketCore::tlsHandshake` 三状态机驱动：`WOULDBLOCK` → `checkDirection()` → `wantRead_/wantWrite_` → EventPoll 注册 → 命令 requeue，把 TLS 无缝嫁接到 u2-l2 的事件循环上。
+- `--check-certificate` 落到 `setVerifyPeer`：OpenSSL/GnuTLS 后端在 `tlsConnect` 里做**手工三连问**（有证书？链合法？名字匹配？），Apple/Windows 后端把验证交给系统库只配开关；四家对 CA bundle 文件的支持、TLS 1.3 支持各不相同，WinTLS 甚至要自管缓冲手写握手状态机。
+- `FeatureConfig` 把编译宏翻译成 `--version` 的 `Enabled Features`/`Libraries` 两行输出，`ENABLE_SSL` 是功能宏、`HAVE_OPENSSL` 等是依赖宏，两层分离让多后端可组合；`a2io.h`/`a2netcompat.h` 则用类型别名弥合平台方言。
 
 ## 7. 下一步学习建议
 
-- **u9-l5（测试体系）**：TLS 相关测试集中在 `test/LibsslTLSSessionTest.cc` 与 `test/LibgnutlsTLSSessionTest.cc`，去看测试如何伪造握手环境，是理解验证分支的捷径。
-- **横向阅读 `SocketCore.cc` 的 TLS 收发路径**：`tlsSession_->readData/writeData` 如何替换明文读写、`getRecvBufferedLength` 如何参与 u2-l4 讲过的 `SocketRecvBuffer`，能把本讲与网络底座讲连成一体。
-- **对照 u8-l3（内嵌 HTTP/WebSocket 服务器）**：RPC over TLS（`--rpc-secure`）用的是服务端上下文与 `tlsAccept`，把本讲的 `TLS_SERVER` 半边补全；WebSocket 的 wss 也复用同一会话抽象。
-- 若你对「新增第五个后端」感兴趣，按 `TLSSession.h` 的注释提示，参照 WinTLS（最重）或 GnuTLS（中等）实现全部纯虚方法，再在 configure.ac/Makefile.am 加一对探测与条件块，即可完整走一遍 u9-l6 的二次开发流程。
+本讲补全了 u9 工程实践单元的平台维度。接下来：
+
+1. **u9-l5（测试体系）**：`test/` 目录下有各 TLS 后端的会话级测试（如 `LibsslTLSSessionTest` 等，可 `ls test | grep -i tls` 确认），学习如何在没有真实网络的情况下用内存 socket 驱动一次握手。
+2. **u9-l6（二次开发实战）**：本讲的「加一行日志改行为」是最小的二次开发；u9-l6 会走完「注册新选项 → 引擎读取 → 行为生效」的完整改动链路。
+3. **回看 u8-l3（内嵌服务器）**：`TLS_SERVER` 侧的 context 服务的正是 `--rpc-secure` 的 RPC over HTTPS，现在你可以顺着 `SocketCore::setServerTLSContext` → `tlsAccept` 把服务器侧握手链路也走一遍，与 u8-l3 的 HttpListenCommand 命令链对接。
+4. 若想继续深挖安全面：对照 [src/LibgnutlsTLSSession.cc:253-264](https://github.com/aria2/aria2/blob/9e7273583f83e881e3ec067b523ba88724088d2f/src/LibgnutlsTLSSession.cc#L253-L264) 的 EKU 验证提交（`git show 64365cf3`）阅读一次真实的安全加固是如何进入四个后端之一的。
