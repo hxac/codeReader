@@ -1,259 +1,280 @@
 # 网格/随机/减半搜索与嵌套交叉验证
 
 > 对应《Machine Learning with PyTorch and Scikit-Learn》第 6 章 "Fine-tuning machine learning models via grid search" 一节。
-> 仓库代码：`ch06/ch06.py`（等价 notebook：`ch06/ch06.ipynb`）。
+> 仓库代码：`ch06/ch06.py`（等价 notebook：`ch06/ch06.ipynb`，下文引用行号一律取自 `.py` 文件）。
 
 ## 1. 本讲目标
 
 学完本讲，你应该能够：
 
-1. 看懂并会写 `GridSearchCV` 的参数网格，特别是「双列表 `param_grid`」这种为不同核函数定义不同搜索子空间的写法。
-2. 正确解读 `best_score_`、`best_params_`、`best_estimator_`，并理解 `refit=True` 帮你省掉了什么。
-3. 会用 `RandomizedSearchCV` 的 `n_iter` 控制采样预算，并理解 `scipy.stats.loguniform`（对数均匀分布）为什么比线性网格更适合跨数量级的超参数。
-4. 理解 `HalvingRandomSearchCV` 的「资源递增 + 逐轮淘汰」（successive halving）思想。
-5. 掌握嵌套交叉验证的嵌套写法——把整个 `GridSearchCV` 对象塞进外层 `cross_val_score(gs, ...)`——并能用它无偏地比较 SVM 与决策树两套「算法 + 调参流程」。
+1. 会写 `GridSearchCV` 的参数网格，特别是「双列表 `param_grid`」——为不同核函数定义不同搜索子空间——这种写法，并能算出一个网格要跑多少次 `fit`。
+2. 正确解读 `best_score_`、`best_params_`、`best_estimator_`，理解 `refit=True` 帮你省掉了什么，并会用 `cv_results_` 检查全部候选组合的排名。
+3. 会用 `RandomizedSearchCV` 的 `param_distributions` + `n_iter` 控制搜索预算，理解 `scipy.stats.loguniform`（对数均匀分布）为什么比线性网格更适合跨数量级的超参数。
+4. 理解 `HalvingRandomSearchCV` 的「资源递增 + 逐轮淘汰」（successive halving）思想，以及它为什么省算力。
+5. 掌握嵌套交叉验证的写法——把整个 `GridSearchCV` 对象塞进外层 `cross_val_score(gs, ...)`——并能用它无偏地比较「SVM 管线」与「决策树」两套算法+调参流程。
 
 ## 2. 前置知识
 
-本讲建立在 u6-l1（Pipeline、交叉验证与学习/验证曲线）之上。开始前请确认以下概念：
+本讲直接承接 u6-l1（Pipeline、交叉验证与学习/验证曲线）。开始前请确认以下概念：
 
-- **参数 vs 超参数**：参数（parameter）是模型在 `fit` 中从数据学出来的量（如 SVC 的支持向量系数）；超参数（hyperparameter）是训练**之前**由人设定的量（如 `SVC` 的 `C`、`gamma`、`kernel`、决策树的 `max_depth`）。超参数不能靠梯度下降学习，只能靠「试 + 评估」搜索。
-- **验证曲线的局限**：u6-l1 用 `validation_curve` 扫描了逻辑回归的单个参数 `C`。但现实中往往要同时调多个超参数（SVM 要同时定 kernel、C、gamma），组合数是**乘法**增长的，一次只扫一个参数的工具不够用了。
-- **Pipeline 与双下划线参数名**：`make_pipeline(StandardScaler(), SVC())` 生成的管线里，SVM 的 `C` 要写成 `'svc__C'`（小写类名 + 双下划线）。GridSearchCV 的参数网格就用这种名字寻址。这是 u6-l1 已建立的约定，本讲直接沿用。
-- **训练集 / 测试集的分工**：乳腺癌数据集 569 个样本，80/20 分层划分后 `X_train` 有 455 个样本、`X_test` 有 114 个（[ch06/ch06.py:L139-L142](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L139-L142)）。本讲所有搜索与交叉验证都**只在 `X_train` 上进行**，`X_test` 只在最后评估一次。
-- **对数刻度常识**：SVM 的 `C` 与 `gamma` 合理取值往往横跨多个数量级（10⁻⁴ ~ 10³），所以搜索网格几乎总按数量级（×10）设置，画图用对数轴。
+- **参数 vs 超参数**：参数（parameter）是模型在 `fit` 中从数据学出来的量（如 SVC 的支持向量系数）；超参数（hyperparameter）是训练**之前**由人设定的量（如 `SVC` 的 `C`、`gamma`、`kernel`，决策树的 `max_depth`）。超参数无法靠梯度下降学习，只能「试 + 评估」地搜索。
+- **验证曲线的局限**：u6-l1 用 `validation_curve` 一次只扫逻辑回归的**单个**参数 `C`。而 SVM 要同时定 kernel、C、gamma，候选组合按**乘法**增长，单参数扫描工具不够用了——这正是本讲多参数搜索登场的理由。
+- **Pipeline 与双下划线参数名**：`make_pipeline(StandardScaler(), SVC())` 生成的管线里，SVM 的 `C` 写作 `'svc__C'`（小写类名 + 双下划线，u6-l1 已建立此约定）。本讲所有搜索都用这种名字寻址。
+- **数据与划分**：乳腺癌数据集 569 个样本、30 个特征，类别 M（恶性）编码为 1、B（良性）编码为 0；80/20 分层划分后 `X_train` 455 个样本、`X_test` 114 个（[ch06/ch06.py:L139-L142](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L139-L142)）。本讲所有搜索与交叉验证**只在 `X_train` 上进行**，`X_test` 只在最后评估一次。
+- **对数刻度常识**：SVM 的 `C` 与 `gamma` 合理取值往往横跨多个数量级（10⁻⁴ ~ 10³），所以网格几乎总按数量级（×10）设置。
 
-一个贯穿本讲的直觉：**调参 = 在「超参数空间」里做搜索**，搜索策略有三个演进方向——
+一个贯穿本讲的直觉：**调参 = 在「超参数空间」里做搜索**。搜索策略有三个演进方向：
 
-| 搜索方式 | 核心问题 | 一句话策略 |
+| 搜索方式 | 核心痛点 | 一句话策略 |
 |---|---|---|
-| 网格搜索 GridSearchCV | 穷举太贵 | 每个候选都给全额预算（全量数据 + k 折 CV） |
-| 随机搜索 RandomizedSearchCV | 网格组合爆炸 | 固定预算 `n_iter`，随机撒点 |
-| 减半搜索 HalvingRandomSearchCV | 好坏候选一视同仁 | 先给所有候选人一点点资源，逐轮淘汰，好候选拿越来越多资源 |
+| 网格搜索 `GridSearchCV` | 穷举太贵 | 每个候选组合都给全额预算（全量数据 + 10 折 CV） |
+| 随机搜索 `RandomizedSearchCV` | 组合爆炸 | 固定预算 `n_iter`，随机撒点 |
+| 减半搜索 `HalvingRandomSearchCV` | 好坏候选一视同仁 | 先给所有候选一点点资源，逐轮淘汰，幸存者拿越来越多资源 |
+
+而这三种搜索给出的分数都只在**训练集内部**产生，用来「选」模型；要无偏地「比较」两套算法流程，还需要本讲最后登场的**嵌套交叉验证**。
 
 ## 3. 本讲源码地图
 
+本讲的全部源码集中在 `ch06/ch06.py` 的 "Fine-tuning machine learning models via grid search" 一节：
+
 | 位置 | 内容 |
 |---|---|
-| [ch06/ch06.py:L19-L24](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L19-L24) | 本讲的 import：`GridSearchCV`、`SVC`、`RandomizedSearchCV`、实验性 halving 开关、`DecisionTreeClassifier` |
+| [ch06/ch06.py:L19-L24](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L19-L24) | 本讲 import：`GridSearchCV`、`SVC`、`RandomizedSearchCV`、实验性 halving 开关、`DecisionTreeClassifier` |
 | [ch06/ch06.py:L334-L352](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L352) | 网格搜索：`pipe_svc`、双列表 `param_grid`、`gs.fit` 与 `best_score_`/`best_params_` |
-| [ch06/ch06.py:L357-L363](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L357-L363) | `best_estimator_` 与 `refit=True` 的注释说明、测试集评估 |
-| [ch06/ch06.py:L370-L399](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L370-L399) | 随机搜索：`RandomizedSearchCV(n_iter=20, ...)` 与其 `best_score_`/`best_params_` |
-| [ch06/ch06.py:L410-L416](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L410-L416) | `scipy.stats.loguniform` 连续分布采样示例（注意：脚本里没 import scipy，见 4.2.3 的坑） |
-| [ch06/ch06.py:L427-L447](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L447) | 减半搜索：`HalvingRandomSearchCV(n_candidates='exhaust', resource='n_samples', factor=1.5)` 及评估 |
-| [ch06/ch06.py:L459-L481](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L481) | 嵌套交叉验证：SVC 管线（2×5）与决策树（2×5）两段 |
-| [ch06/ch06.ipynb](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.ipynb) | notebook 版，保留了每段代码的运行输出（`best_score_` 数值等），本讲引用的输出均出自这里 |
+| [ch06/ch06.py:L357-L363](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L357-L363) | `best_estimator_`、`refit=True` 注释与测试集评估 |
+| [ch06/ch06.py:L370-L399](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L370-L399) | `RandomizedSearchCV`（`n_iter=20`）的构建与拟合 |
+| [ch06/ch06.py:L410-L416](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L410-L416) | 对数均匀分布 `scipy.stats.loguniform` 演示 |
+| [ch06/ch06.py:L427-L447](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L447) | `HalvingRandomSearchCV` 的构建、拟合与测试集评估 |
+| [ch06/ch06.py:L459-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L467) | 嵌套交叉验证：SVM 管线版（外 5 × 内 2） |
+| [ch06/ch06.py:L473-L481](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L473-L481) | 嵌套交叉验证：决策树版 |
 
-数据加载与划分（`df = pd.read_csv(...)` 到 `train_test_split`，[ch06/ch06.py:L102-L142](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L102-L142)）在 u6-l1 已逐行讲过，本讲直接复用其产物 `X_train / X_test / y_train / y_test`，不再重复。
+另外两处背景代码：数据加载 [ch06/ch06.py:L102-L104](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L102-L104) 与标签编码 [ch06/ch06.py:L124-L127](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L124-L127)，已在 u6-l1 讲过，本讲直接复用其产物 `X_train`/`y_train`/`X_test`/`y_test`。
 
 ## 4. 核心概念与源码讲解
 
-本讲拆成 4 个最小模块：参数网格双列表（含 `best_score_`/`best_params_`/`best_estimator_`）、随机搜索与 loguniform、减半搜索的资源递增、嵌套交叉验证。
-
-### 4.1 网格搜索与「双列表」参数网格
+### 4.1 网格搜索与「双列表」param_grid
 
 #### 4.1.1 概念说明
 
-网格搜索（grid search）是最朴素的超参数优化：把每个超参数的候选值列成表，**穷举所有组合**，每个组合用 k 折交叉验证打分，选平均分最高的组合。
+网格搜索（grid search）是最朴素的超参数优化：把每个超参数想尝试的取值列成表，**穷举所有组合**，每个组合用 k 折交叉验证打分，分数最高者胜。它做的事可以写成：
 
-它要解决的第一个现实问题是：**不同算法分支需要的超参数不一样**。对 SVM 来说：
+\[
+\text{best params} = \arg\max_{p \in \text{网格}} \frac{1}{k}\sum_{i=1}^{k} \text{score}\big(M_p, D_{\text{train}}^{(i)}\big)
+\]
 
-- 线性核 `kernel='linear'`：只有 `C` 一个超参数；
-- RBF 核 `kernel='rbf'`：有 `C` 和 `gamma` 两个超参数（回顾 u3-l2：`C` 控制软间隔惩罚、`gamma` 控制单个样本的影响半径）。
+其中 \(M_p\) 是用参数组合 \(p\) 构建的模型，\(D_{\text{train}}^{(i)}\) 是第 \(i\) 折的训练部分。
 
-如果把 `kernel`、`C`、`gamma` 写在同一个网格字典里，GridSearchCV 会把三个列表做笛卡尔积，生成「线性核 + gamma」这种**无意义组合**（线性核根本不用 gamma），白白浪费 8 次完整评估。scikit-learn 的解法是允许 `param_grid` 传一个**字典列表**：每个字典是一个独立的搜索子空间，总候选数是各子空间之和（而非乘积）——这就是「双列表 param_grid」的由来。
+网格搜索最大的问题是组合爆炸：候选组合数是各参数取值数的**乘积**。本讲的例子有一处精妙设计：**linear 核的 SVM 根本没有 `gamma` 参数**，如果把 `gamma` 也放进它的搜索空间，就会浪费大量算力去评估对 linear 核毫无意义的取值。scikit-learn 的解法就是「双列表」`param_grid`：它是一个**由字典组成的列表**，每个字典描述一个独立的搜索子空间，各子空间彼此独立、结果取并集。
 
 #### 4.1.2 核心流程
 
+1. 用 `make_pipeline(StandardScaler(), SVC(random_state=1))` 把缩放器和 SVM 绑成管线（SVM 基于距离，标准化是硬前提，见 u3-l2）。
+2. 构造双列表 `param_grid`：
+   - 子空间 1（linear 核）：`svc__C`（8 个值）× `svc__kernel`（1 个值）= 8 种组合；
+   - 子空间 2（rbf 核）：`svc__C`（8 个值）× `svc__gamma`（8 个值）× `svc__kernel`（1 个值）= 64 种组合。
+3. 组合总数 = 8 + 64 = **72**；`cv=10` 意味着每个组合要 fit 10 次，共 **720 次 fit**。
+4. `gs.fit(X_train, y_train)` 启动搜索：对每个组合做 10 折交叉验证，取平均分。
+5. 排名第一的组合被记录进 `gs.best_params_`、`gs.best_score_`。
+
+伪代码：
+
 ```text
-构造 pipe_svc = StandardScaler + SVC(random_state=1)
-    ↓
-定义 param_range（8 个数量级的 C 值）与 param_grid（两个子空间字典）
-    ↓
-GridSearchCV(pipe_svc, param_grid, scoring='accuracy', cv=10, refit=True)
-    ↓
-gs.fit(X_train, y_train)
-    ├── 子空间1（linear）: 8 个 C              → 8 个候选
-    ├── 子空间2（rbf）   : 8 个 C × 8 个 gamma → 64 个候选
-    ├── 共 72 个候选，每个做 10 折 CV          → 72 × 10 = 720 次完整 fit
-    ├── 记录每个候选的 10 折平均 accuracy
-    ├── best_params_ ← 平均分最高的候选
-    ├── best_score_  ← 该候选的 10 折平均分
-    └── refit=True   ← 用 best_params_ 在全部 455 个训练样本上重训一次
-    ↓
-gs.best_estimator_ 直接可用于 X_test 评估
+for 子空间 in param_grid:                # 2 个子空间
+    for 组合 in 笛卡尔积(子空间.items()):  # 8 种 / 64 种
+        for fold in 10 折:
+            clone(管线).set_params(组合).fit(该折训练部分)
+            记录该折 score
+        该组合得分 = 10 折平均
+best = 72 个组合中得分最高者
 ```
-
-候选规模可以用一个简单式子概括：
-
-\[ N_{\text{候选}} = |C_{\text{linear}}| + |C_{\text{rbf}}| \times |\gamma| = 8 + 8 \times 8 = 72 \]
-
-\[ N_{\text{fit}} = N_{\text{候选}} \times k = 72 \times 10 = 720 \]
-
-每次「fit」包含一次 StandardScaler 拟合 + 一次 SVC 训练（Pipeline 作为整体被拟合）。
 
 #### 4.1.3 源码精读
 
-先看本讲用到的搜索类 import（第 19–24 行，减半搜索的实验性开关也在其中）：
-
-[ch06/ch06.py:L19-L24](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L19-L24)
-
-```python
-from sklearn.model_selection import GridSearchCV
-from sklearn.svm import SVC
-from sklearn.model_selection import RandomizedSearchCV
-from sklearn.experimental import enable_halving_search_cv  # noqa
-from sklearn.model_selection import HalvingRandomSearchCV
-from sklearn.tree import DecisionTreeClassifier
-```
-
-这段集中导入本讲全部「搜索工具」：网格、随机、减半三种搜索器加两个被调模型（SVC、决策树）。注意 `enable_halving_search_cv` 本身不使用，import 它只是为了让处于实验阶段的 halving API 可用（详见 4.3.3）。
-
-接着构造被调对象与双列表网格（第 334–343 行）：
-
-[ch06/ch06.py:L334-L343](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L343)
+先搭管线、列出候选值（[ch06/ch06.py:L334-L337](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L337)）：
 
 ```python
 pipe_svc = make_pipeline(StandardScaler(),
                          SVC(random_state=1))
 
 param_range = [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
+```
 
-param_grid = [{'svc__C': param_range,
+这段代码把 `StandardScaler` 与 `SVC` 组成管线，并定义 8 个数量级上的候选值（10⁻⁴ 到 10³），同时供 `C` 和 `gamma` 使用。
+
+双列表 `param_grid`（[ch06/ch06.py:L339-L343](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L339-L343)）：
+
+```python
+param_grid = [{'svc__C': param_range, 
                'svc__kernel': ['linear']},
-              {'svc__C': param_range,
-               'svc__gamma': param_range,
+              {'svc__C': param_range, 
+               'svc__gamma': param_range, 
                'svc__kernel': ['rbf']}]
 ```
 
-这段做了三件事：① 建立「标准化 + SVM」管线（SVM 基于距离，StandardScaler 是硬前提，回顾 u3-l2）；② `param_range` 按数量级给出 8 个 `C` 候选；③ `param_grid` 是**含两个字典的列表**——第一个字典只搜线性核的 `C`（8 个候选），第二个字典搜 RBF 核的 `C × gamma`（64 个候选）。参数名用 `'svc__C'` 这种双下划线形式寻址管线内的估计器。
+第一个字典是 linear 核子空间（只搜 `C`），第二个字典是 rbf 核子空间（同时搜 `C` 与 `gamma`）。注意 `'svc__kernel': ['linear']` 即便只有一个值也要写成**列表**——`param_grid` 里每个值都必须是可迭代的取值集合；参数名用 `svc__` 前缀定位管线中的 SVM 步骤。
 
-然后是搜索本身（第 345–352 行）：
-
-[ch06/ch06.py:L345-L352](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L345-L352)
+搜索器的构建与拟合（[ch06/ch06.py:L345-L350](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L345-L350)）：
 
 ```python
-gs = GridSearchCV(estimator=pipe_svc,
-                  param_grid=param_grid,
-                  scoring='accuracy',
+gs = GridSearchCV(estimator=pipe_svc, 
+                  param_grid=param_grid, 
+                  scoring='accuracy', 
                   refit=True,
                   cv=10)
+gs = gs.fit(X_train, y_train)
+```
+
+这段代码创建网格搜索器：`scoring='accuracy'` 指定用准确率打分，`cv=10` 用 10 折交叉验证，`refit=True`（详见 4.2），随后在 `X_train` 上启动 720 次 fit 的穷举。
+
+#### 4.1.4 代码实践（源码阅读 + 心算型）
+
+1. **实践目标**：不动代码，练会「读网格、算预算」。
+2. **操作步骤**：
+   - 打开 [ch06/ch06.py:L339-L343](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L339-L343)，分别写出两个子空间的组合数与总数；
+   - 若把 `param_range` 每个参数从 8 个值扩到 10 个值（10⁻⁴ 到 10⁵），先心算新的组合总数与 fit 次数；
+   - 再思考：如果把两个字典合并成一个同时含 `C`、`gamma`、`kernel` 的字典，组合数会变成多少？多出的组合浪费在哪里？
+3. **需要观察的现象**：自己算出的数字 vs 下面的答案。
+4. **预期结果**：
+   - 当前：8 + 64 = 72 组合，72 × 10 = 720 次 fit；
+   - 扩到 10 个值：10 + 100 = 110 组合，110 × 10 = 1100 次 fit；
+   - 若合并成一个字典：kernel 2 种 × C × gamma = 2×8×8 = 128 组合，其中 linear 核的 64 组合里 `gamma` 完全不起作用（SVC 在 linear 核下忽略 `gamma`），白白多算 64-8=56 种重复评估——这正是双列表写法存在的理由。
+5. 本实践为纯阅读型，无需运行环境；数值结论可直接推导，无需「待本地验证」。
+
+#### 4.1.5 小练习与答案
+
+**练习 1**：`param_grid` 为什么是「字典的列表」而不是一个大字典？
+**答案**：大字典意味着所有参数做**统一**的笛卡尔积，不同核函数会被迫共享同一套参数空间；而 linear 核没有 `gamma` 参数，统一网格会评估大量对它无意义的组合。字典的列表允许每个子空间自定义参数集，搜索空间取各子空间的**并集**。
+
+**练习 2**：把 `cv` 从 10 改成 5，fit 次数怎么变？分数的质量可能怎么变？
+**答案**：fit 次数减半（720 → 360），因为次数 = 组合数 × 折数。每折的验证集变大（训练数据 455 个样本时从约 45 个变成约 91 个），单折分数的方差更小，但平均分的样本只有 5 个，对模型表现的估计会略粗糙——这是「算力」与「估计稳定性」的取舍。
+
+**练习 3**：为什么 `pipe_svc` 里必须放 `StandardScaler`？
+**答案**：SVM 基于样本间距离与内积构造最大间隔，乳腺癌 30 个特征量纲差异悬殊，不标准化则距离被大数值特征主导（u3-l2 已验证过）。放进管线还保证了搜索的每一折都重新拟合缩放器，避免数据泄漏（u6-l1 的核心结论）。
+
+### 4.2 best_score_ / best_params_ / best_estimator_ 与 cv_results_
+
+#### 4.2.1 概念说明
+
+`fit` 结束后，搜索对象暴露三件套：
+
+- `best_score_`：最优组合的 **k 折交叉验证平均分**——注意它是训练集内部的「选美分数」，**不是**泛化性能；
+- `best_params_`：最优组合的参数字典；
+- `best_estimator_`：用最优参数在**全部** `X_train` 上**重新 fit** 出的模型（前提 `refit=True`）。
+
+`refit=True` 的意义：交叉验证只是为了打分，打分用的模型各自只见过 9/10 的数据；搜索结束后，scikit-learn 自动用冠军参数在 100% 的训练数据上再 fit 一次，得到的 `best_estimator_` 可直接用于测试集评估，不需要你手写 `clf.fit(X_train, y_train)`。
+
+`cv_results_` 则是一张「全部候选的成绩单」字典（本讲仓库代码没有显式用它，但它是三种搜索器共有的标准属性）：键如 `'params'`（每个组合）、`'mean_test_score'`（平均分）、`'rank_test_score'`（排名），用来检查冠军与亚军的差距、诊断搜索空间设计得好不好。
+
+一个必须建立的概念：`best_score_` 存在**选择性乐观偏差**——它是 72 个交叉验证分数中的**最大值**。取 max 的动作本身会推高这个数，参数组合越多推得越高。所以它只配用来「选」，最终性能要用没参与过任何搜索的 `X_test` 来报。
+
+#### 4.2.2 核心流程
+
+1. `gs = gs.fit(X_train, y_train)` 完成后：
+2. `print(gs.best_score_)` → 打印最优组合的 10 折平均准确率；
+3. `print(gs.best_params_)` → 打印最优参数组合；
+4. `clf = gs.best_estimator_` → 取出在全量 `X_train` 上重训过的冠军模型；
+5. `clf.score(X_test, y_test)` → 在从未参与搜索的测试集上出最终成绩。
+
+#### 4.2.3 源码精读
+
+打印最优分数与参数（[ch06/ch06.py:L350-L352](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L350-L352)）：
+
+```python
 gs = gs.fit(X_train, y_train)
 print(gs.best_score_)
 print(gs.best_params_)
 ```
 
-`scoring='accuracy'` 指定打分指标；`cv=10` 即每个候选 10 折分层交叉验证（对分类器，`cross_val_score`/GridSearchCV 默认使用分层 K 折，u6-l1 已验证）；`refit=True`（默认值，书里显式写出以示强调）让搜索结束后自动用最优参数在全量训练集上重训。notebook 中的运行输出：
+这段代码在 720 次 fit 后输出最优的 10 折平均准确率与对应参数组合。
 
-```text
-0.9846859903381642
-{'svc__C': 100.0, 'svc__gamma': 0.001, 'svc__kernel': 'rbf'}
-```
-
-即 RBF 核、`C=100`、`gamma=0.001` 胜出，10 折平均准确率约 0.985。
-
-最后取回最优模型并在测试集上评估（第 357–363 行）：
-
-[ch06/ch06.py:L357-L363](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L357-L363)
+`best_estimator_` 与 `refit=True` 的说明（[ch06/ch06.py:L357-L363](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L357-L363)）：
 
 ```python
 clf = gs.best_estimator_
 
-# clf.fit(X_train, y_train)
+# clf.fit(X_train, y_train) 
 # note that we do not need to refit the classifier
 # because this is done automatically via refit=True.
 
 print(f'Test accuracy: {clf.score(X_test, y_test):.3f}')
 ```
 
-注释点明了本段唯一的知识点：因为 `refit=True`，`best_estimator_` 已经是在全部训练数据上训练好的模型，**不需要再 `fit` 一次**。测试集输出 `Test accuracy: 0.974`——注意它低于 `best_score_` 的 0.985，原因见下面练习 2。
+源码注释明确说明：不需要再手写 `clf.fit(...)`，因为构造 `gs` 时传了 `refit=True`（[ch06/ch06.py:L345-L349](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L345-L349)），fit 完成时已自动用最优参数在全量训练集上重训；随后直接在测试集上评估。
 
-#### 4.1.4 代码实践：用 cv_results_ 检查 72 个候选的完整得分表
-
-`ch06.py` 只打印了最优结果；实际上 GridSearchCV 把每个候选的详细得分都存在 `cv_results_` 字典里（本讲规格的学习目标之一）。下面的示例代码展示如何把它变成可排序的表格（**示例代码**，仓库中没有这段）：
-
-1. **实践目标**：确认网格确实评估了 72 个候选、验证 `best_params_` 就是得分最高的一行，并观察 linear 与 rbf 两个子空间的成绩差异。
-2. **操作步骤**：先执行 [ch06/ch06.py:L102-L142](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L102-L142)（数据加载划分）与 [ch06/ch06.py:L334-L350](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L350)（gs 搜索），然后运行：
-
-   ```python
-   # 示例代码：检查 cv_results_
-   import pandas as pd
-
-   results = pd.DataFrame(gs.cv_results_)   # 72 行 × 若干列
-   print(results.shape)                      # 预期 (72, ...)
-   cols = ['rank_test_score', 'mean_test_score', 'std_test_score', 'params',
-           'mean_fit_time']
-   print(results[cols].sort_values('rank_test_score').head(10))
-   ```
-
-3. **需要观察的现象**：
-   - `results.shape[0]` 是否等于 72（8 个 linear + 64 个 rbf）；
-   - `rank_test_score` 为 1 的那一行，其 `params` 是否与 `gs.best_params_` 一致、`mean_test_score` 是否等于 `gs.best_score_`；
-   - 前 10 名里 `params` 的 `kernel` 取值分布（是否几乎全是 `rbf`）。
-4. **预期结果**：72 行；第 1 名是 `{'svc__C': 100.0, 'svc__gamma': 0.001, 'svc__kernel': 'rbf'}`，`mean_test_score ≈ 0.9847`，与 `gs.best_score_` 一致。前 10 名中 linear 核的排名与得分分布情况**待本地验证**。
-
-#### 4.1.5 小练习与答案
-
-**练习 1**：如果把 `param_grid` 写成单个字典 `{'svc__C': param_range, 'svc__gamma': param_range, 'svc__kernel': ['linear', 'rbf']}`，候选数变成多少？有什么问题？
-
-**答案**：变成 \(8 \times 8 \times 2 = 128\) 个候选。其中 64 个「linear + gamma」组合是冗余的（线性核不使用 gamma，拟合结果与不带 gamma 的同名配置相同），等于把 64 次完整的 10 折评估浪费在重复配置上；而且 `kernel` 还不能不写 gamma 之外的差异。双列表写法用 72 个候选覆盖了同样的有效空间，省下约 44% 的计算量。
-
-**练习 2**：为什么 `gs.best_score_`（0.985）比测试集准确率（0.974）高？这说明 `best_score_` 有什么性质？
-
-**答案**：`best_score_` 是「72 个候选各自的 10 折平均分」中的**最大值**——我们先看了验证分数再挑最大，这个「取 max」的操作引入了选择性乐观偏差；且 455 个训练样本的 CV 分数本身也有波动。测试集是搜索过程从未参与过的数据，评估是无偏的，通常略低。结论：`best_score_` 适合用来**在候选之间做选择**，不适合当作模型最终性能的报告值；要更可靠的性能估计，需要本讲 4.4 的嵌套交叉验证。
-
-**练习 3**：把 `cv=10` 改成 `cv=5`，总的 fit 次数是多少？
-
-**答案**：\(72 \times 5 = 360\) 次。fit 次数与候选数和折数都是线性关系，这正是后面随机搜索、减半搜索要削减的对象。
-
-### 4.2 随机搜索与 loguniform 参数分布
-
-#### 4.2.1 概念说明
-
-网格搜索的两个痛点：① 超参数一多，组合数按乘法爆炸（本例 72 个还算温和）；② 网格点分布「死板」——8 个 `C` × 8 个 `gamma` 的网格里，`C` 实际只有 8 种取值，如果恰好的最优点在 `C=30` 附近，网格就永远错过它。
-
-随机搜索（randomized search）换一种思路：不做穷举，而是从参数空间**随机采样固定数量**（`n_iter`）的配置。直觉来自 Bergstra 与 Bengstra（2012）的观察：高维超参数空间里往往只有少数几个维度真正重要，随机撒点在重要维度上探索到的**不同取值**远多于同预算的网格（网格把预算浪费在不重要维度的所有组合上）。此外，随机搜索允许给参数指定**连续分布**（而不只是离散列表）——比如对数均匀分布 `loguniform`，让搜索可以命中 `C=30.7` 这种网格外的值。
-
-#### 4.2.2 核心流程
+notebook 中保存的真实输出（`ch06/ch06.ipynb` 对应单元格）：
 
 ```text
-RandomizedSearchCV(estimator, param_distributions, n_iter=20, cv=10, random_state=1)
-    ↓
-rs.fit(X_train, y_train)
-    ├── 采样第 i 个配置（i = 1..20）：
-    │      先从 param_grid 的两个字典中等概率挑一个子空间
-    │      再在该字典内，对每个参数从其列表（均匀）或 scipy 分布（rvs）抽一个值
-    ├── 每个配置做 10 折 CV → 共 20 × 10 = 200 次 fit（约为网格 720 次的 28%）
-    ├── best_score_ / best_params_ / best_estimator_ 与 GridSearchCV 同一套语义
-    └── refit=True 同样自动全量重训
+0.9846859903381642
+{'svc__C': 100.0, 'svc__gamma': 0.001, 'svc__kernel': 'rbf'}
+Test accuracy: 0.974
 ```
 
-对数均匀分布的含义：若 \(X \sim \text{loguniform}(a, b)\)，则 \(\log X\) 在 \([\log a, \log b]\) 上均匀分布，其密度为
+即：rbf 核、`C=100`、`gamma=0.001` 以 98.47% 的 10 折 CV 准确率夺魁；该模型在测试集上的准确率为 97.4%——测试分（0.974）低于 CV 最高分（0.985），正体现了 `best_score_` 的乐观偏差与真实泛化差距。
 
-\[
-f(x) = \frac{1}{x \, (\ln b - \ln a)}, \quad x \in [a, b]
-\]
-
-直观效果：**每个数量级区间被抽中的概率相同**。对横跨 10⁻⁴ ~ 10³ 七个数量级的 `C`/`gamma` 来说，这远比线性均匀合理——线性均匀下几乎全部样本会落在 [100, 1000] 这一个区间里。
-
-#### 4.2.3 源码精读
-
-随机搜索的构造与调用（第 370–399 行）。注意书里先重建了 `pipe_svc` 和 `param_grid`，保证与前一段实验互不干扰：
-
-[ch06/ch06.py:L370-L388](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L370-L388)
+`cv_results_` 的用法（**示例代码**，不在仓库源码中）：
 
 ```python
-pipe_svc = make_pipeline(
-    StandardScaler(),
-    SVC(random_state=1))
+import pandas as pd
+results = pd.DataFrame(gs.cv_results_)
+top5 = results.nsmallest(5, 'rank_test_score')[
+    ['rank_test_score', 'mean_test_score', 'params']]
+print(top5)
+```
 
-param_grid = [{'svc__C': param_range,
-               'svc__kernel': ['linear']},
-              {'svc__C': param_range,
-               'svc__gamma': param_range,
-               'svc__kernel': ['rbf']}]
+这段示例代码把成绩单字典转成 DataFrame，按排名取前 5，检查冠军与亚军的差距有多大（若只差千分之几，说明多组参数都够好，搜索空间可以缩小）。
 
+#### 4.2.4 代码实践
 
+1. **实践目标**：用 `cv_results_` 摸清 72 个组合的整体表现，而不只盯着冠军。
+2. **操作步骤**：
+   - 先完整复现 [ch06/ch06.py:L334-L352](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L352)（加载划分数据后运行网格搜索，耗时数分钟）；
+   - 再运行上面的 `cv_results_` 示例代码；
+   - 补一句统计：`results['mean_test_score'].groupby(results['param_svc__kernel']).mean()`，对比 linear 与 rbf 两个子空间的平均分。
+3. **需要观察的现象**：排名第 1 与第 5 的 `mean_test_score` 差多少；linear 与 rbf 子空间谁的平均分高、谁的方差大。
+4. **预期结果**：第 1 名应与 notebook 保存输出一致（rbf、`C=100.0`、`gamma=0.001`，约 0.9847）；其余排名的具体数值**待本地验证**。rbf 子空间平均分大概率低于 linear 子空间，因为 rbf 网格里含大量 `gamma` 过大/过小的失败组合。
+5. 若懒得等 720 次 fit，可先把 `param_range` 截短为 `[0.01, 0.1, 1.0, 10.0]` 快速跑通流程，再恢复完整网格。
+
+#### 4.2.5 小练习与答案
+
+**练习 1**：`best_score_` 能当作模型上线后的预期准确率汇报吗？
+**答案**：不能。它是 72 个 CV 分数的最大值，带选择性乐观偏差；且全部计算都发生在训练集上。诚实的外汇报价是 `best_estimator_` 在从未参与调参的 `X_test` 上的分数（本例 0.974）。
+
+**练习 2**：`refit=True` 省掉的是哪一步？如果设 `refit=False` 会怎样？
+**答案**：省掉「用最优参数在全量训练集上重训」这一步。`refit=False` 时没有 `best_estimator_` 属性，你得自己 `pipe_svc.set_params(**gs.best_params_).fit(X_train, y_train)`；当搜索只为「比较参数」而无需产出模型时（如纯研究场景）可以省这次重训的算力。
+
+**练习 3**：`cv_results_` 里 `mean_test_score` 的 "test" 指测试集 `X_test` 吗？
+**答案**：不是。它指交叉验证中每折的**验证折**（held-out fold）分数的平均，全程没有接触 `X_test`。命名容易误导，记住「搜索器内部的一切分数都来自训练集内部切分」。
+
+### 4.3 RandomizedSearchCV：预算控制与对数均匀分布
+
+#### 4.3.1 概念说明
+
+网格搜索的算力随参数个数乘法增长。随机搜索（randomized search）换了一个思路：**不穷举，撒点**——指定采样次数 `n_iter`，从参数分布中随机抽 `n_iter` 个组合，每个照常做 k 折 CV。它有两个网格搜索没有的优点：
+
+1. **预算可控**：算力 = `n_iter × k`，与参数个数无关。本例 20 × 10 = 200 次 fit，只有网格搜索 720 次的 28%。
+2. **覆盖更广**：当某些参数比其他参数更重要时，随机组合能把采样「摊」到每个参数的更多不同取值上，而网格会在不重要的参数维度上重复堆叠。书中以图 06_11 对比了两种搜索在二维参数空间中的采样分布。
+
+`param_distributions` 的写法比 `param_grid` 更灵活：值既可以是**列表**（从中离散等概率抽取，写法与 `param_grid` 完全兼容，双列表照样可用），也可以是 **scipy 的分布对象**（连续抽样）。对跨 7 个数量级的 `C`/`gamma`，最合适的连续分布是**对数均匀分布** `scipy.stats.loguniform(a, b)`：它在 \(\log\) 空间上均匀，即
+
+\[
+X \sim \text{loguniform}(a, b) \iff \log X \sim U(\log a, \log b)
+\]
+
+若改用普通均匀分布 \(U(0.0001, 1000)\)，超过 90% 的采样会落在 \([100, 1000]\) 这一个数量级里，小数值区间几乎采不到；对数均匀则保证每个数量级被采中的机会均等。
+
+#### 4.3.2 核心流程
+
+1. 重建（内容相同的）`pipe_svc` 与双列表 `param_grid`；
+2. 构造 `RandomizedSearchCV`：`param_distributions` 传双列表，`n_iter=20` 限定只抽 20 个组合，`random_state=1` 保证可复现，`n_jobs=-1` 并行；
+3. `rs.fit(X_train, y_train)`：20 组合 × 10 折 = 200 次 fit；
+4. 同样读 `rs.best_score_` / `rs.best_params_` / `rs.best_estimator_`（接口与 GridSearchCV 完全一致）；
+5. 想要连续采样时，把网格里的某个列表换成 `scipy.stats.loguniform(...)`，每轮从分布中现抽一个值。
+
+#### 4.3.3 源码精读
+
+随机搜索的构建（[ch06/ch06.py:L381-L388](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L381-L388)）：
+
+```python
 rs = RandomizedSearchCV(estimator=pipe_svc,
                         param_distributions=param_grid,
                         scoring='accuracy',
@@ -264,28 +285,27 @@ rs = RandomizedSearchCV(estimator=pipe_svc,
                         n_jobs=-1)
 ```
 
-与 `GridSearchCV` 的关键差异有三处：参数名换成 `param_distributions`；新增 `n_iter=20` 把预算钉死在 20 个配置；新增 `random_state=1` 固定采样种子保证可复现（网格搜索是穷举，没有随机性，也就不需要种子）。`n_jobs=-1` 表示用满全部 CPU 核并行各折。
+这段代码把 4.1 的双列表直接交给 `param_distributions`——列表值会被离散等概率抽取；`n_iter=20` 把预算钉死在 200 次 fit；`random_state=1` 让随机采样可复现；`n_jobs=-1` 启用全部 CPU 核并行。
 
-[ch06/ch06.py:L393-L399](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L393-L399)
+拟合与结果（[ch06/ch06.py:L393-L399](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L393-L399)）：
 
 ```python
 rs = rs.fit(X_train, y_train)
 print(rs.best_score_)
+
 print(rs.best_params_)
 ```
 
-notebook 输出：
+notebook 保存的真实输出：
 
 ```text
 0.9737681159420291
 {'svc__kernel': 'rbf', 'svc__gamma': 0.001, 'svc__C': 10.0}
 ```
 
-只试了 20/72 个组合，最优 CV 分数 0.974，仅比网格搜索的 0.985 低约 1 个百分点，而计算量不到其三成。
+20 次随机组合的冠军是 rbf、`C=10.0`、`gamma=0.001`，CV 分 0.9738——比网格搜索的 0.9847 低约 1 个百分点，但只花了 28% 的算力；抽到的最优参数也与网格冠军（`C=100.0`）不同，说明 20 个样本没抽中真正的全局最优组合。
 
-接着书中演示了连续分布写法（第 410–416 行）：
-
-[ch06/ch06.py:L410-L416](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L410-L416)
+对数均匀分布演示（[ch06/ch06.py:L410-L416](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L410-L416)）：
 
 ```python
 param_range = [0.0001, 0.001, 0.01, 0.1,
@@ -297,116 +317,85 @@ np.random.seed(1)
 param_range.rvs(10)
 ```
 
-第一行还是旧的离散列表；第二行立刻用 `loguniform(0.0001, 1000.0)` **覆盖**了它——这是在展示：`param_distributions` 里任何一个参数的取值既可以给 list，也可以给一个带 `rvs`（随机变数抽样）方法的 scipy 分布对象。`rvs(10)` 抽 10 个样本，notebook 输出：
+这段代码先用列表回顾旧写法，随即把 `param_range` 重绑定为对数均匀分布对象，并用 `rvs(10)` 抽 10 个样本展示其跨越数量级的取值。notebook 保存的输出为：
 
 ```text
-array([8.30145146e-02, 1.10222804e+01, 1.00184520e-04, 1.30715777e-02,
-       1.06485687e-03, 4.42965766e-04, 2.01289666e-03, 2.62376594e-02,
-       5.98924832e-02, 5.91176467e-01])
+array([8.30e-02, 1.10e+01, 1.00e-04, 1.31e-02, 1.06e-03, 4.43e-04,
+       2.01e-03, 2.62e-02, 5.99e-02, 5.91e-01])
 ```
 
-可以看到样本散布在 10⁻⁴ ~ 10¹ 各个数量级上，而不是挤在某个区间。
+10 个样本散布在 10⁻⁴ 到 10¹ 之间，每个数量级都有机会被采中——这正是把它交给 `param_distributions` 后随机搜索能「广撒网」的原因。
 
-> ⚠️ **一个真实的坑**：`ch06.py` 里并没有 `import scipy`——notebook 中 `import scipy.stats` 是独立单元格（见 [ch06/ch06.ipynb](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.ipynb) 中 "Exploring hyperparameter configurations more widely with randomized search" 一节），转换成脚本时该行丢失了。如果你从上到下顺序执行 `ch06.py`，会在第 413 行抛 `NameError: name 'scipy' is not defined`。自己复现时请先补一句 `import scipy.stats`。
+> **复现提示**：ch06.py 这个文件里**没有** `import scipy`，直接照抄运行 [L413](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L413) 会报 `NameError`。notebook 对应单元格里其实有 `import scipy.stats` 这一行，只是转换成脚本时被略去了；自己复现时请补上这句 import。
+>
+> 另一个 Python 细节：[L413](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L413) 把 `param_range` 这个**名字**重新绑到了分布对象上，但此前 `param_grid` 里存的是旧列表的引用，不受影响——所以后面的减半搜索（L429）与嵌套 CV（L460）用的仍是列表版网格。
 
-#### 4.2.4 代码实践：n_iter 从 20 加到 100，最优参数与分数变不变
+#### 4.3.4 代码实践
 
-这是本讲综合实践的第 2 部分，也可以单独做：
-
-1. **实践目标**：体会「采样预算」对随机搜索结果的影响——预算加大后，最优配置与最优分数是否逼近网格搜索的穷举结果。
+1. **实践目标**：体会「离散列表 → 连续分布」的差异：分布采样不再落在 ×10 的整数档位上。
 2. **操作步骤**：
+   - 复现 [ch06/ch06.py:L370-L388](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L370-L388) 得到 `rs`（注意文件开头需自行 `import scipy.stats`）；
+   - 构造连续版分布（**示例代码**）：
 
-   ```python
-   # 示例代码：在 4.2.3 的 rs 基础上继续
-   import time
-   from sklearn.model_selection import RandomizedSearchCV
+     ```python
+     import scipy.stats
+     param_dist = [{'svc__C': scipy.stats.loguniform(0.0001, 1000.0),
+                    'svc__kernel': ['linear']},
+                   {'svc__C': scipy.stats.loguniform(0.0001, 1000.0),
+                    'svc__gamma': scipy.stats.loguniform(0.0001, 1000.0),
+                    'svc__kernel': ['rbf']}]
+     rs2 = RandomizedSearchCV(pipe_svc, param_dist, n_iter=20, cv=10,
+                              scoring='accuracy', random_state=1, n_jobs=-1)
+     rs2.fit(X_train, y_train)
+     print(rs2.best_score_, rs2.best_params_)
+     ```
+   - 与 `rs`（列表版）的 0.9738 / `{'svc__C': 10.0, ...}` 对比。
+3. **需要观察的现象**：`rs2.best_params_` 里的 `C`、`gamma` 是否还是整齐的 10⁻⁴、10⁻³… 档位；分数与列表版差多少。
+4. **预期结果**：连续版的参数应是 8.30e-02、1.10e+01 这类「非整档」值（与 `rvs` 演示同源）；最优分数与列表版相近但通常不完全相同，具体数值**待本地验证**。`kernel` 是离散字符串，必须仍用列表，不能换成分布。
+5. 若时间紧张，把 `cv` 降为 5 折即可把每次搜索的 fit 数从 200 降到 100。
 
-   for n_iter in [20, 100]:
-       rs = RandomizedSearchCV(estimator=pipe_svc,
-                               param_distributions=param_grid,
-                               scoring='accuracy',
-                               refit=True,
-                               n_iter=n_iter,
-                               cv=10,
-                               random_state=1,
-                               n_jobs=-1)
-       t0 = time.time()
-       rs.fit(X_train, y_train)
-       elapsed = time.time() - t0
-       print(f'n_iter={n_iter:3d} | best_score={rs.best_score_:.4f} | '
-             f'best_params={rs.best_params_} | {elapsed:.1f}s')
-   ```
+#### 4.3.5 小练习与答案
 
-3. **需要观察的现象**：两次运行打印的 `best_score_` 与 `best_params_` 是否相同；`n_iter=100` 的最优分数是否更接近网格搜索的 0.9847；耗时是否大约按 5 倍增长。
-4. **预期结果**：`n_iter=20` 复现 notebook 的 `{'svc__kernel': 'rbf', 'svc__gamma': 0.001, 'svc__C': 10.0}`、分数约 0.9738（固定 `random_state=1`，可精确复现）。`n_iter=100` 采样是前 20 个采样点无法推导的**新序列**（同一 `random_state` 下采出的 100 个配置包含但不同于 20 个版本），其最优参数与分数**待本地验证**——合理的预期是分数 ≥ 0.9738 且更接近 0.9847：候选越多，越可能覆盖到网格最优解 `C=100, gamma=0.001` 附近的组合；但若最优区域很窄，也可能仍差零点几个百分点。这正说明随机搜索是「预算换精度」。
+**练习 1**：`n_iter=20` 时随机搜索比网格搜索省多少算力？代价是什么？
+**答案**：fit 次数 200 vs 720，省 72%（假设单次 fit 同价）。代价是只覆盖了 72 个离散组合中的约 20 个，全局最优组合可能没被抽中——本例 `best_score_` 低了约 1 个百分点（0.974 vs 0.985）。
 
-#### 4.2.5 小练习与答案
+**练习 2**：为什么用 `loguniform` 而不是 `uniform(0.0001, 1000)` 采样 `C`？
+**答案**：`C` 的合理范围跨 7 个数量级。均匀分布下区间 \([100, 1000]\) 占总长度约 90%，会被过度采样，而最有用的小数值区间几乎抽不到；`loguniform` 在对数空间均匀，每个数量级（如 10⁻⁴~10⁻³ 与 10²~10³）被采中的概率相同。
 
-**练习 1**：随机搜索只试了 20/72 ≈ 28% 的组合，为什么最优分数只差约 1 个百分点？
+**练习 3**：`random_state=1` 与 `np.random.seed(1)` 各管什么？
+**答案**：`random_state` 是传给 `RandomizedSearchCV` 的参数，由 sklearn 内部独立的随机数生成器使用，决定抽哪些参数组合；`np.random.seed` 设置的是全局 numpy 随机态，只影响代码里直接调用的 `np.random.*` / `rvs`（在 [L415-L416](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L415-L416) 中是为了让 `param_range.rvs(10)` 的演示可复现）。两者互不干扰。
 
-**答案**：72 个候选的得分分布高度不均匀——大量「C 与 gamma 数量级不匹配」的组合表现平平，真正有竞争力的配置集中在少数几个数量级组合附近。随机采样 20 次大概率能命中这个好区域的一两个点；反之网格搜索多付出的 72% 算力大多花在平庸组合上。这也是随机搜索在高维空间里性价比更高的原因。
+### 4.4 HalvingRandomSearchCV：资源递增与逐轮淘汰
 
-**练习 2**：对 `C` 用 `scipy.stats.loguniform(0.0001, 1000)` 与用 `uniform(0.0001, 1000)`（线性均匀）采样，结果分布有什么本质区别？
+#### 4.4.1 概念说明
 
-**答案**：线性均匀下，落在 \([100, 1000]\) 一个区间的概率是 \(900/999.9999 \approx 90\%\)，几乎抽不到小值；对数均匀下每个数量级（10⁻⁴~10⁻³、…、10²~10³ 共 7 个区间）概率各约 1/7，与「合理值可能出现在任何数量级」的先验一致。所以跨数量级超参数的连续搜索一律用 loguniform。
+前两种搜索对**所有候选一视同仁**：无论组合好坏，都享受全量数据 + 全额 k 折。减半搜索（successive halving，源自多臂老虎机研究）引入了**淘汰赛**：
 
-**练习 3**：`GridSearchCV` 没有也没有 `random_state` 参数，为什么 `RandomizedSearchCV` 必须有？
+- **资源（resource）**：训练时投入的算力度量，这里选 `resource='n_samples'`——投入的训练样本数；
+- **因子（factor）**：每轮资源 ×factor、幸存者 ÷factor。`factor=1.5` 表示每轮训练样本变 1.5 倍，只有排名前约 1/1.5 ≈ 67% 的候选晋级；
+- 第 0 轮：**所有**候选各用一小撮样本（如几十个）训练并 CV 打分；第 1 轮：幸存者样本加倍再比；……直到资源耗尽（用满训练集），最后一名即冠军。
 
-**答案**：网格搜索穷举固定列表，评估顺序与结果完全确定；随机搜索的第一步是从分布中**随机采样**配置，不同种子得到不同的候选集合，结果会波动，因此必须提供 `random_state` 才能复现实验（书中设 `random_state=1`）。
+直觉类比：招聘先看简历（廉价粗筛）再逐轮面试（昂贵细察），而不是对每个候选人都做五轮终面。代价也显而易见：**早期的评估是嘈杂的**——几十个样本打出的分数方差大，真正的好候选可能被误杀在第一轮。
 
-### 4.3 减半搜索：HalvingRandomSearchCV 的资源递增思想
+#### 4.4.2 核心流程
 
-#### 4.3.1 概念说明
+1. 导入实验性开关 `enable_halving_search_cv` 与 `HalvingRandomSearchCV`（sklearn 中该功能尚属实验性，必须先导入开关模块）；
+2. 构造：候选来自与 `rs` 相同的 `param_grid`（随机撒点），`n_candidates='exhaust'` 表示首轮候选数取到「资源能支撑的最大值」，`resource='n_samples'` + `factor=1.5` 定义淘汰规则；
+3. `hs.fit(X_train, y_train)` 内部自动执行多轮「训练→打分→淘汰→加倍」；
+4. 读 `hs.best_score_` / `hs.best_params_` / `hs.best_estimator_`，接口与前两者完全一致。
 
-网格与随机搜索有个共同的浪费：**好候选与坏候选拿到完全相同的预算**。一个 `gamma=1000` 的烂配置也会用全部 455 个样本训练 10 折——但通常用 50 个样本就能看出它没戏。
+#### 4.4.3 源码精读
 
-减半搜索（successive halving，逐次减半）借自多臂老虎机的「比赛制」思想：
-
-- 第 0 轮：让**很多**候选各自在**少量资源**（`resource='n_samples'` 表示资源 = 训练样本数）上训练、评估；
-- 每轮结束：按得分淘汰，只保留前 \(1/\text{factor}\) 的候选；
-- 下一轮：幸存者的资源乘以 `factor`，继续比；
-- 资源耗尽（达到全量训练集）时，最后一轮的胜者即为最优。
-
-这样，多数算力自然集中到少数有希望的候选身上。scikit-learn 同时提供 `HalvingGridSearchCV`（候选来自穷举网格）与 `HalvingRandomSearchCV`（候选来自随机采样）；本书用的是后者，减半机制两者完全一致。
-
-#### 4.3.2 核心流程
-
-设第 0 轮资源为 \(r_0\)、候选数为 \(n_0\)，`factor` 记作 \(f\)，则第 \(k\) 轮：
-
-\[
-r_k = r_0 \cdot f^{\,k}, \qquad n_k \approx n_0 / f^{\,k}
-\]
-
-资源单调上升、候选单调减少，且 \(n_k \times r_k \approx n_0 \times r_0\)——**每一轮的总计算量大致恒定**（这是 successive halving 的核心性质）。比赛在 \(r_k\) 达到全量训练样本数（455）时结束。
-
-以书中设置 `factor=1.5` 为例：每轮淘汰 1/3 的候选、幸存者资源 ×1.5，轮数多、淘汰温和；若 `factor=3`，则每轮只留 1/3、资源 ×3，轮数少、淘汰狠、更快但更容易误杀。
-
-```text
-HalvingRandomSearchCV(pipe_svc, param_distributions, n_candidates='exhaust',
-                      resource='n_samples', factor=1.5)
-    ↓
-hs.fit(X_train, y_train)
-    ├── 第 0 轮：尽可能多的候选 × 极少样本（r_0 由算法按 budget 推出）
-    ├── 每轮：按得分保留前 ~1/1.5，资源 ×1.5
-    └── 最后一轮（资源≈全量）：胜出者 → best_score_ / best_params_ / best_estimator_
-```
-
-#### 4.3.3 源码精读
-
-首先是第 22–23 行的实验性开关（已在本讲源码地图引用过）：
-
-[ch06/ch06.py:L22-L23](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L22-L23)
+实验性开关的导入（[ch06/ch06.py:L22-L23](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L22-L23)）：
 
 ```python
 from sklearn.experimental import enable_halving_search_cv
 from sklearn.model_selection import HalvingRandomSearchCV
 ```
 
-`Halving*` 系列 API 位于 `sklearn.experimental`，必须**先**导入 `enable_halving_search_cv` 这个开关模块才能从 `sklearn.model_selection` 导入 halving 搜索类。scikit-learn 官方说明 experimental API 的行为可能随版本调整——不同版本上的细节（默认参数、警告信息）可能不同，这是使用时要有心理预期的。
+这两行先启用实验性 halving 功能（不导入 `enable_halving_search_cv` 就无法从 `sklearn.model_selection` 导入 halving 类），再导入减半随机搜索类。
 
-然后是搜索器构造与评估（第 427–447 行）：
-
-[ch06/ch06.py:L427-L434](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L434)
+减半搜索的构建（[ch06/ch06.py:L427-L434](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L434)）：
 
 ```python
 hs = HalvingRandomSearchCV(
@@ -419,21 +408,20 @@ hs = HalvingRandomSearchCV(
     n_jobs=-1)
 ```
 
-参数逐个读：`param_distributions` 沿用 4.1 的双列表网格（列表在此被当作离散分布采样）；`n_candidates='exhaust'` 表示第一轮候选数取「预算能支撑的最大值」——即让资源递增过程恰好把训练数据用尽，而不是固定一个候选数；`resource='n_samples'` 定义「资源」为训练样本数；`factor=1.5` 是每轮的资源放大倍数（也是候选淘汰率的倒数）。
+这段代码指定：候选组合随机抽自双列表网格；首轮候选数尽可能多（`'exhaust'`，让最后一轮恰好用尽资源）；淘汰用的资源是训练样本数，每轮 ×1.5。这里没有传 `scoring` 与 `cv`，分别按 sklearn 默认取估计器自身的 `score`（分类器即准确率）与 5 折。
 
-[ch06/ch06.py:L439-L447](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L439-L447)
+结果与测试集评估（[ch06/ch06.py:L439-L447](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L439-L447)）：
 
 ```python
 hs = hs.fit(X_train, y_train)
 print(hs.best_score_)
 print(hs.best_params_)
 
-
 clf = hs.best_estimator_
 print(f'Test accuracy: {hs.score(X_test, y_test):.3f}')
 ```
 
-notebook 输出：
+notebook 保存的真实输出：
 
 ```text
 0.9676470588235293
@@ -441,89 +429,74 @@ notebook 输出：
 Test accuracy: 0.965
 ```
 
-把三种搜索的结果放在一起看（前两行来自 4.1/4.2，均出自 notebook 输出）：
+减半搜索选出 rbf、`C=100.0`、`gamma=0.0001`，测试准确率 0.965，与网格搜索的 0.974 同一水平，但总 fit 成本显著更低——大部分候选早在只吃几十个样本的轮次里就被淘汰了。
 
-| 搜索器 | 预算（fit 级别） | best_score_ | best_params_ | 测试集 |
+三种搜索在本数据集上的对照（均为 notebook 保存输出）：
+
+| 搜索器 | 预算（fit 次数上限） | best_score_ | best_params_ | 测试准确率 |
 |---|---|---|---|---|
-| GridSearchCV(cv=10) | 72×10 = 720 | 0.985 | rbf, C=100, γ=0.001 | 0.974 |
-| RandomizedSearchCV(n_iter=20, cv=10) | 20×10 = 200 | 0.974 | rbf, C=10, γ=0.001 | —（书中未打印） |
-| HalvingRandomSearchCV(factor=1.5) | 远小于 720（多数轮次只用零头样本） | 0.968 | rbf, C=100, γ=0.0001 | 0.965 |
+| GridSearchCV | 72 组合 × 10 折 = 720 | 0.9847 | rbf, C=100.0, gamma=0.001 | 0.974 |
+| RandomizedSearchCV (n_iter=20) | 20 × 10 = 200 | 0.9738 | rbf, C=10.0, gamma=0.001 | —（书中未评估） |
+| HalvingRandomSearchCV | 按轮次递增，远低于 720 | 0.9676 | rbf, C=100.0, gamma=0.0001 | 0.965 |
 
-注意两点：① 三者的 `best_score_` **不可直接比较**——网格/随机的 best_score_ 是全量数据 10 折 CV 的平均分，而 halving 的 best_score_ 是其最后一轮评估产生的分数，评估时的数据量与流程都不同；② halving 以小得多的代价拿到了测试集 0.965，与网格的 0.974 只差约 1 个百分点，体现了「快速淘汰烂候选」的性价比。
+注意 `best_score_` 三者**不可直接横比**：网格/随机的分数是全量数据 10 折平均，减半的分数产生于末轮（资源与折数都不同）的评估条件。
 
-#### 4.3.4 代码实践：调整 factor 观察淘汰节奏
+#### 4.4.4 代码实践
 
-1. **实践目标**：直观感受 `factor` 对「轮数 / 候选淘汰速度 / 结果质量」的影响。
-2. **操作步骤**（**示例代码**，基于 [ch06/ch06.py:L427-L434](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L434) 改写）：
+1. **实践目标**：亲眼看到「每轮资源 ×factor、候选 ÷factor」的淘汰过程。
+2. **操作步骤**（**示例代码**，基于 [ch06/ch06.py:L427-L447](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L427-L447) 复现后追加）：
 
    ```python
-   for f in [1.5, 3.0]:
-       hs = HalvingRandomSearchCV(
-           pipe_svc,
-           param_distributions=param_grid,
-           n_candidates='exhaust',
-           resource='n_samples',
-           factor=f,
-           random_state=1,
-           n_jobs=-1).fit(X_train, y_train)
-       print(f'factor={f}: best_score={hs.best_score_:.4f}, '
-             f'best_params={hs.best_params_}')
-       print(f'  每轮候选数: {list(hs.n_candidates_)}')
+   print('迭代轮数:', hs.n_iterations_)
+   print('每轮候选数:', hs.n_candidates_)
+   print('每轮资源(样本数):', hs.n_resources_)
    ```
+3. **需要观察的现象**：`n_candidates_` 是否逐轮约按 1/1.5 衰减、`n_resources_` 是否逐轮 ×1.5 直至逼近 455（训练集样本数）。
+4. **预期结果**：两个列表长度相同（= 轮数），首行候选数最多、资源最少，末行候选寥寥、资源接近训练集规模；具体数值**待本地验证**（也可从 `hs.cv_results_` 的 `'iter'`、`'n_resources'` 列查看同样信息）。
+5. 试试把 `factor` 从 1.5 改成 3：轮数应变少、每轮淘汰更狠，观察最优参数是否改变，并思考为什么更激进的淘汰更依赖早期评估的可靠性。
 
-   （`hs.n_candidates_` 是拟合后记录每轮候选数的属性；若你的 scikit-learn 版本没有该属性，可改看 `hs.cv_results_` 的行数与 `n_resources` 列。）
-3. **需要观察的现象**：`factor=3.0` 的 `n_candidates_` 序列是否更短、下降更陡；两种 factor 下 `best_score_` 与 `best_params_` 是否一致。
-4. **预期结果**：factor=1.5 时轮数多、每轮淘汰 1/3，能较从容地区分候选；factor=3 时轮数少、淘汰狠，总耗时更短，但最优参数可能因早期小样本评估的噪声而与 factor=1.5 不同。具体数值**待本地验证**。
+#### 4.4.5 小练习与答案
 
-#### 4.3.5 小练习与答案
+**练习 1**：减半搜索「省算力」的机制是什么？省下来的算力从哪里抠出来的？
+**答案**：让大概率平庸的候选只在**少量样本**上被粗评就淘汰，只把全量数据的训练留给少数幸存者。省的是被淘汰候选在后期轮次（大资源）里本要花费的训练成本。
 
-**练习 1**：为什么书中 halving 的 `best_score_`（0.968）低于网格搜索的（0.985），这个对比公平吗？
+**练习 2**：`factor=1.5` 与 `factor=3` 分别意味着什么取舍？
+**答案**：`factor` 越大，每轮淘汰越狠、搜索越快，但早期嘈杂评估误杀好候选的风险越高；`factor` 接近 1 时行为趋近普通随机搜索（每轮几乎不淘汰）。1.5 是较温和的设置。
 
-**答案**：不公平。两个数字的「出身」不同：网格的 0.985 是最优候选在**全量训练集 10 折 CV** 上的平均分；halving 的 0.968 是它最后一轮评估流程产生的分数，且中途的淘汰决策基于小样本评估、带有噪声——一个好配置可能在数据很少时表现平平而被提前淘汰。两者的正确对比方式是各自模型在**同一个测试集**上的表现：0.974 vs 0.965，差距缩小到约 1 个百分点，而 halving 的计算量小得多。
+**练习 3**：为什么这段代码必须先 `from sklearn.experimental import enable_halving_search_cv`？
+**答案**：在本书使用的 scikit-learn 1.0 中，halving 系列搜索仍标记为实验性 API，scikit-learn 要求显式导入这个开关模块表示你知晓 API 未来可能变动，否则无法从 `sklearn.model_selection` 导入 `HalvingRandomSearchCV`。
 
-**练习 2**：`resource='n_samples'` 中的「资源」为什么选样本数而不是折数？
+### 4.5 嵌套交叉验证：内层选模型，外层评估
 
-**答案**：因为「少量数据就能预判好坏」正是减半算法的前提假设——一个烂的超参数配置用 50 个样本训练往往已经很烂。折数（CV 重数）改变的是评估的稳定性而非模型见到的信息量，无法实现「先粗筛后精评」的梯度；样本数则是天然的单调递增资源。对某些模型也可以把资源设成迭代次数等其他量（scikit-learn 允许指定别的参数名作为 resource），原理相同。
+#### 4.5.1 概念说明
 
-**练习 3**：`HalvingGridSearchCV` 与 `HalvingRandomSearchCV` 有何异同？
+前三种搜索回答「哪组超参数最好」，但有一个无法回避的偏差：`best_score_` 是在同一批训练数据上**边搜边选**得到的（72 个 CV 分数取 max），天然偏乐观。如果想回答更根本的问题——
 
-**答案**：减半机制（资源递增、逐轮淘汰、factor、refit）完全相同，区别只在第一轮候选从哪来：前者穷举 `param_grid` 的全部组合，后者按 `param_distributions` 随机采样 `n_candidates` 个。正如 GridSearchCV 与 RandomizedSearchCV 的关系。
+> 「SVM 这套算法（含调参流程）和决策树那套算法（含调参流程），在这个数据上谁更强？」
 
-### 4.4 嵌套交叉验证：外层 cross_val_score(gs, ...)
+——就需要**嵌套交叉验证（nested cross-validation）**：用两层循环把「选模型」和「评模型」严格分开：
 
-#### 4.4.1 概念说明
+- **内层（模型选择）**：在**外层的每个训练折内部**跑一次网格搜索，选出该折的最优超参数、重训出模型——这一层完全看不到外层验证折；
+- **外层（模型评估）**：`cross_val_score` 把「整个网格搜索流程」当作一个普通估计器，在 5 个外层折上轮流评估，得到 5 个分数。
 
-4.1 练习 2 已经暴露了一个问题：`gs.best_score_` 因为「挑了最大值」而系统性偏乐观，不能当作「这套调参流程的真实性能」。如果你还想回答一个更上层的问题——**「SVM 这套流程和决策树那套流程，哪个更适合我的数据？」**——在同一份训练集上比较两个各自的 `best_score_` 就更不可靠了：两个数字都含乐观偏差，且偏差大小不同。
+这样每个外层分数都来自「从未参与该折调参」的数据，对**整套算法流程**（算法 + 搜索空间 + 调参策略）的泛化性能给出了接近无偏的估计。书中用 5 外折 × 2 内折的 5×2 配置（图 06_07）。
 
-嵌套交叉验证（nested cross-validation）的解法很优雅：**把「GridSearchCV 调参」整体当作一个待评估的估计器**，再套一层外层交叉验证去评估它：
+代价是算力按乘法叠加：SVM 网格 72 组合 × 2 内折 + 1 次重训 = 每个外层折 145 次 fit，5 个外层折共 \(5 \times 145 = 725\) 次 fit；决策树 8 组合只要 \(5 \times (8 \times 2 + 1) = 85\) 次。
 
-- **内层（inner）**：`GridSearchCV(..., cv=2)`——在外层划出的训练子集上做完整的超参数搜索，选出参数、拟合成模型；
-- **外层（outer）**：`cross_val_score(gs, ..., cv=5)`——每次留出一折从未参与调参的数据，让整套「搜索 + 训练」流程在其上打分。
+#### 4.5.2 核心流程
 
-外层的每一折都是「干净」的：留出折的数据既没参与内层选参，也没参与最终拟合。因此外层 5 个分数的均值 ± 标准差，是对「**这套调参流程在新数据上的期望表现**」的近似无偏估计，可以用来在多个算法/流程之间做公平比较。
+以 SVM 管线为例：
 
-#### 4.4.2 核心流程
+1. 构造 `gs = GridSearchCV(pipe_svc, param_grid, cv=2)`——这就是**内层**（2 折选参数）；
+2. `cross_val_score(gs, X_train, y_train, cv=5)`——这是**外层**（5 折评估）：
+   - 外层第 \(i\) 折：把 `gs` **克隆**后在「外层训练部分」上完整跑一遍网格搜索（内层选参 + 重训），再在「外层验证折」上打分；
+   - 注意传给 `cross_val_score` 的第一个参数不是模型，而是**搜索器对象**——scikit-learn 中任何有 `fit`/`predict` 的对象都是估计器，搜索器 fit 完也满足；
+3. 5 个分数取均值 ± 标准差，即为该算法流程的嵌套 CV 性能；
+4. 对决策树重复同样流程，两个数字即可公平比较。
 
-```text
-cross_val_score(gs, X_train, y_train, cv=5)   # gs = GridSearchCV(pipe_svc, param_grid, cv=2)
-    ↓ 外层第 k 折（k = 1..5）
-    ├── 外层训练子集（约 4/5 × 455 ≈ 364 样本）→ 交给 gs.fit
-    │       └── 内层 2 折 × 72 候选 = 144 次 fit，选出参数并在该子集上重训
-    ├── 外层留出折（约 91 样本）→ gs.predict 打分（accuracy）
-    └── 记录一个分数
-    ↓
-5 个分数 → mean ± std
-```
+#### 4.5.3 源码精读
 
-总拟合次数约为 \(5 \times (72 \times 2) = 720\)——和一次 10 折网格搜索同量级，但换来的是近似无偏的流程性能估计。
-
-注意分工口诀：**内层选模型（选超参数），外层评流程（估性能）**。嵌套 CV 给出的分数用于「选算法」，选出之后仍要用全部训练数据重跑一次 `gs.fit(X_train, y_train)` 得到最终部署的模型（如 4.1 所示），并用从未参与过的 `X_test` 做最终验收。
-
-#### 4.4.3 源码精读
-
-SVM 管线的嵌套 CV（第 459–467 行）：
-
-[ch06/ch06.py:L459-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L467)
+SVM 管线的嵌套交叉验证（[ch06/ch06.py:L459-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L467)）：
 
 ```python
 gs = GridSearchCV(estimator=pipe_svc,
@@ -531,21 +504,21 @@ gs = GridSearchCV(estimator=pipe_svc,
                   scoring='accuracy',
                   cv=2)
 
-scores = cross_val_score(gs, X_train, y_train,
+scores = cross_val_score(gs, X_train, y_train, 
                          scoring='accuracy', cv=5)
 print(f'CV accuracy: {np.mean(scores):.3f} '
       f'+/- {np.std(scores):.3f}')
 ```
 
-两行核心：内层 `gs` 沿用同一个 `pipe_svc` 和双列表 `param_grid`，但 `cv=2`（内层折数刻意少，控制总开销）；外层直接把**未 fit 的 `gs` 对象**传给 `cross_val_score`——scikit-learn 的估计器协议在此发挥作用：`cross_val_score` 会把 `gs` 当作普通估计器，在每个外层训练子集上调用它的 `fit`（触发完整网格搜索）与 `score`。注意与 4.1 不同，这里没有 `refit` 相关操作——外层每一折 fit 出的模型只用于当折打分，用完即弃。notebook 输出：
+这段代码先把 4.1 的搜索器降为内层 2 折（嵌套 CV 中内层折数可小一些以控制算力），再把**搜索器本身**作为被评估的估计器交给外层 5 折 `cross_val_score`——嵌套的全部奥义就在这一行 `cross_val_score(gs, ...)` 的参数上。
+
+notebook 保存的真实输出：
 
 ```text
 CV accuracy: 0.974 +/- 0.015
 ```
 
-决策树的嵌套 CV（第 473–481 行）：
-
-[ch06/ch06.py:L473-L481](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L473-L481)
+决策树的对照实验（[ch06/ch06.py:L473-L481](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L473-L481)）：
 
 ```python
 gs = GridSearchCV(estimator=DecisionTreeClassifier(random_state=0),
@@ -553,143 +526,97 @@ gs = GridSearchCV(estimator=DecisionTreeClassifier(random_state=0),
                   scoring='accuracy',
                   cv=2)
 
-scores = cross_val_score(gs, X_train, y_train,
+scores = cross_val_score(gs, X_train, y_train, 
                          scoring='accuracy', cv=5)
 print(f'CV accuracy: {np.mean(scores):.3f} '
       f'+/- {np.std(scores):.3f}')
 ```
 
-结构完全同构，只换了被调对象与网格：`DecisionTreeClassifier` 搜 `max_depth`（含 `None` 表示不限制深度，回顾 u3-l3）。注意决策树没有放进 Pipeline——它基于阈值切分、不依赖距离，无需标准化（u3-l3 的结论）。notebook 输出：
+这段代码把估计器换成决策树（无需管线：树基于阈值切分，不依赖标准化，u3-l3 的结论），内层只搜 `max_depth` 这一个参数（含 `None` 即不限制深度）。notebook 保存的真实输出：
 
 ```text
 CV accuracy: 0.934 +/- 0.016
 ```
 
-两相对比：SVC 流程 0.974 ± 0.015，决策树流程 0.934 ± 0.016。两个估计的标准差相近、均值差约 4 个百分点，在乳腺癌数据集上可以下结论：**带标准化的 SVM 管线优于决策树**——这就是嵌套 CV 的用途：算法选择的依据。
+结论：SVM 管线 0.974 ± 0.015 明显优于决策树 0.934 ± 0.016。另有一个耐人寻味的对照：SVM 的嵌套 CV 分数（0.974）比它自己的 `gs.best_score_`（0.985）低了约 1 个百分点——这 1 个百分点正是「在同一批数据上选参数」造成的乐观偏差，被嵌套结构显式地暴露出来了。
 
-#### 4.4.4 代码实践：手工展开外层循环，看清每一折发生了什么
+#### 4.5.4 代码实践（本讲主实践）
 
-`cross_val_score(gs, ...)` 把一切封装得看不见内部。下面用显式循环重演一遍（**示例代码**），确认它与一行版结果一致：
-
-1. **实践目标**：亲手拆开嵌套 CV，看清「外层每折 → 内层一次完整网格搜索 → 留出折打分」的执行过程。
+1. **实践目标**：复现 2×5 嵌套 CV；再把内层换成 `RandomizedSearchCV` 并把 `n_iter` 从 20 提到 100，观察最优参数与嵌套分数的变化。
 2. **操作步骤**：
+   - **第一步（复现基线）**：按 [ch06/ch06.py:L459-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L467) 原样运行，确认输出 `CV accuracy: 0.974 +/- 0.015`（约几分钟）；
+   - **第二步（改预算）**：把内层换成随机搜索并扫 `n_iter`（**示例代码**）：
 
-   ```python
-   # 示例代码：手工展开 5 折外层
-   from sklearn.model_selection import StratifiedKFold
+     ```python
+     for n_iter in [20, 100]:
+         rs = RandomizedSearchCV(estimator=pipe_svc,
+                                 param_distributions=param_grid,
+                                 scoring='accuracy', cv=2,
+                                 n_iter=n_iter, random_state=1, n_jobs=-1)
+         scores = cross_val_score(rs, X_train, y_train,
+                                  scoring='accuracy', cv=5)
+         print(f'n_iter={n_iter}: '
+               f'{np.mean(scores):.3f} +/- {np.std(scores):.3f}')
+     ```
+   - **第三步（看参数）**：循环外单独 `rs.fit(X_train, y_train)` 一次，比较 `n_iter=20` 与 `100` 的 `rs.best_params_`、`rs.best_score_`（参考值：20 时为 0.9738 与 `{'svc__C': 10.0, 'svc__gamma': 0.001, 'svc__kernel': 'rbf'}`，见 4.3.3）。
+3. **需要观察的现象**：
+   - `n_iter=100` 的 `best_score_` 是否比 20 时更接近网格搜索的 0.9847？`best_params_` 是否变成/接近网格冠军（rbf, C=100.0, gamma=0.001）？
+   - 嵌套分数（均值 ± 标准差）随 `n_iter` 变大是上升、持平还是波动？
+4. **预期结果**：`n_iter=100` 已超过 72 个离散组合数，覆盖面大增，`best_score_` 预计逼近乃至达到 0.9847，`best_params_` 更可能命中网格冠军；嵌套分数预计仍在 0.97 附近小幅波动——因为外层评估的是「流程」的泛化能力，内层搜得再充分也不改变模型本身的上限。具体数值**待本地验证**。
+5. **解释任务**：用一句话回答「为什么 n_iter 增大 5 倍，嵌套分数却未必提高？」——内层更充分只保证「选得更准」，而外层分数衡量的是选定模型在未见数据上的表现；当选参误差本来就小时，额外预算买不到泛化提升。
 
-   outer_cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0).split(X_train, y_train)
-   scores = []
-   for k, (outer_train, outer_test) in enumerate(outer_cv):
-       gs = GridSearchCV(estimator=pipe_svc,
-                         param_grid=param_grid,
-                         scoring='accuracy',
-                         cv=2)
-       gs.fit(X_train[outer_train], y_train[outer_train])   # 内层完整搜索
-       fold_score = gs.score(X_train[outer_test], y_train[outer_test])
-       scores.append(fold_score)
-       print(f'外层折 {k+1}: acc={fold_score:.3f}, 最优参数={gs.best_params_}')
+#### 4.5.5 小练习与答案
 
-   print(f'手工嵌套 CV: {np.mean(scores):.3f} +/- {np.std(scores):.3f}')
-   ```
+**练习 1**：嵌套 CV 中内层和外层各自负责什么？为什么必须分开？
+**答案**：内层负责**模型选择**（在训练折内挑超参数），外层负责**模型评估**（在未参与调参的验证折上打分）。若不分开（直接报 `best_score_`），数据既当过「考官」（产生分数供选择）又当过「考生」，分数带选择性乐观偏差——本例中 0.985 vs 嵌套的 0.974。
 
-3. **需要观察的现象**：每个外层折各自打印出的 `best_params_` 是否相同——**通常不同**！不同折的数据略有差异，各自搜出的最优超参数可以不一样；外层评估的正是「重新调参」这一整套流程。
-4. **预期结果**：手工版均值 ± 标准差与 [ch06/ch06.py:L464-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L464-L467) 的一行版（0.974 ± 0.015）**接近但不一定相同**——因为外层折的切分方式不同（`cross_val_score` 对分类器默认用不打乱、按类分层顺序的 StratifiedKFold 切分；这里为演示加了 `shuffle=True`）。若把 `shuffle=True, random_state=0` 去掉，两边折划分一致，分数应逐折相同（**待本地验证**）。
+**练习 2**：本讲嵌套 CV 一共运行多少次 `fit`？为什么内层用 2 折而不是 10 折？
+**答案**：SVM：每个外层折内层 72×2 + 1 次重训 = 145，共 5×145 = 725 次。内层折数降到 2 是为了控制总算力（若内层也 10 折则是 5×(72×10+1) = 3605 次）；内层只需「相对比较」参数好坏，2 折的噪声通常够用，而外层折数直接决定性能估计的稳定性，保留 5 折。
 
-#### 4.4.5 小练习与答案
-
-**练习 1**：嵌套 CV 的内层 `cv=2` 会不会太糙，导致选错超参数？
-
-**答案**：2 折确实比 10 折的评估噪声大，可能个别外层折选到的不是全局最优参数。但这正是嵌套 CV 要刻画的真实情况——「在有限预算下调参」的流程本来就不完美，外层评估的对象是这个**流程**而非某个具体参数。若追求更稳的内层选择可加大内层折数，代价是总 fit 数线性上涨（内层折数 × 72 × 5）。
-
-**练习 2**：2×5 与 5×2（外层 2 折、内层 5 折）两种嵌套结构有何取舍？
-
-**答案**：外层折数决定性能估计的稳定性（5 个分数比 2 个分数的均值更稳、标准差更有意义），内层折数决定调参评估的质量（5 折选参更准但每折更贵）。书选 2×5：把更多预算留给外层估计。总开销相近时，「外层多折」通常对「比较算法」这个目标更有价值。
-
-**练习 3**：能不能把嵌套 CV 得到的 0.974 直接报告为「模型部署后的准确率」？
-
-**答案**：不能直接等同。0.974 是「这套调参流程」在**与训练集同分布的新数据**上的期望性能估计；它经过了外层的干净留出折，比 `gs.best_score_` 可靠得多，但仍是一个基于 455 个样本的估计（标准差 0.015 提示了其波动）。最终部署的模型还要用全部训练数据重新调参拟合（4.1 的流程），并在从未参与任何环节的 `X_test` 或更新的外部数据上做验收。
+**练习 3**：决策树的 `param_grid` 里为什么要包含 `None`？
+**答案**：`max_depth=None` 是「不限制深度、一直长到叶子纯净」的默认行为，是与 1~7 并列的一种候选策略（也是最容易过拟合的极端）；不放进网格就没法与其他深度公平比较。
 
 ## 5. 综合实践
 
-把本讲四个模块串成一个完整任务：**复现书中的 2×5 嵌套 CV，并做 n_iter 预算实验**（即本讲规格指定的实践任务）。
+**任务：在乳腺癌数据集上办一场「三种搜索器 + 嵌套验证」的对照实验。**
 
-**任务描述**：对乳腺癌数据集的 SVC 管线，先用内层 2 折、外层 5 折的嵌套交叉验证输出均值与标准差，验证与书中一致；再把 `RandomizedSearchCV` 的 `n_iter` 从 20 改为 100，观察最优参数与嵌套分数的变化并解释。
+1. **准备**：复现 [ch06/ch06.py:L102-L142](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L102-L142) 得到 `X_train`/`X_test` 等；定义统一的 `pipe_svc` 与双列表 `param_grid`（[L334-L343](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L334-L343)）。
+2. **计时跑三种搜索**（**示例代码**框架）：
 
-**操作步骤**（**示例代码**，可直接在 `ch06/` 目录下的 notebook 或 Python 会话中运行；数据加载复用仓库代码）：
-
-```python
-# 第 0 步：环境与数据（对应 ch06/ch06.py L102-L142 的复用）
-#   注意运行目录需能读到 ch06 的相对路径，或直接在 ch06/ 下打开 notebook
-import numpy as np
-import pandas as pd
-from sklearn.preprocessing import StandardScaler, LabelEncoder
-from sklearn.model_selection import (train_test_split, GridSearchCV,
-                                     RandomizedSearchCV, cross_val_score)
-from sklearn.pipeline import make_pipeline
-from sklearn.svm import SVC
-
-df = pd.read_csv('https://archive.ics.uci.edu/ml/'
-                 'machine-learning-databases'
-                 '/breast-cancer-wisconsin/wdbc.data', header=None)
-X = df.loc[:, 2:].values
-y = LabelEncoder().fit_transform(df.loc[:, 1].values)   # M→1, B→0
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.20, stratify=y, random_state=1)
-
-pipe_svc = make_pipeline(StandardScaler(), SVC(random_state=1))
-param_range = [0.0001, 0.001, 0.01, 0.1, 1.0, 10.0, 100.0, 1000.0]
-param_grid = [{'svc__C': param_range, 'svc__kernel': ['linear']},
-              {'svc__C': param_range, 'svc__gamma': param_range,
-               'svc__kernel': ['rbf']}]
-
-# 第 1 步：复现 2x5 嵌套 CV（对应 ch06/ch06.py L459-L467）
-gs = GridSearchCV(estimator=pipe_svc, param_grid=param_grid,
-                  scoring='accuracy', cv=2)
-scores = cross_val_score(gs, X_train, y_train, scoring='accuracy', cv=5)
-print(f'SVC 嵌套 CV: {np.mean(scores):.3f} +/- {np.std(scores):.3f}')
-
-# 第 2 步：n_iter 预算实验（对应 ch06/ch06.py L370-L399 的扩展）
-import time
-for n_iter in [20, 100]:
-    rs = RandomizedSearchCV(estimator=pipe_svc,
-                            param_distributions=param_grid,
-                            scoring='accuracy', refit=True,
-                            n_iter=n_iter, cv=10,
-                            random_state=1, n_jobs=-1)
-    t0 = time.time()
-    rs.fit(X_train, y_train)
-    print(f'n_iter={n_iter:3d} | best_score={rs.best_score_:.4f} | '
-          f'best_params={rs.best_params_} | {time.time()-t0:.1f}s')
-
-# 第 3 步（选做）：把 n_iter=100 的 rs 也做一次嵌套 CV
-scores_rs = cross_val_score(
-    RandomizedSearchCV(estimator=pipe_svc, param_distributions=param_grid,
-                       scoring='accuracy', n_iter=100, cv=2, random_state=1),
-    X_train, y_train, scoring='accuracy', cv=5)
-print(f'RS(n_iter=100) 嵌套 CV: {np.mean(scores_rs):.3f} +/- {np.std(scores_rs):.3f}')
-```
-
-**需要观察的三个层次**：
-
-1. 第 1 步应复现 notebook 的 `0.974 +/- 0.015`（`train_test_split(random_state=1)` 与外层切分都是确定的，应精确一致）。
-2. 第 2 步 `n_iter=20` 应复现 `best_score≈0.9738`、`{'svc__kernel': 'rbf', 'svc__gamma': 0.001, 'svc__C': 10.0}`；`n_iter=100` 的最优参数与分数是否变化、耗时是否约 5 倍——**待本地验证**。
-3. 第 3 步比较「随机搜索流程」与「网格搜索流程」的嵌套分数——两者应非常接近（随机搜索以小预算逼近穷举），具体数值**待本地验证**。
-
-**结果解释要点**（写实验记录时对照）：
-
-- 若 `n_iter=100` 的 `best_params_` 变成更接近网格最优（如 `C=100`）的组合、`best_score_` 上升：说明预算加大让采样覆盖到了更优区域——随机搜索「预算换精度」。
-- 若 `best_params_` 变了但 `best_score_` 几乎不变：说明这片区域的验证分平台很平（多个配置一样好），最优参数不唯一——这本身就值得记录。
-- 嵌套 CV 分数（第 1、3 步）低于对应的 `best_score_`（第 2 步）是**正常且预期**的：前者无选择偏差，后者有。
+   ```python
+   import time
+   searches = {
+       'grid(720 fits)': GridSearchCV(pipe_svc, param_grid,
+                                      scoring='accuracy', cv=10),
+       'random(200 fits)': RandomizedSearchCV(pipe_svc, param_grid,
+                                              scoring='accuracy', cv=10,
+                                              n_iter=20, random_state=1, n_jobs=-1),
+       'halving': HalvingRandomSearchCV(pipe_svc, param_grid,
+                                        n_candidates='exhaust',
+                                        resource='n_samples', factor=1.5,
+                                        random_state=1, n_jobs=-1),
+   }
+   for name, s in searches.items():
+       t0 = time.perf_counter()
+       s.fit(X_train, y_train)
+       dt = time.perf_counter() - t0
+       print(f'{name}: {dt:.1f}s, cv分={s.best_score_:.4f}, '
+             f'{s.best_params_}, 测试分={s.score(X_test, y_test):.3f}')
+   ```
+3. **汇总成表**：为每种方法记录「耗时、cv 分、最优参数、测试准确率」，与第 4.4.3 节的参考表对照（grid 0.9847/0.974，random 0.9738，halving 0.9676/0.965），并回答：
+   - 耗时排序与 fit 次数排序一致吗？（注意 `n_jobs=-1` 并行会压缩墙钟时间差异）
+   - 测试准确率上三者差距有多大？值得为最后的 0.01 多花 3 倍算力吗？
+4. **收尾**：为表现最好的搜索流程跑一次 2×5 嵌套 CV（模仿 [L459-L467](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L459-L467)），把「选美分数」「测试分数」「嵌套分数」三个数字并排写在结论里，解释它们各自的含义与大小关系。
+5. 具体耗时与并行下的数值**待本地验证**；三个参考分数已由 notebook 保存输出锚定。
 
 ## 6. 本讲小结
 
-- `param_grid` 传**字典列表**可为不同算法分支定义独立搜索子空间：SVM 线性核只搜 `C`（8 候选）、RBF 核搜 `C×gamma`（64 候选），共 72 个候选、`cv=10` 下 720 次 fit；避免了单字典笛卡尔积产生「线性核 + gamma」式的冗余组合。
-- `best_score_`/`best_params_` 是交叉验证选出的人工最大值，**带选择性乐观偏差**；`refit=True` 让 `best_estimator_` 已在全量训练集上重训，无需再 fit；`cv_results_` 保存全部候选的完整得分表。
-- `RandomizedSearchCV` 用 `n_iter` 钉死预算（20 个配置仅 200 次 fit，最优分只比穷举低约 1 个百分点）；参数取值可给离散列表，也可给 `scipy.stats.loguniform` 这类连续分布——对跨数量级的 `C`/`gamma`，对数均匀让每个数量级机会均等。注意 `ch06.py` 缺 `import scipy.stats`，顺序执行会在 L413 报 `NameError`。
-- `HalvingRandomSearchCV`（需先 `from sklearn.experimental import enable_halving_search_cv`）用「候选多 × 资源少 → 逐轮淘汰 1/factor、资源 ×factor」的比赛制，把算力集中到好候选上；各搜索器的 `best_score_` 评估口径不同，**不可直接横向比较**，要比就用测试集。
-- 嵌套 CV 把 `GridSearchCV` 对象整体交给外层 `cross_val_score(gs, ..., cv=5)`：内层选参数、外层评流程，得到近似无偏的流程性能估计；据此 SVC 管线（0.974 ± 0.015）优于决策树（0.934 ± 0.016）。
+- **双列表 `param_grid`**：字典的列表为不同核函数定义独立搜索子空间，linear 核不搜 `gamma`，避免无意义组合；组合总数 8 + 64 = 72，`cv=10` 共 720 次 fit。
+- **三件套**：`best_score_` 是训练集内部的选美分（带取 max 的乐观偏差），`best_params_` 是冠军组合，`best_estimator_` 是 `refit=True` 自动在全量训练集重训的成品模型；`cv_results_` 是全部候选的成绩单。
+- **随机搜索**用 `n_iter` 把预算与参数个数解耦（20 组合 × 10 折 = 200 次 fit，约 28% 算力）；值可以是列表（离散抽）也可以是 `scipy.stats.loguniform`（连续抽，每个数量级机会均等，适配跨 7 个数量级的 `C`/`gamma`）。
+- **减半搜索**是淘汰赛：`resource='n_samples'` + `factor=1.5`，每轮资源 ×1.5、幸存者 ÷1.5，`n_candidates='exhaust'` 首轮尽量多候选；省算力的代价是早期小样本评估可能误杀好候选。实验性 API 需 `enable_halving_search_cv` 开关。
+- **嵌套交叉验证**把「选模型」关进内层（2 折 GridSearchCV）、「评流程」交给外层（`cross_val_score(gs, ..., cv=5)`），得到近乎无偏的算法流程性能：SVM 管线 0.974 ± 0.015 胜过决策树 0.934 ± 0.016；它比 `best_score_`（0.985）低的那 1 个百分点就是选择性偏差的度量。
 
 ## 7. 下一步学习建议
 
-本讲所有搜索都用 `scoring='accuracy'` 打分，但准确率并不是唯一的、甚至不总是合适的性能度量——在类别不平衡或代价不对称的任务里它会严重误导。下一讲 **u6-l3 混淆矩阵、指标体系与 ROC 曲线** 将继续读 `ch06/ch06.py` 的后半部分（L498 起）：`confusion_matrix`、precision/recall/F1（含 micro/macro/weighted）、`make_scorer` 自定义打分器（其实本仓库在 [ch06/ch06.py:L578-L595](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L578-L595) 已经用 `make_scorer(f1_score, pos_label=0)` 做过一次预告——把自定义 scorer 直接传给 GridSearchCV 的 `scoring` 参数），以及 ROC 曲线与 AUC。读完 u6-l3 后，你可以回到本讲的任意搜索器，把 `scoring='accuracy'` 换成自己关心的指标，体会「搜索目标」与「评估口径」的解耦。
+本讲把「训练集内部」的选模型与比模型讲完了，但一直用 `scoring='accuracy'` 打分。下一讲 u6-l3（混淆矩阵、指标体系与 ROC 曲线）将回到 [ch06/ch06.py:L485](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L485) 之后的代码，回答：在类别不平衡的医疗数据上，准确率为什么会骗人？precision/recall/F1 怎么算、怎么用 `make_scorer` 挂进本讲的搜索器（[L578-L595](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L578-L595) 正是把 F1 作为 scoring 的网格搜索）？ROC 曲线与 AUC 又如何刻画分类器在各阈值下的表现？建议先精读 [ch06/ch06.py:L498-L517](https://github.com/rasbt/machine-learning-book/blob/63bee951ca45420ac33ccf803ceb337afc3c0a91/ch06/ch06.py#L498-L517) 的混淆矩阵代码再进入下一讲。之后可带着「搜索器 + 自定义评分」的组合技巧进入第 7 章集成学习（u7-l1）。
