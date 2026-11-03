@@ -6,37 +6,36 @@
 
 1. 用一句话说清 `rasbt/deeplearning-models` 这个仓库是什么、适合谁、怎么用。
 2. 说出仓库收录的主要模型类别（线性模型、MLP、CNN、RNN、Transformer、自编码器、GAN、GNN 等）。
-3. 会读 README 中的索引表格，根据「模型名 + 框架徽章」快速定位到对应的 notebook 文件路径。
+3. 会读 README 中的索引表格，根据「模型名 + 框架徽章」快速定位到对应 notebook 的文件路径。
 4. 理解 `pytorch_ipynb` / `pytorch-lightning_ipynb` / `tensorflow1_ipynb` 三个目录各自的分工与规模。
-5. 掌握 notebook 的命名规律，看到一个文件名就能猜出「什么架构 + 什么数据集 + 什么变体」。
+5. 掌握 notebook 的命名规律，看到一个文件名就能猜出「什么架构 + 什么变体 + 什么数据集」。
 
-本讲不写模型代码，只解决一个问题：**在这个 180+ 个 notebook 的大仓库里，如何不迷路。**这是阅读后续所有讲义的地基。
+本讲不写模型代码，只解决一个问题：**在这个 180 多个 notebook 的大仓库里如何不迷路**。这是阅读后续所有讲义的地基。
 
 ## 2. 前置知识
 
 本讲几乎不需要深度学习基础，但下面几个名词最好先有个直观印象：
 
-- **深度学习模型（model）**：可以理解为一个带很多可调参数的函数，比如「输入一张手写数字图片，输出它是 0~9 中哪一个」。CNN、RNN、Transformer 等都是不同结构的模型。
-- **Jupyter Notebook**：一种把「说明文字 + 代码 + 运行结果」混排在同一个文件里的文档，扩展名为 `.ipynb`。你可以逐格（cell）运行代码，非常适合学习和做实验。本仓库的所有模型都以 notebook 为载体。
-- **模型动物园（model zoo）**：业界习惯把「收录了许多现成模型实现供人查阅」的地方叫 model zoo。这个仓库就是一个 notebook 版的模型动物园。
+- **深度学习模型（model）**：可以理解为一个带很多可调参数的函数，比如「输入一张手写数字图片，输出它是 0~9 中的哪一个」。CNN、RNN、Transformer 等只是结构不同的模型。
+- **Jupyter Notebook**：一种把「说明文字 + 代码 + 运行结果」混排在同一个文件里的文档，扩展名 `.ipynb`，可以逐格（cell）运行代码。本仓库所有模型都以 notebook 为载体，每个 notebook 都是自包含的：从导库、加载数据、定义模型到训练、评估一气呵成。
+- **模型动物园（model zoo）**：业界习惯把「收录许多现成模型实现供人查阅」的地方叫 model zoo。这个仓库就是一个 notebook 版的模型动物园——它不是一个 `pip install` 的软件包，没有 `setup.py`，也没有统一的命令行入口。
 - **三大框架**：
-  - **PyTorch**：目前学界最主流的深度学习框架，代码以「命令式」著称，写起来像普通 Python。
-  - **PyTorch Lightning**：PyTorch 之上的一层封装，把训练循环、日志等样板代码接管掉，让你只写模型与训练步骤。它是 PyTorch 生态的一部分，不是竞争者。
-  - **TensorFlow 1.x**：Google 的老一代框架，采用「先建计算图、再开会话执行」的范式，现在已基本被 TensorFlow 2 取代，仓库保留它主要是历史对照价值。
-- **徽章（badge）**：README 表格里那些彩色小图标（如红色的 `Py-Torch`、紫色的 `PyTorch-Lightning`、橙色的 `Tensor-Flow1.0`），每个徽章本身是一个超链接，点击即跳到对应框架版本的 notebook。
+  - **PyTorch**：目前学界最主流的深度学习框架，代码命令式、像普通 Python。
+  - **PyTorch Lightning**：PyTorch 之上的一层封装，把训练循环、日志等样板代码接管掉，让你只写模型与训练步骤。
+  - **TensorFlow 1.x**：Google 的老一代框架，「先建计算图、再开会话执行」的范式，如今已基本被 TensorFlow 2 取代，仓库保留它主要作历史对照。
+- **徽章（badge）**：README 表格里那些彩色小图标（红色 `Py-Torch`、紫色 `PyTorch-Lightning`、橙色 `Tensor-Flow1.0`）。每个徽章本身是超链接，点击即跳到对应框架版本的 notebook。
 
 ## 3. 本讲源码地图
 
 | 路径 | 作用 |
 | --- | --- |
-| `README.md` | 全仓库唯一的总索引：按模型类别分表列出所有 notebook 及其框架徽章链接 |
-| `pytorch_ipynb/` | PyTorch 版模型库，规模最大（121 个 notebook），并附带 6 个共享 `helper_*.py` 工具模块 |
-| `pytorch-lightning_ipynb/` | PyTorch Lightning 版模型库（39 个 notebook），是部分 PyTorch notebook 的「换框架孪生版」 |
-| `tensorflow1_ipynb/` | TensorFlow 1.x 版模型库（22 个 notebook），覆盖基础模型，用于框架对照 |
-| `templates/pytorch_lightning/` | Lightning 分类任务通用模板（模板 notebook + 调参脚本） |
-| `deeplearning-models-tutorial/` | 你正在阅读的学习手册讲义目录（本套讲义的产出） |
+| `README.md` | 仓库唯一的「总目录」：按模型类别分节的索引表格，每行链接到具体 notebook。本讲的主线阅读材料。 |
+| `pytorch_ipynb/` | PyTorch 版 notebook 主库（121 个 notebook），以及 6 个共享 `helper_*.py` 模块，是整套学习手册的主要对象。 |
+| `pytorch-lightning_ipynb/` | 同批模型的 PyTorch Lightning 版重写（39 个 notebook），子目录结构与 `pytorch_ipynb` 对应。 |
+| `tensorflow1_ipynb/` | TensorFlow 1.x 版本（22 个 notebook），覆盖基础模型，作框架对照。 |
+| `templates/pytorch_lightning/` | 官方提供的 Lightning 分类模板 notebook 与调参脚本，用于快速起一个新实验。 |
 
-本讲精读的核心文件只有一个：`README.md`。其余目录通过实际浏览确认结构。
+本讲的「源码精读」集中在 `README.md`——对这个仓库来说，README 就是它的公共接口和目录索引，学会读它等于拿到了整个动物园的地图。
 
 ## 4. 核心概念与源码讲解
 
@@ -44,428 +43,400 @@
 
 #### 4.1.1 概念说明
 
-大多数 GitHub 项目是「软件包」——有入口文件、有 `pip install`、有 API。这个仓库不是。它是一个**教学参考库**：作者（Sebastian Raschka，`rasbt`）把各种经典深度学习架构逐一实现成一个个自包含的 Jupyter Notebook，每个 notebook 都能独立阅读、独立运行。
+这个仓库的作者是 Sebastian Raschka（《Python Machine Learning》作者、Lightning AI 的开源负责人之一）。仓库定位写在第一段：
 
-这种形态决定了它的使用方式：
+> A collection of various deep learning architectures, models, and tips for TensorFlow and PyTorch in Jupyter Notebooks.
 
-- 没有「主程序」可运行，学习的单位是**单个 notebook**。
-- notebook 之间大多互不依赖（少数共享同目录的 `helper_*.py`，将在下一讲详述）。
-- README 不是普通的项目说明书，而是**全库的目录页 / 索引**——你想找任何模型，第一站都是 README。
+翻译过来就是：**一个用 Jupyter Notebook 收录各种深度学习架构、模型和技巧的合集**。它不是库、不是框架，而是一批「教学级参考实现」：
 
-为什么值得这样学？因为论文只描述思想，框架官方示例只展示最小用法，而这里把「同一个模型在多个框架、多个数据集、多种变体」的实现并排放好，非常适合对照阅读。
+- 每个模型一个独立 notebook，不依赖仓库里的其他 notebook；
+- 代码风格统一、注释详尽，刻意保留可读性而不是追求工程封装；
+- 同一模型常有 PyTorch / Lightning / TF1 多个版本，方便对照学习。
+
+README 的结构是一张「模型类别 → notebook 链接」的巨型索引表，全部内容按二级标题分节，例如 `Traditional Machine Learning`、`Multilayer Perceptrons`、`Convolutional Neural Networks for Computer Vision`、`Autoencoders`、`Generative Adversarial Networks (GANs)` 等。
 
 #### 4.1.2 核心流程
 
-用 README 定位一个模型的标准流程：
+用 README 找到你想学的模型的路径，只需要三步：
 
-```text
-1. 打开 README.md
-2. 按二级标题（##）浏览模型大类
-   （Traditional ML / MLP / CNN / Transformers / Autoencoders / GAN / RNN / ...）
-3. 进入大类后，必要时再看三级标题（### / ####）细分小类
-   （如 CNN 下的 Basic / AlexNet / DenseNet / ResNet / VGG ...）
-4. 在表格中按 Title 列找到目标模型
-5. 看 Notebooks 列的徽章：
-   - 红色 Py-Torch          → 链接到 pytorch_ipynb/ 下的 notebook
-   - 紫色 PyTorch-Lightning → 链接到 pytorch-lightning_ipynb/ 下的 notebook
-   - 橙色 Tensor-Flow1.0    → 链接到 tensorflow1_ipynb/ 下的 notebook
-   没有某框架徽章 = 该模型没有对应框架的实现
-6. 点击徽章（或在本地打开对应路径）开始阅读
-```
+1. **按类别找节**：在 README 里按二级标题（`##`）找到模型大类，例如 CNN、RNN、GAN；大类下还有三级小节（`####`），例如 CNN 下再分 `AlexNet`、`VGG`、`ResNet` 等家族。
+2. **按行找模型**：每行是一条模型记录，四列依次是 `Title | Dataset | Description | Notebooks`。
+3. **按徽章选框架**：`Notebooks` 列里的彩色徽章即链接——红=PyTorch、紫=Lightning、橙=TF1。点徽章直达对应目录下的 notebook 文件。
 
-README 表格的通用列结构：
-
-| 列 | 含义 |
-| --- | --- |
-| Title | 模型名称（常含架构、数据集信息） |
-| Dataset | 训练用的数据集（很多行还是占位的 TBD） |
-| Description | 一句话描述（很多行还是 TBD） |
-| Notebooks | 框架徽章链接，一行为同一个模型的多框架入口 |
+需要注意：很多行的 `Description` 一栏写的是 `TBD`（to be determined，待补充），这是仓库尚未填完的占位，不代表功能缺失；真正的说明在 notebook 内部的 Markdown 单元格里。
 
 #### 4.1.3 源码精读
 
-**① 仓库的一句话定位**——README 开头第 2~4 行：
+**① 仓库的定位声明**（README 开头，一句话定义整个项目）：
 
 [README.md:L2-L4](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L2-L4)
 
-这两行说明：这是一个用 Jupyter Notebook 收录「各种深度学习架构、模型与技巧」的集合，覆盖 TensorFlow 与 PyTorch。注意措辞是 *collection ... in Jupyter Notebooks*——它从一开始就自我定位为 notebook 合集，而非软件包。
+这里给出仓库标题 `# Deep Learning Models` 和唯一一句描述。注意措辞是 "in Jupyter Notebooks"——载体是 notebook，这决定了整个学习方式：**逐格运行、逐格阅读**，而不是调用一个包。
 
-**② 第一个索引表：Traditional Machine Learning**——README 第 8~15 行：
+**② 索引表格的基本形态**（以最简单的 Traditional Machine Learning 一节为例）：
 
 [README.md:L8-L15](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L8-L15)
 
-以第 12 行的 Perceptron（感知机）行为例，一行里同时挂了两个徽章：红色 PyTorch 徽章指向 `pytorch_ipynb/basic-ml/perceptron.ipynb`，橙色 TF 徽章指向 `tensorflow1_ipynb/basic-ml/perceptron.ipynb`。**两个路径只有顶层目录不同、其余完全相同**——这不是巧合，而是全仓库刻意维持的约定（详见 4.2）。这个表也告诉你：仓库从最基础的感知机、逻辑回归、softmax 回归讲起，「从零开始」名副其实。
+这 8 行展示了所有表格的共同格式：表头四列 `Title | Dataset | Description | Notebooks`；第一行 Perceptron 的徽章链接分别是 `pytorch_ipynb/basic-ml/perceptron.ipynb`（红）和 `tensorflow1_ipynb/basic-ml/perceptron.ipynb`（橙）——同一个模型在两个框架目录下各有一份同名实现。
 
-**③ 三徽章并排的例子：Multilayer Perceptrons 表**——README 第 18~25 行：
+**③ 大类下的家族小节**（CNN 一节及其 ResNet 小节）：
 
-[README.md:L18-L25](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L18-L25)
+[README.md:L29-L36](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L29-L36)
 
-第 22 行的 Multilayer Perceptron 一行并排挂了 **3 个徽章**：Lightning、PyTorch、TF1 三个版本同时存在，路径分别是 `pytorch-lightning_ipynb/mlp/mlp-basic.ipynb`、`pytorch_ipynb/mlp/mlp-basic.ipynb`、`tensorflow1_ipynb/mlp/mlp-basic.ipynb`。这是「同一模型、三种实现」最直观的样本，学到这里你就能明白三个目录的关系了。
+`## Convolutional Neural Networks for Computer Vision` 是大类；紧接着 `#### Basic` 是小节。注意 L36 这一行 `Convolutional Neural Network` 挂了**三个徽章**——同一个 `cnn-basic.ipynb` 文件名在三个框架目录里各存一份，这是仓库「同模型多框架对照」的最典型样本。
 
-**④ 模型大类全景**——README 用二级标题划分大类，逐段数过去（均可用行号区间直达）：
+[README.md:L118-L132](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L118-L132)
 
-| 大类（## 标题） | 行号 | 内容要点 |
-| --- | --- | --- |
-| Traditional Machine Learning | L8 | 感知机、逻辑/softmax 回归 |
-| Multilayer Perceptrons | L18 | 基础 MLP + Dropout/BatchNorm/从零反向传播变体 |
-| CNN for Computer Vision | L29 | 按 LeNet/AlexNet/VGG/NiN/ResNet/DenseNet/MobileNet 等三级标题细分，是全库最大的一块 |
-| CNN for NLP | L137 | Text CNN 文本情感分类 |
-| Transformers | L145 | DistilBERT 特征提取与微调 |
-| Ordinal Regression | L157 | CORAL/CORN 等有序回归方法 |
-| Normalization Layers / Metric Learning | L174/L183 | 归一化层对比、孪生网络 |
-| Autoencoders | L189 | 全连接/卷积/变分/条件变分自编码器 |
-| GANs | L237 | GAN/WGAN/DCGAN 家族 |
-| GNNs | L250 | 图神经网络三种入门实现 |
-| RNNs | L260 | many-to-one 情感分类与 many-to-many 字符生成 |
-| Model Evaluation / Data Augmentation / Tips / Transfer Learning / Visualization | L288-L331 | K 折、数据增强、训练技巧、迁移学习、可解释性 |
-| PyTorch / TensorFlow Workflows and Mechanics | L335/L409 | 数据管线、autograd、多 GPU 等工程机制 |
-| Related Libraries | L430 | torchmetrics 等周边库 |
+ResNet 小节展示了另一种常见模式：**同一架构 × 多种数据集/任务**。从 L122 的残差块教学示例（`resnet-ex-1.ipynb`），到 ResNet-18/34/50/101/152 分别在 MNIST（数字分类）、CelebA（属性分类）、CIFAR-10（物体分类）上的实现，共 11 行。`Dataset` 列还顺带给出了 MNIST、CelebA、CIFAR-10、QuickDraw 的官方外链。
 
-其中 CNN 大类的入口在 [README.md:L29-L45](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L29-L45)，可以看到它内部又用 `#### Basic`、`#### Concepts` 等三级标题切分子类；ResNet 子表在 [README.md:L118-L132](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L118-L132)，一口气列了 ResNet-18 到 ResNet-152 在 MNIST/CelebA/CIFAR-10 上的各种组合。
+**④ 生成模型与序列模型两大板块**：
 
-**⑤ 一个提醒：README 索引偶尔滞后于实际文件。**例如 README 第 57 行把「Grouped AlexNet」链接写成 `pytorch_ipynb/cnn/cnn-alexnet-grouped-cifar10.ipynb`：
+[README.md:L189-L196](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L189-L196)
 
-[README.md:L57](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L57)
+Autoencoders 一节按「全连接 → 卷积 → 变分（VAE）→ 条件变分（CVAE）」四个小节递进组织，L195 的 `ae-basic.ipynb` 是后面生成模型单元（U5）的起点。
 
-但浏览 `pytorch_ipynb/cnn/` 目录会发现实际文件名是 `cnn-alexnet-cifar10-grouped.ipynb`（词序不同）。所以养成习惯：**徽章打不开时，回到对应目录里 `ls` 一下确认真实文件名**，README 是地图，目录才是领土。
+[README.md:L237-L247](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L237-L247)
+
+GANs 一节从全连接 GAN（L241）一路排到 Wasserstein GAN、卷积 GAN、label smoothing 变体、DCGAN（L247），构成一条由浅入深的生成对抗网络学习线。
+
+[README.md:L260-L284](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L260-L284)
+
+RNNs 一节先按任务形态分组——`Many-to-one: Sentiment Analysis / Classification`（L265）与 `Many-to-Many / Sequence-to-Sequence`（L280），再在组内按单元类型（simple RNN → LSTM → GRU → 双向多层）排列。这种「任务形态优先」的分节方式本身就是理解 RNN 的一个好框架。
+
+**⑤ 「机制与技巧」类内容**（不只是模型）：
+
+[README.md:L335-L343](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L335-L343)
+
+`## PyTorch Workflows and Mechanics` 一节收录的不是新架构，而是**工程机制**：自定义数据加载、验证集划分、梯度检查点、多 GPU、确定性设置、autograd 细节等。这些 notebook 是理解「PyTorch 怎么干活」的钥匙，本手册的 U4、U8 单元会大量用到。
+
+[README.md:L409-L419](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L409-L419)
+
+对应的 `## TensorFlow Workflows and Mechanics` 收录 TF1 时代的数据管线机制（TFRecords、队列、Dataset API），与 PyTorch 机制一节互为镜像。
 
 #### 4.1.4 代码实践
 
-**实践目标**：证明你真的会用 README 索引，而不是只会滚动页面。
+**实践目标**：不靠肉眼逐行扫 README，而是用命令行把索引表里的所有 notebook 链接抽出来，做成一份可检索的清单。
 
 **操作步骤**：
 
-1. 在本地（或 GitHub 网页上）打开 `README.md`。
-2. 只用 README 的表格，回答下面三个「寻址」问题：
-   - ResNet-18 在 MNIST 上的 PyTorch 版 notebook 完整路径是什么？
-   - 「DistilBERT 作为特征提取器」的 notebook 在哪个目录？
-   - 哪个模型有全部三种框架（Lightning / PyTorch / TF1）的实现？
-3. 用命令验证答案（示例命令，在你自己的终端运行）：
+1. 进入仓库根目录，运行下面第一条命令，从 README 中提取所有指向三个框架目录的 `.ipynb` 链接：
 
-```bash
-# 确认 README 指向的文件真实存在
-ls pytorch_ipynb/cnn/cnn-resnet18-mnist.ipynb
+   ```bash
+   grep -oE '\((pytorch_ipynb|pytorch-lightning_ipynb|tensorflow1_ipynb)/[^)]+\.ipynb\)' README.md | tr -d '()' | sort
+   ```
 
-# 数一数 README 里三个框架徽章各出现多少次
-grep -o 'pytorch_ipynb/' README.md | wc -l
-grep -o 'pytorch-lightning_ipynb/' README.md | wc -l
-grep -o 'tensorflow1_ipynb/' README.md | wc -l
-```
+2. 想按框架统计各有多少条链接，再运行：
 
-**需要观察的现象**：`ls` 能找到文件说明索引有效；三个 `grep` 计数会直观展示「PyTorch 版最多、Lightning 次之、TF1 最少」的规模梯度。
+   ```bash
+   grep -oE '\((pytorch_ipynb|pytorch-lightning_ipynb|tensorflow1_ipynb)/[^)]+\.ipynb\)' README.md | tr -d '()' | cut -d/ -f1 | sort | uniq -c
+   ```
 
-**预期结果**：三问答案分别为 `pytorch_ipynb/cnn/cnn-resnet18-mnist.ipynb`（见 [README.md:L123](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L123)）、`pytorch_ipynb/transformer/` 目录（见 [README.md:L150](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L150)）、例如 Multilayer Perceptron（见 [README.md:L22](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L22)）。grep 的具体计数值：待本地验证。
+3. 把第一条命令的输出重定向到文件（如 `notebook-index.txt`），方便后续用 `grep` 随时查：想找 ResNet 相关的就 `grep resnet notebook-index.txt`。
+
+**需要观察的现象**：
+
+- 提取出的路径全部以三个框架目录之一开头，与徽章颜色一一对应；
+- 同一个文件名（如 `mlp/mlp-basic.ipynb`）会在不同框架目录下重复出现；
+- Data Augmentation 一节（[README.md:L299-L303](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L299-L303)）的徽章链接指向的是一个**目录**而非单个 `.ipynb`，所以不会出现在上面的提取结果里——这是唯一的例外，值得留意。
+
+**预期结果**：得到一份一百多行的清单，按目录排序；`uniq -c` 统计出的三个目录链接数与目录的实际规模成正比（PyTorch 最多，Lightning 次之，TF1 最少）。
+
+（注：链接数与目录内实际文件数不完全相等——个别 notebook 未列入 README，个别行链接目录而非文件。）
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：你想同时学习「基础 MLP」的 PyTorch 写法和 Lightning 写法，请仅凭 README 给出两个 notebook 的路径。
-**答案**：`pytorch_ipynb/mlp/mlp-basic.ipynb` 与 `pytorch-lightning_ipynb/mlp/mlp-basic.ipynb`，二者都在 [README.md:L22](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L22) 的同一行里以两个徽章给出。
+**练习 1**：你想学习「在 CIFAR-10 上用 AlexNet 做分类」，请说出对应的 PyTorch notebook 路径，以及它有没有 Lightning 版本。
 
-**练习 2**：README 里 Dataset / Description 两列大量写着 "TBD"，这说明什么？使用仓库时应该怎么办？
-**答案**：说明这些行的文档尚未补全，README 只保证「索引到文件」这一层可靠，不保证元信息完整。想知道某 notebook 用什么数据、做什么实验，应当直接打开 notebook 本身阅读（每个 notebook 内部有完整说明），以目录和文件为准。
+**答案**：查 README 的 AlexNet 小节 [README.md:L52-L57](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L52-L57)。PyTorch 版路径是 `pytorch_ipynb/cnn/cnn-alexnet-cifar10.ipynb`；有 Lightning 版，路径为 `pytorch-lightning_ipynb/cnn/cnn-alexnet-cifar10.ipynb`（同小节 L56 一行挂了紫、红两个徽章）。
 
-**练习 3**：仓库的学习单位为什么是 notebook 而不是「一个可 pip install 的包」？
-**答案**：因为仓库定位是教学参考（collection of architectures/models/tips in Jupyter Notebooks，见 [README.md:L2-L4](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L2-L4)）。每个模型自带数据加载、训练、评估的完整代码，独立可运行，便于逐个拆开学习；打包成库反而会破坏这种自包含性。
+**练习 2**：README 表格中大量出现的 `TBD` 是什么意思？它影响你使用仓库吗？
+
+**答案**：`TBD` = to be determined，表示作者还没填这一格。它只影响 README 的描述完整性，不影响 notebook 本身——每个 notebook 内部有自己的 Markdown 说明文字，照常可读可运行。
+
+**练习 3**：仓库里「PyTorch 机制（Workflows and Mechanics）」类内容和「模型架构」类内容在 README 里是怎么区分的？
+
+**答案**：模型架构类按架构名分节（CNN、RNN、GAN……），机制类集中在 `## PyTorch Workflows and Mechanics`（[README.md:L335-L406](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L335-L406)）和 `## TensorFlow Workflows and Mechanics`（[README.md:L409-L428](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L409-L428)），其下再按 Custom Datasets、Training and Preprocessing、Autograd 等主题分小节。
 
 ### 4.2 三大框架目录分工
 
 #### 4.2.1 概念说明
 
-仓库顶层只有四个业务目录（其余是 `LICENSE`、`README.md` 和讲义目录）。三个框架目录的关系可以这样理解：
+仓库根目录下与学习直接相关的是三个框架目录加一个模板目录：
 
-```text
-                pytorch_ipynb/            ← 主体（121 个 notebook）
-                 │ 按「同一模型同一相对路径」约定
-                 ├──镜像──▶ pytorch-lightning_ipynb/  （39 个，换 Lightning 写法）
-                 └──镜像──▶ tensorflow1_ipynb/        （22 个，换 TF1 写法）
+| 目录 | 框架 | notebook 数（HEAD `59beda3` 实测） | 角色 |
+| --- | --- | --- | --- |
+| `pytorch_ipynb/` | PyTorch | 121 | **主库**。覆盖全部模型类别，且独有 6 个共享 `helper_*.py` 模块（数据加载、训练循环、评估、绘图、工具）。 |
+| `pytorch-lightning_ipynb/` | PyTorch Lightning | 39 | 主库中一部分模型的 Lightning 重写版，子目录（`cnn/`、`mlp/`、`kfold/`、`ordinal/`、`transformer/`、`data-augmentation/`）与主库同名对应。 |
+| `tensorflow1_ipynb/` | TensorFlow 1.x | 22 | 基础模型（感知机、MLP、CNN、自编码器、GAN 等）的 TF1 版，属于较早期的代码。 |
+| `templates/pytorch_lightning/` | Lightning 模板 | — | 官方实验模板：`template_classification_basic.ipynb` 与调参脚本 `tune_classification_basic.py`。 |
 
-                templates/                ← Lightning 通用实验模板（不是模型）
-```
+三者的分工可以概括为：**`pytorch_ipynb` 是「完整版教科书」，`pytorch-lightning_ipynb` 是「工程化示范」，`tensorflow1_ipynb` 是「历史对照组」**。
 
-- **`pytorch_ipynb/` 是绝对主体**。它目录最全（autoencoder、basic-ml、cnn、cnn-nlp、gan、gnn、kfold、mechanics、mlp、ordinal、rnn、transfer、transformer、tricks、viz 等 20 余个子目录），并且**只有它**附带了 6 个共享工具模块：`helper_data.py`、`helper_train.py`、`helper_evaluate.py`、`helper_plotting.py`、`helper_utils.py` 和 `helper.py`。这些 helper 是新版 notebook 的公共基础设施，下一讲专门精读。
-- **`pytorch-lightning_ipynb/` 是部分模型的 Lightning 孪生版**。子目录只有 6 个（cnn、data-augmentation、kfold、mlp、ordinal、transformer），凡是存在的 notebook，都与 `pytorch_ipynb` 下的同名文件保持相同相对路径——例如两边的 `cnn/cnn-basic.ipynb` 就是同一个模型两种写法。
-- **`tensorflow1_ipynb/` 覆盖基础模型，用于框架对照**。子目录包括 autoencoder、basic-ml、cnn、gan、mechanics、metric、mlp 等。TF1 已停止主流演进，这批 notebook 的价值在于「同一个模型换一种框架范式长什么样」。
-- **`templates/` 不是模型库**，只含 `templates/pytorch_lightning/` 下的 3 个文件：`template_classification_basic.ipynb`（分类任务通用模板）、`tune_classification_basic.py`（调参脚本）、`submit_command.sh`。它服务于「批量跑实验」而非「读模型」。
+另一个重要差别在共享基础设施：只有 `pytorch_ipynb/` 根目录下放着 `helper_data.py`、`helper_train.py`、`helper_evaluate.py`、`helper_plotting.py`、`helper_utils.py` 和 `helper.py` 六个共享模块，新版 PyTorch notebook 靠 `import` 它们来复用数据加载与训练循环；`pytorch-lightning_ipynb/` 只有 `helper_utilities.py`；`tensorflow1_ipynb/` 只有一个旧版 `helper.py`。这批 helper 是本手册 U1-L3 的主角，也是理解仓库代码组织方式的关键。
 
 #### 4.2.2 核心流程
 
-判断「某个模型有没有某框架版本」的流程：
+三个目录的对应关系是「按子目录名 + 按文件名」双重对齐：
 
-```text
-1. 在 README 表格中找到该模型行
-2. 数该行有几个徽章：
-   3 个徽章 → 三个目录里各有一份
-   2 个徽章 → 只有徽章对应的两个目录有
-   1 个徽章 → 通常只在 pytorch_ipynb/ 下
-3. 按徽章里的路径直接定位文件
-4. （可选）验证：ls 对应目录，确认文件存在
+```
+pytorch_ipynb/mlp/mlp-basic.ipynb          ← 主库版本（手写训练循环）
+pytorch-lightning_ipynb/mlp/mlp-basic.ipynb ← Lightning 版（LightningModule + Trainer）
+tensorflow1_ipynb/mlp/mlp-basic.ipynb       ← TF1 版（graph + session）
 ```
 
-反过来，想系统性比较三种框架时，去 README 里找**三徽章行**（如 MLP 基础版），然后打开三个同名文件对照阅读。
+同一行 README 记录会同时挂多个徽章，就是这种一一对应关系的体现。所以阅读策略可以是：
+
+1. 先在 `pytorch_ipynb` 里读懂某个模型的「裸写法」；
+2. 再打开 `pytorch-lightning_ipynb` 的同名文件，看同样的模型如何被 Lightning 的抽象接管；
+3. 有兴趣时再对照 TF1 版，体会两代框架在设计哲学上的差异（这一步是选修）。
 
 #### 4.2.3 源码精读
 
-**① 目录分工的直接证据——README 第 22 行（再次引用）**：
+**① 同一模型三框架并排的索引行**：
 
-[README.md:L22](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L22)
+[README.md:L18-L25](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L18-L25)
 
-三个徽章的链接目标分别是 `pytorch-lightning_ipynb/mlp/mlp-basic.ipynb`、`pytorch_ipynb/mlp/mlp-basic.ipynb`、`tensorflow1_ipynb/mlp/mlp-basic.ipynb`。三个路径仅在**顶层框架目录**上不同，子目录与文件名逐字相同——这就是「镜像式布局」约定，记住它，你只需要记住一份相对路径就能在三个框架间自由切换。
+MLP 一节的 L22 行：`Multilayer Perceptron` 一行同时给出 `pytorch-lightning_ipynb/mlp/mlp-basic.ipynb`（紫）、`pytorch_ipynb/mlp/mlp-basic.ipynb`（红）、`tensorflow1_ipynb/mlp/mlp-basic.ipynb`（橙）三个链接——三个目录的「同名对齐」在这里一目了然。对比 L25 的 `mlp-fromscratch__sigmoid-mse.ipynb` 只有红、橙两个徽章，说明该模型没有 Lightning 版：**徽章数量本身就告诉你某模型的框架覆盖情况**。
 
-**② PyTorch 主库的规模与结构**（本讲实际浏览仓库的观察结果）：
+**② Lightning 独有内容**：
 
-```text
-pytorch_ipynb/
-├── basic-ml/        感知机、逻辑回归、softmax 回归
-├── mlp/             多层感知机及其正则化、从零反向传播变体
-├── cnn/             最大的一块：LeNet/AlexNet/VGG/ResNet/DenseNet/MobileNet/...
-├── cnn-nlp/         Text CNN（NLP 用卷积）
-├── rnn/             RNN/LSTM/GRU/char-RNN
-├── transformer/     DistilBERT 系列
-├── autoencoder/     AE / 卷积AE / VAE / CVAE
-├── gan/             GAN / WGAN / DCGAN
-├── gnn/             图神经网络
-├── ordinal/         有序回归 CORAL/CORN
-├── kfold/ tricks/ transfer/ viz/ related-libraries/   评估、技巧、迁移、可视化
-├── mechanics/       数据管线、autograd、并行等工程机制
-├── lightning/       PyTorch Lightning 入门示例（注意：在主库内也有一组）
-├── helper*.py       6 个共享工具模块（下一讲主角）
-└── data/ images/    数据与图片资源
-```
+[README.md:L299-L303](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L299-L303)
 
-目录名与 README 大类基本一一对应，所以「README 大类 ↔ 磁盘子目录」也构成一张速查映射。
+`## Data Augmentation` 一节只挂了 Lightning 徽章，链接指向 `pytorch-lightning_ipynb/data-augmentation/autoaugment` 目录——那里是一组三个对照 notebook（无增强 / AutoAugment / TrivialAugment）。这是「Lightning 目录承载新式实验」的典型例子。
 
-**③ 三库规模对比**（在仓库根目录用 `find <目录> -name "*.ipynb" | wc -l` 实测）：
+[README.md:L290-L295](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L290-L295)
 
-| 目录 | notebook 数量 | 子目录数 | 角色 |
-| --- | --- | --- | --- |
-| `pytorch_ipynb/` | 121 | 20+ | 主体实现 + helper 基础设施 |
-| `pytorch-lightning_ipynb/` | 39 | 6 | 部分模型的 Lightning 孪生版 + 数据增强专题 |
-| `tensorflow1_ipynb/` | 22 | 9 | 基础模型的 TF1 对照实现 |
+Model Evaluation 一节：L294 基线 CNN 同时有 PyTorch 与 Lightning 版；L295 用 `pl_cross` 库做 5 折交叉验证的实现**只有 Lightning 版**——因为 `pl_cross` 本身就是 Lightning 生态的库。这再次印证：Lightning 目录偏重「工程化/生态集成」。
 
-值得注意的细节：`pytorch-lightning_ipynb/` 有一个主库没有的专题子目录 `data-augmentation/`（AutoAugment/TrivialAugment 对照实验，入口见 [README.md:L299-L303](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L299-L303)）；而 `tensorflow1_ipynb/` 也有独有的 `metric/`（孪生网络）。所以「孪生」是大格局，不是铁律。
+**③ TF1 目录的内容边界**：
+
+[README.md:L187-L187](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L187-L187)
+
+`## Metric Learning` 一节只有橙色徽章（`tensorflow1_ipynb/metric/siamese-1.ipynb`）——孪生网络是 TF1 目录独占的内容之一；反过来 `pytorch_ipynb` 独有的 `gnn/`、`viz/`、`tricks/` 等目录在 TF1 侧没有对应。两个目录是「部分重叠」而非「完全镜像」。
 
 **④ 模板目录**：
 
-[templates/pytorch_lightning/template_classification_basic.ipynb](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/templates/pytorch_lightning/template_classification_basic.ipynb)
-
-这是 Lightning 分类任务的通用模板，配套 `tune_classification_basic.py` 调参脚本。它告诉我们仓库的第三种用法：不逐个读模型，而是拿模板批量开实验。本套讲义在 U8 工程化单元会回到这里。
+README 没有为 `templates/` 建索引，它是给想批量做实验的人用的：`templates/pytorch_lightning/template_classification_basic.ipynb` 是一个分类任务模板 notebook，`tune_classification_basic.py` 是配套的调参脚本，`submit_command.sh` 用于把任务提交到计算节点。本手册 U8-L2 会专门讲它。
 
 #### 4.2.4 代码实践
 
-**实践目标**：亲手验证「镜像式布局」约定与三库规模。
+**实践目标**：用文件系统命令亲自验证三个目录的规模差异与同名对齐关系。
 
 **操作步骤**：
 
-1. 在仓库根目录执行：
+1. 统计每个目录的 notebook 数量：
 
-```bash
-# 三个框架目录的 notebook 数量
-find pytorch_ipynb -name "*.ipynb" | wc -l
-find pytorch-lightning_ipynb -name "*.ipynb" | wc -l
-find tensorflow1_ipynb -name "*.ipynb" | wc -l
-```
+   ```bash
+   find pytorch_ipynb -name '*.ipynb' | wc -l
+   find pytorch-lightning_ipynb -name '*.ipynb' | wc -l
+   find tensorflow1_ipynb -name '*.ipynb' | wc -l
+   ```
 
-2. 验证镜像同名文件：
+2. 列出 `pytorch_ipynb/` 根目录下的共享 Python 模块：
 
-```bash
-ls pytorch_ipynb/cnn/cnn-basic.ipynb pytorch-lightning_ipynb/cnn/cnn-basic.ipynb
-ls pytorch_ipynb/mlp/mlp-dropout.ipynb pytorch-lightning_ipynb/mlp/mlp-dropout.ipynb
-```
+   ```bash
+   ls pytorch_ipynb/*.py
+   ```
 
-3. 找出「只在 Lightning 库存在」的独有内容：
+3. 验证同名 notebook 在三个框架目录中的对齐：
 
-```bash
-ls pytorch-lightning_ipynb/
-ls pytorch_ipynb/ | grep data-augmentation || echo "主库无此目录"
-```
+   ```bash
+   ls pytorch_ipynb/mlp/mlp-basic.ipynb pytorch-lightning_ipynb/mlp/mlp-basic.ipynb tensorflow1_ipynb/mlp/mlp-basic.ipynb
+   ```
 
-**需要观察的现象**：步骤 1 应输出 121 / 39 / 22 左右的规模梯度（仓库仍在更新，数字可能小幅变化）；步骤 2 两条 `ls` 都应成功列出同名文件；步骤 3 应看到 `data-augmentation` 只出现在 Lightning 库。
+**需要观察的现象**：
 
-**预期结果**：确认「相对路径一致 + 顶层目录区分框架」的镜像布局成立，并理解 Lightning 库虽小但有独有专题。具体数字以你本地运行结果为准（本讲在 HEAD `59beda3` 下实测为 121/39/22）。
+- 三个 `wc -l` 数字分别是 121、39、22（若上游仓库更新，数字可能变化，但「主库远大于另外两个」的关系不变）；
+- `ls pytorch_ipynb/*.py` 会列出 6 个文件：`helper.py`、`helper_data.py`、`helper_evaluate.py`、`helper_plotting.py`、`helper_train.py`、`helper_utils.py`；而 Lightning 目录根下没有这一整套；
+- 第 3 步中三个路径同时存在，说明「同名对齐」不是巧合而是仓库的组织约定。
+
+**预期结果**：三条 `ls` 均成功返回文件路径，无 "No such file" 报错。若你尝试把路径换成 `pytorch-lightning_ipynb/mlp/mlp-fromscratch__sigmoid-mse.ipynb`，则会报不存在——因为该模型没有 Lightning 版（对照 4.2.3 ① 的徽章数量）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么 6 个 `helper_*.py` 只放在 `pytorch_ipynb/` 下，而不是仓库根目录供三个框架共享？
-**答案**：因为它们是 **PyTorch** 的基础设施（数据加载、训练循环、评估、绘图都调用 `torch` / `torchvision`），TF1 notebook 无法使用；Lightning 库复用的是 PyTorch 张量与模块体系，需要的则是 Lightning 风格的工具。放在 `pytorch_ipynb/` 下与其服务对象一致，也维持了三个框架目录的自包含性。
+**练习 1**：为什么 `pytorch_ipynb` 比 `pytorch-lightning_ipynb` 大得多？Lightning 目录的收录标准像是什么？
 
-**练习 2**：朋友告诉你「仓库没有 Lightning 版的 ResNet-18 MNIST」，你如何用 30 秒验证？
-**答案**：看 [README.md:L123](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L123) 的 ResNet-18 Digit Classifier 行——该行只有一个红色 PyTorch 徽章，没有紫色徽章；再 `ls pytorch-lightning_ipynb/cnn/ | grep resnet18` 应无结果。结论：朋友说得对。
+**答案**：`pytorch_ipynb` 是完整的主库，覆盖所有类别；`pytorch-lightning_ipynb` 只重写了其中一部分常用模型（cnn、mlp、kfold、ordinal、transformer、data-augmentation 六类）。收录标准更像「挑选有代表性的模型做 Lightning 工程化示范」，而不是追求与主库一一对应。
 
-**练习 3**：`templates/` 目录和三个框架目录的本质区别是什么？
-**答案**：三个框架目录收录的是「具体模型的实现」，每个 notebook 解决一个具体模型；`templates/` 收录的是「填空式通用骨架」，不绑定具体模型，用于快速起一个新分类实验并批量调参（`tune_classification_basic.py`）。前者用来读，后者用来改。
+**练习 2**：如果你只想学 PyTorch 本身（不碰 Lightning 和 TF1），可以完全无视另外两个目录吗？有什么损失？
+
+**答案**：可以，`pytorch_ipynb` 自包含且最完整。损失两点：一是 Lightning 版是「同一模型的另一种组织方式」，对照阅读能加深对训练循环本质的理解；二是少数内容（如 `pl_cross` 5 折交叉验证、AutoAugment 对照实验、TF1 独占的 Siamese 网络）只存在于另外两个目录。
+
+**练习 3**：`templates/pytorch_lightning/` 下的模板和 `pytorch-lightning_ipynb/` 下的 notebook 有什么区别？
+
+**答案**：`pytorch-lightning_ipynb/` 是教学展示用的成品示例；`templates/` 是「填空式」起点——`template_classification_basic.ipynb` 把模型、数据配置留成可替换的位置，`tune_classification_basic.py` 支持从命令行批量调参启动实验，面向的是复用与批跑而非阅读。
 
 ### 4.3 notebook 命名规律
 
 #### 4.3.1 概念说明
 
-仓库里 180+ 个文件名不是随意起的，主流命名模式是：
+仓库里的 notebook 文件名高度规律化，绝大多数可以拆成几段来读：
 
-```text
-〈架构前缀〉-〈模型名〉[-〈变体〉]-〈数据集〉.ipynb     （连字符风格，CNN/AE/GAN 等多用）
-〈架构前缀〉_〈细节〉_〈数据集〉.ipynb                （下划线风格，RNN 系列多用）
+```
+cnn - resnet18 - mnist .ipynb
+ │       │         │
+ │       │         └─ 数据集 / 任务
+ │       └─ 架构（含版本号 / 变体）
+ └─ 模型大类缩写
 ```
 
-例如 `cnn-resnet18-mnist.ipynb` 可以直接读成一句话：**用 CNN 家族的 ResNet-18，在 MNIST 数据集上训练**。掌握这个规律后，README 表格甚至都不用看 Title 列，扫一眼文件名就能分类。
+常见模型大类前缀：
+
+| 前缀 | 含义 | 目录 |
+| --- | --- | --- |
+| （无前缀）`perceptron`、`logistic-regression` | 传统机器学习 | `basic-ml/` |
+| `mlp-` | 多层感知机 | `mlp/` |
+| `cnn-` | 卷积网络（含具体架构名） | `cnn/` |
+| `ae-` | 自编码器家族 | `autoencoder/` |
+| `gan-` / `wgan-` / `dcgan-` | 生成对抗网络家族 | `gan/` |
+| `rnn_` / `char_rnn-` | 循环网络 | `rnn/` |
+| `gnn-` | 图神经网络 | `gnn/` |
+
+两类特殊记号：
+
+- **双下划线 `__`**：把「实现要点」写进文件名，如 `mlp-fromscratch__sigmoid-mse.ipynb`（从零实现、sigmoid 激活、MSE 损失）、`cnn-viz-grad__vgg16-cats-dogs.ipynb`（可视化、对输入求梯度、VGG16、猫狗数据）。看到 `__` 就知道这个 notebook 是某种特定技术组合的示范。
+- **连字符 vs 下划线风格混用**：`cnn/`、`mlp/`、`autoencoder/` 等目录用连字符（`cnn-resnet18-mnist`），而 `rnn/`、`ordinal/`、`cnn-nlp/`、`transformer/` 用下划线（`rnn_simple_imdb`、`CORAL_cement`）。这只是历史习惯，不影响含义，但查文件时两种都要试。
 
 #### 4.3.2 核心流程
 
-拆解一个文件名的流程（以 `cnn-alexnet-cifar10-grouped.ipynb` 为例）：
+拿到一个文件名后，按下面的顺序解码：
 
-```text
-cnn  -  alexnet  -  cifar10  -  grouped
- │        │           │          │
- │        │           │          └─ 变体/技巧后缀：分组卷积版
- │        │           └─ 数据集：CIFAR-10
- │        └─ 架构：AlexNet
- └─ 家族前缀：卷积神经网络
-
-→ 「带分组卷积的 AlexNet，跑 CIFAR-10」
-```
-
-常见家族前缀：`cnn-`（卷积网络）、`mlp-`（多层感知机）、`ae-`（autoencoder 自编码器）、`gan-`/`wgan-`/`dcgan-`（生成对抗网络家族）、`rnn_`（循环网络）、`char_rnn-`（字符级 RNN）。常见数据集后缀：`mnist`、`cifar10`、`celeba`、`quickdraw`、`imdb`、`agnews`、`cement`。常见变体词：`deconv`（转置卷积）、`nopool`（无池化）、`packed`（packed sequences）、`var`（变分）、`cvae`（条件 VAE）、`smoothing`（标签平滑）、`fromscratch`（从零实现）、`he-init`（He 初始化）、`dataparallel`（多卡数据并行）。
+1. **切前缀** → 得到模型大类，确定所在目录；
+2. **找架构名** → 中间一段通常是架构 + 版本号（`resnet18`、`densenet121`、`mobilenet-v3-small`）；基础款直接叫 `basic`（`mlp-basic`、`cnn-basic`、`ae-basic`）；
+3. **看结尾** → 最后一段（若存在）是数据集（`mnist`、`cifar10`、`celeba`、`quickdraw`、`imdb`、`cement`）；没有数据集段通常默认 MNIST；
+4. **认变体词** → `-he-init`（He 初始化）、`-batchnorm`、`-dropout`、`-grouped`（分组卷积）、`-dataparallel`（多 GPU）、`-smoothing`（label smoothing）、`-packed`（packed sequences）等，标明该 notebook 的教学重点；
+5. **跨目录对照** → 去掉目录前缀后文件名相同的三份 notebook，就是同一模型的三框架版本。
 
 #### 4.3.3 源码精读
 
-**① 家族前缀 + 架构 + 数据集**——`pytorch_ipynb/cnn/` 目录下的一批真实文件名（本讲实际浏览所得）：
+**① 基础款命名：`{大类}-basic`**
 
-[pytorch_ipynb/cnn/（目录）](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/pytorch_ipynb/cnn)
+README 中 CNN Basic 小节：
 
-```text
-cnn-resnet18-mnist.ipynb        → ResNet-18 + MNIST
-cnn-resnet34-quickdraw.ipynb    → ResNet-34 + QuickDraw
-cnn-lenet5-cifar10.ipynb        → LeNet-5 + CIFAR-10
-cnn-densenet121-mnist.ipynb     → DenseNet-121 + MNIST
-cnn-mobilenet-v3-small-cifar10.ipynb → MobileNet-v3 small + CIFAR-10
-```
+[README.md:L32-L37](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L32-L37)
 
-同一架构换数据集（resnet18-mnist / resnet34-quickdraw）、同一数据集换架构（lenet5-cifar10 / mobilenet-v3-small-cifar10）构成了漂亮的「网格」，想找任何组合都能按名索骥。
+L36 的 `cnn-basic.ipynb` 与 L37 的 `cnn-he-init.ipynb` 形成对照：前者是「裸 CNN」，后者仅多一个 `-he-init` 变体词，表示在同样结构上重点演示 He 参数初始化。文件名差异 = 教学内容差异。
 
-**② 变体后缀表达技巧差异**：
+**② 架构 × 数据集命名**（LeNet 小节）：
 
-```text
-cnn-alexnet-cifar10-grouped.ipynb   → AlexNet 的分组卷积变体
-cnn-resnet34-cifar10-pinmem.ipynb   → ResNet-34 的 pinned memory（锁页内存）变体
-cnn-resnet18-celeba-dataparallel.ipynb → ResNet-18 的多卡 DataParallel 变体
-```
+[README.md:L76-L82](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L76-L82)
 
-这些后缀正是 README 中「Tips and Tricks」「Parallel Computing」等大类（[README.md:L308-L314](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L308-L314)、[README.md:L383-L388](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L383-L388)）落到磁盘上的形态：**一个技巧 = 一个独立 notebook = 文件名里一个后缀词**。
+同一 LeNet-5 架构依次有 `cnn-lenet5-mnist`（L80）、`cnn-lenet5-cifar10`（L81）、`cnn-lenet5-quickdraw`（L82）三种结尾——架构段不变，只换数据集段。反过来在 MobileNet 小节 [README.md:L87-L94](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L87-L94)，数据集固定为 CIFAR-10，架构段在 `mobilenet-v2` / `mobilenet-v3-small` / `mobilenet-v3-large` 之间变化。README 的表格和文件名共享同一套「可替换维度」。
 
-**③ 自编码器家族的前缀演化**——README 第 189~232 行的 Autoencoders 大区：
+**③ 双下划线命名**：
 
-[README.md:L189-L232](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L189-L232)
+[README.md:L25-L25](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L25-L25)
 
-```text
-ae-basic.ipynb            → 基础全连接自编码器
-ae-deconv.ipynb           → 反卷积（转置卷积）解码器
-ae-deconv-nopool.ipynb    → 反卷积且不用池化
-ae-conv-nneighbor.ipynb   → 最近邻插值上采样解码器
-ae-var.ipynb              → 变分自编码器 VAE
-ae-conv-var.ipynb         → 卷积版 VAE
-ae-cvae.ipynb             → 条件 VAE
-ae-cnn-cvae_no-out-concat.ipynb → 卷积条件 VAE，标签不参与重建损失
-```
+`mlp-fromscratch__sigmoid-mse.ipynb`：`fromscratch`（不用 autograd、手工实现反向传播）+ `sigmoid`（激活函数）+ `mse`（损失函数），一个文件名交代了实现路线的全部关键选择。
 
-从 `ae-` 前缀出发，后缀像搭积木一样叠加出整个家族谱系——读懂名字等于读懂了这组 notebook 的目录页。
+**④ 下划线风格命名**（RNN / 有序回归）：
 
-**④ 双下划线的特殊约定**：
+[README.md:L269-L276](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L269-L276)
 
-[README.md:L25](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L25)
+`rnn_simple_imdb` → simple RNN + IMDb；`rnn_simple_packed_imdb` → 加了 packed sequences；`rnn_lstm_packed_imdb-glove` → LSTM + packed + GloVe 预训练词向量。变体词按需追加，命名像「特性叠加」。
 
-`mlp-fromscratch__sigmoid-mse.ipynb` 中用**双下划线**把「从零实现」与「sigmoid 激活 + MSE 损失」的实现细节隔开。这类极少数文件提醒我们：规律覆盖 95%，个例要单独记。
+[README.md:L161-L168](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L161-L168)
 
-**⑤ RNN 系列的下划线风格**——README 第 260~284 行：
-
-[README.md:L260-L284](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L260-L284)
-
-```text
-rnn_simple_imdb.ipynb             → 单层简单 RNN + IMDb
-rnn_simple_packed_imdb.ipynb      → 加 packed sequences
-rnn_lstm_packed_imdb-glove.ipynb  → LSTM + packed + GloVe 词向量
-rnn_bi_multilayer_lstm_own_csv_agnews.ipynb → 双向多层 LSTM + 自有 CSV + AG News
-char_rnn-charlesdickens.ipynb     → 字符级 RNN 生成狄更斯风格文本
-```
-
-RNN 目录用下划线分层（这批 notebook 成文较早），但「前缀 → 细节堆叠 → 数据集」的骨架完全一致。另外注意 `imdb` 指 IMDb 影评情感分类数据集，`own_csv` 表示「这是教你接入自己 CSV 数据的模板」。
+有序回归一节是 `{方法}_{数据集}` 命名：`baseline_cement`、`CORAL_cement`、`CORN_cement`、`niu2016_cement`……方法名直接取自论文（CORAL/CORN 是两个有序回归方法，niu2016/beckham2016/polat2022 是论文作者+年份）。看到「作者+年份」式命名，就要意识到这个 notebook 是某篇论文的参考实现。
 
 #### 4.3.4 代码实践
 
-**实践目标**：建立「文件名 → 模型语义」的快速解码能力。
+**实践目标**：用文件系统验证命名规律，做到「看名识模型」。
 
 **操作步骤**：
 
-1. 列出一个目录的全部文件名，逐个解码：
+1. 把架构名当检索词，看同一架构覆盖了哪些数据集：
 
-```bash
-ls pytorch_ipynb/cnn/
-ls pytorch_ipynb/autoencoder/
-ls pytorch_ipynb/rnn/
-```
+   ```bash
+   find pytorch_ipynb -name '*resnet18*'
+   find pytorch_ipynb -name '*lenet5*'
+   ```
 
-2. 按名字猜内容再打开验证。例如对以下 4 个文件，先写下你猜的「架构 / 数据集 / 特殊技巧」，再打开 notebook 开头的标题与说明 cell 对照：
+2. 把数据集当检索词，看有多少模型实现用了它：
 
-```text
-pytorch_ipynb/gan/wgan-1.ipynb
-pytorch_ipynb/cnn/nin-cifar10_filter-response-norm.ipynb
-pytorch_ipynb/mlp/mlp-fromscratch__sigmoid-mse.ipynb
-pytorch_ipynb/rnn/rnn_gru_packed_imdb.ipynb
-```
+   ```bash
+   find pytorch_ipynb -name '*mnist*' | wc -l
+   find pytorch_ipynb -name '*cifar10*' | wc -l
+   ```
 
-3. 反向练习：想找「在 CelebA 人脸数据上训练的 VGG-16」，先猜文件名再验证：
+3. 检索双下划线命名的特殊实现：
 
-```bash
-ls pytorch_ipynb/cnn/ | grep -i "vgg16.*celeba"
-```
+   ```bash
+   find pytorch_ipynb -name '*__*'
+   ```
 
-**需要观察的现象**：步骤 2 中你的猜测与 notebook 实际标题的吻合度；步骤 3 中 `grep` 应命中 `cnn-vgg16-celeba.ipynb`（还有一个 `cnn-vgg16-celeba-data-parallel.ipynb` 是它的多卡变体，见 [README.md:L111](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L111)）。
+4. 人肉解码练习：对下面 4 个真实文件名写出「大类 / 架构 / 变体 / 数据集」四段拆解（答案见小练习）：
 
-**预期结果**：多数文件名可被准确解码；解码不出的词（如 `pinmem`、`nin`）记入生词本，查 README 对应行即可弄清（`nin` = Network in Network，见 [README.md:L99-L103](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L99-L103)）。`wgan-1`、`wgan` 与 `gan` 的区别需打开 notebook 确认，此处待本地验证。
+   ```
+   cnn-mobilenet-v3-small-cifar10.ipynb
+   ae-conv-var.ipynb
+   gan-conv-smoothing.ipynb
+   rnn_lstm_bi_imdb.ipynb
+   ```
+
+**需要观察的现象**：
+
+- 第 1 步里 `resnet18` 命中的文件包括 `cnn-resnet18-mnist.ipynb` 与 `cnn-resnet18-celeba-dataparallel.ipynb` 等，结尾的数据集/任务段各不相同；
+- 第 2 步两个数字都不小，说明 MNIST / CIFAR-10 是仓库的「默认练兵场」；
+- 第 3 步命中的是少数几个「技术组合示范」型 notebook。
+
+**预期结果**：所有命令都能返回非空结果；第 4 步你能独立完成拆解并与答案核对。具体输出与仓库版本有关，待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：解码 `cnn-resnet50-celeba-dataparallel.ipynb` 与 `ae-deconv-jaccard.ipynb`。
-**答案**：前者 = ResNet-50 架构 + CelebA 人脸数据 + 多 GPU DataParallel 技巧的 CNN；后者 = 用转置卷积解码、以 Jaccard 距离为重建损失的自编码器（对应 [README.md:L208](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L208)）。
+**练习 1**：拆解 `cnn-mobilenet-v3-small-cifar10.ipynb`。
 
-**练习 2**：`ae-cvae.ipynb` 和 `ae-cvae_no-out-concat.ipynb` 这对文件名的差异对应 README 里哪两个标题？
-**答案**：对应 [README.md:L229-L230](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L229-L230) 的 "Conditional Variational Autoencoder (with labels in reconstruction loss)" 与 "(without labels in reconstruction loss)"——`no-out-concat` 指标签不拼接到解码器输出端、即不参与重建损失。
+**答案**：大类 `cnn`（卷积网络，位于 `cnn/`）；架构 `mobilenet-v3-small`（MobileNet 第三代的 small 规格版）；无额外变体词；数据集 `cifar10`。
 
-**练习 3**：如果仓库未来新增「用 Vision Transformer 在 CIFAR-10 上训练」的 notebook，按命名规律它的文件名大概是什么？
-**答案**：按 CNN 家族的连字符风格，大概率落在 `pytorch_ipynb/cnn/` 或新目录下，形如 `cnn-vit-cifar10.ipynb` 或 `vit-cifar10.ipynb` 之类（架构前缀 + 架构名 + 数据集）。这是规律的外推预测，实际命名以仓库更新为准。
+**练习 2**：拆解 `ae-conv-var.ipynb` 和 `gan-conv-smoothing.ipynb`。
+
+**答案**：`ae-conv-var`：自编码器（`autoencoder/` 目录）+ 卷积版 + 变分（variational），未写数据集说明默认 MNIST，即「卷积变分自编码器」。`gan-conv-smoothing`：GAN（`gan/` 目录）+ 卷积判别器/生成器 + label smoothing 技巧变体，同样是 MNIST。
+
+**练习 3**：`rnn_lstm_bi_imdb.ipynb` 每一段是什么意思？它和 `rnn_simple_imdb.ipynb`、`rnn_lstm_packed_imdb.ipynb` 是什么关系？
+
+**答案**：`rnn` 大类（`rnn/` 目录）+ LSTM 单元 + bi（双向）+ IMDb 数据集。三者是同一任务（IMDb 情感分类）下的特性递进：simple（最朴素 RNN）→ lstm+packed（更强单元且能跳过 padding）→ bi（双向读取序列），对应 README [README.md:L269-L276](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/README.md#L269-L276) 里自上而下的排列顺序，也是本手册 U6 单元的教学顺序。
 
 ## 5. 综合实践
 
 **任务：制作你的专属「模型动物园速查表」。**
 
-1. **克隆并通读**：在本地 `git clone` 本仓库，通读一遍 `README.md`（435 行，10 分钟）。
-2. **建表**：新建一个 Markdown 文件（可放在本讲义目录外你自己的笔记里），做一张三列表格——`模型类别 | 所在目录 | 代表性 notebook 文件名`。要求覆盖至少 8 个大类，例如：
+1. **准备**：把仓库 clone 到本地（或在已有 clone 中），确认 `git log -1` 能看到当前 HEAD。
 
-| 模型类别 | 所在目录 | 代表性 notebook 文件名 |
-| --- | --- | --- |
-| 传统机器学习（线性模型） | `pytorch_ipynb/basic-ml/` | `softmax-regression.ipynb` |
-| 多层感知机 | `pytorch_ipynb/mlp/` | `mlp-basic.ipynb`、`mlp-dropout.ipynb` |
-| 卷积网络 | `pytorch_ipynb/cnn/` | `cnn-resnet18-mnist.ipynb` |
-| 循环网络 | `pytorch_ipynb/rnn/` | `rnn_lstm_packed_imdb.ipynb` |
-| Transformer | `pytorch_ipynb/transformer/` | `distilbert-hf-finetuning.ipynb` |
-| 自编码器 | `pytorch_ipynb/autoencoder/` | `ae-conv-var.ipynb` |
-| 生成对抗网络 | `pytorch_ipynb/gan/` | `dcgan-celeba.ipynb` |
-| ……（继续补充） | | |
+2. **提取索引**：运行 4.1.4 中的 `grep` 命令，把 README 里全部 notebook 链接导出为 `notebook-index.txt`。
 
-3. **标注个人目标**：在表中加一列「我想学」，从全库挑出**你最想学会的 5 个模型**，写出完整相对路径（如 `pytorch_ipynb/cnn/cnn-densenet121-cifar10.ipynb`），并用一句话说明为什么选它。
-4. **交叉验证**：对这 5 个路径逐一 `ls` 确认存在；同时在 README 里找到它们所在的行，记录每行有哪些框架徽章。
-5. **检验镜像约定**：对这 5 个模型，检查 `pytorch-lightning_ipynb/` 与 `tensorflow1_ipynb/` 下是否存在同名文件，在表里标注「有 Lightning 版 / 有 TF1 版 / 仅 PyTorch」。
+3. **整理速查表**：通读 README 的各节标题，为你感兴趣的类别各挑 1~2 个代表模型，整理成一张 Markdown 表（示例代码，格式可自定）：
 
-**产出标准**：这张表就是你后续学习全仓库的导航图——本套讲义 U2~U8 的每一篇，都对应你表里的一行或几行。
+   ```markdown
+   | 模型类别 | 框架目录 | notebook 文件名 | 我想学的原因 |
+   | --- | --- | --- | --- |
+   | CNN/ResNet | pytorch_ipynb | cnn/cnn-resnet18-mnist.ipynb | 学残差连接 |
+   | 生成模型/GAN | pytorch_ipynb | gan/gan.ipynb | 学最简单的 GAN |
+   | ... | ... | ... | ... |
+   ```
+
+4. **锁定 5 个目标**：从速查表中标出**你最想学会的 5 个模型**及其完整文件路径，并给每个写一句「学会它的判据」（例如：能不看 notebook 自己重写训练循环）。
+
+5. **交叉验证**：对你选出的 5 个路径逐个执行 `ls <路径>`，确认文件真实存在；再对照 README 相应行，记下每个模型有哪些框架版本（几个徽章）。
+
+**验收标准**：速查表至少覆盖 5 个不同模型类别；5 个目标路径全部真实存在；你能口头复述每个文件名各段的含义。
+
+这张表就是你后续的学习合同——本手册的单元设计（U2 基础模型 → U3 CNN → U5 生成模型 → U6 序列模型 → U7/U8 进阶）可以和你选的 5 个目标对照排期。
 
 ## 6. 本讲小结
 
-- 本仓库是**以 Jupyter Notebook 为载体的深度学习模型动物园**，没有可安装的包和主程序，学习单位是单个自包含 notebook；`README.md` 是全库唯一总索引。
-- README 按「大类二级标题 → 小类三级标题 → 表格行 → 框架徽章」组织，**徽章颜色即框架**：红色 PyTorch、紫色 Lightning、橙色 TF1，点徽章直达文件。
-- 三个框架目录遵循**镜像式布局**：`pytorch_ipynb/`（121 个 notebook，主体，独享 6 个 `helper_*.py`）、`pytorch-lightning_ipynb/`（39 个，孪生版 + 数据增强专题）、`tensorflow1_ipynb/`（22 个，基础模型对照）；同名 notebook 相对路径完全一致，仅顶层目录不同。
-- `templates/pytorch_lightning/` 是通用实验骨架，不是模型收藏，服务于「改模板跑实验」的用法。
-- notebook 命名高度规律：**家族前缀 - 架构 - [变体] - 数据集**（RNN 系用下划线风格），扫文件名即可完成粗分类。
-- README 索引偶尔滞后（如 Grouped AlexNet 一行链接与实际文件名词序不符），**徽章打不开时以目录为准**。
+- `rasbt/deeplearning-models` 是一个 **notebook 版模型动物园**：121（PyTorch）+ 39（Lightning）+ 22（TF1）个自包含 Jupyter Notebook，不是可安装的软件包。
+- **README 是总目录**：按模型类别分节、每行 `Title | Dataset | Description | Notebooks` 四列，徽章即链接（红=PyTorch、紫=Lightning、橙=TF1），大量 `TBD` 只是占位。
+- **三个框架目录分工明确**：`pytorch_ipynb` 是完整主库且独享 6 个 `helper_*.py` 共享模块；`pytorch-lightning_ipynb` 是工程化示范；`tensorflow1_ipynb` 是历史对照；`templates/` 提供批量实验模板。
+- **同名对齐**是仓库的组织约定：同一模型在多个框架目录下使用相同文件名，README 一行挂几个徽章就有几个版本。
+- **文件名即摘要**：`{大类}-{架构/变体}-{数据集}` 三段式 + `__` 技术组合记号 + 连字符/下划线两种历史风格，学会解码就能「看名识模型」。
+- 仓库除模型外还收录大量**机制类内容**（数据加载、验证集划分、梯度检查点、多 GPU、确定性、autograd 细节），集中在 Mechanics 两节，是进阶单元的素材。
 
 ## 7. 下一步学习建议
 
-下一讲（`u1-l2-setup-first-notebook.md`，环境搭建与第一个 Notebook）将带你安装 PyTorch 环境、实际运行全库最简单的 `pytorch_ipynb/basic-ml/perceptron.ipynb`，并拆解几乎所有 notebook 共有的「Imports → Settings/Dataset → Model → Training → Evaluation」五段式结构——那是读懂每一个 notebook 的通用钥匙。
+下一讲（U1-L2《环境搭建与第一个 Notebook》）将动手搭建 Python 环境，完整运行 `pytorch_ipynb/basic-ml/perceptron.ipynb`，并认识几乎所有 notebook 共有的「Imports → Settings/Dataset → Model → Training → Evaluation」五段式结构。
 
-再往下一讲（`u1-l3-helper-modules.md`）会精读 `pytorch_ipynb/` 下 6 个 `helper_*.py` 共享模块。如果你想提前热身，可以先通读 `README.md` 中你感兴趣的模型行，并试着打开一两个 notebook 感受其结构。
+在进入下一讲之前，建议你：
+
+1. 把本讲的速查表放在手边，后续每学一个模型就在表上打钩；
+2. 在 GitHub 上浏览一次 [`pytorch_ipynb/` 根目录](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/pytorch_ipynb/helper_data.py)下的 6 个 `helper_*.py` 文件名（可从 [helper_data.py](https://github.com/rasbt/deeplearning-models/blob/59beda3aa25337e576564f1c18c6edd26f9f30e3/pytorch_ipynb/helper_data.py) 入手），混个眼熟即可（U1-L3 会精读）；
+3. 如果对「模型 zoo」这个概念还好奇，可以对照看 torchvision 的模型文档，体会「教学实现」与「生产实现」的差别——本仓库的笔记本保留了完整的推导与注释，这正是它适合学习的原因。
