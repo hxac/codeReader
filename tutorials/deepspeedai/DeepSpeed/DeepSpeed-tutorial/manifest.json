@@ -1,21 +1,20 @@
 {
-  "head": "dc046b15d7a58f6c8dacba435508b52b1ebc620c",
+  "head": "d8241a9ba266405e1a58fadf19e24b2370f6d7fa",
   "project": "DeepSpeed",
-  "rationale": "DeepSpeed 是一个超大规模深度学习训练/推理优化库（v0.19.9，Python 包 + CUDA/C++ 内核 + JIT 编译体系），核心链路是「deepspeed 启动器 -> initialize() -> DeepSpeedConfig 配置解析 -> DeepSpeedEngine -> ZeRO/并行/混合精度优化器 -> 检查点」。大纲按\"由外到内、由用到造\"设计：单元 1-2 让读者从零认识项目定位、目录结构、安装构建与核心 API（initialize、配置、引擎、训练循环），这是阅读一切后续源码的地基；单元 3 讲运行时基础设施（加速器抽象、deepspeed.comm、进程组、多节点启动），因为 ZeRO 与所有并行策略都构建在这层通信抽象之上；单元 4 讲混合精度与优化器包装体系，是理解 ZeRO 优化器的直接前置；单元 5 是全手册核心（8 篇），按 ZeRO-1/2 -> zero.Init -> ZeRO-Offload -> ZeRO-3 -> 参数协调器 -> ZeRO-Infinity -> 检查点导出的依赖链拆解最大的 runtime/zero 模块；单元 6 覆盖张量/序列/流水线/专家四类并行及其组合；单元 7 进入推理引擎（v1、v2、ragged 批处理与 Hybrid Engine）；单元 8 讲激活检查点、检查点引擎与 Universal Checkpoint、DeepCompile、监控剖析与自动调优等工程化机制；单元 9 回到内核工程（OpBuilder JIT、fused CUDA 算子）和 ZenFlow/SuperOffload 前沿方向，并以测试体系与贡献流程收尾，让读者具备二次开发能力。每篇讲义只讲一个主题，引用 1-6 个真实源码文件，并配一个可上机验证的实践任务。",
+  "rationale": "增量更新（dc046b1 -> d8241a9，版本推进到 0.19.10）：九单元主线结构不变，仍按「入门 -> 核心用法 -> 运行时基础设施 -> 混合精度 -> ZeRO 核心 -> 多维并行 -> 推理引擎 -> 高级机制 -> 内核工程」由外到内推进。本周期代码变化集中在四条线并据此调整大纲：一是新增确定性执行策略（runtime/determinism.py 挂入 DeepSpeedConfig 与引擎构造，triton group_gemm/swiglu 增加 IEEE 精度路径，transformer 内核校验 stochastic_mode），在单元 8 新增 u8-l8 专讲 deterministic_mode；二是新增 affine_transfer_executor.py，与既有 affine.py/affine_transfer.py 构成「仿射分片描述 -> 迁移计划 -> 有界 peer staging 执行」三件套，新增 u8-l7 并挂在 Universal Checkpoint（u8-l3）与 AutoTP（u6-l1）之后；三是 AutoTP 支持冻结模型与按模型（而非进程级）管理训练模式，auto_tp/layers/tp_shard/replace_module/engine 联动改动，u6-l1 重度 update，u2-l3、u2-l4 轻度 update；四是 XPU 通过 Level Zero ext_memmap 用 ctypes 注册 pinned host memory，充实 u3-l1 的多后端实现案例。其余小改动按影响面标记：stage3 设备串改用公共 accelerator API（u5-l6 update）、SwiGLU eager fallback 保持 fp32 中间态与 stochastic_mode 校验（u9-l2 update 并补充源文件）、config-json 新增 deterministic_mode 文档（u2-l2 update）、版本号变化（u1-l1 update）；未受影响的讲义全部 keep。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
           "learning_goals": [
             "说出 DeepSpeed 解决的核心痛点：显存墙、通信墙、训练吞吐",
             "列举 ZeRO、ZeRO-Infinity、3D-Parallelism、Ulysses、MoE 等系统创新点",
-            "了解仓库版本、文档入口和与 HuggingFace/Accelerate 等框架的集成关系"
+            "了解仓库版本（本周期推进到 0.19.10）、文档入口和与 HuggingFace/Accelerate 等框架的集成关系"
           ],
           "level": "beginner",
           "minimal_modules": [
@@ -31,10 +30,10 @@
             "version.txt"
           ],
           "title": "DeepSpeed 项目全景：大模型训练为什么需要它",
-          "topic": "介绍 DeepSpeed 的定位：面向超大模型训练与推理的优化库。通过 README 和官方文档了解 ZeRO、3D 并行、ZeRO-Infinity 等核心创新，以及项目当前版本与生态位。"
+          "topic": "介绍 DeepSpeed 的定位：面向超大模型训练与推理的优化库。通过 README 和官方文档了解 ZeRO、3D 并行、ZeRO-Infinity 等核心创新，以及项目当前版本（0.19.10）与生态位。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -62,7 +61,7 @@
           "topic": "逐一导览仓库顶层目录：deepspeed 主包、csrc CUDA 内核、op_builder 构建器、bin CLI、tests、docs。重点是 deepspeed/__init__.py 的导出内容，建立后续所有讲义的代码坐标系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -91,7 +90,7 @@
           "topic": "解析 setup.py 如何决定哪些 CUDA/C++ 算子被预编译、哪些留待运行时 JIT，以及 requirements 的 extras 划分。理解 op_builder 目录在安装期与 deepspeed/ops/op_builder 在运行期的双轨关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -120,15 +119,15 @@
           "topic": "梳理 bin/deepspeed 启动器入口与 launch.py 的参数分发，以及 ds_report 如何探测环境。掌握单机/多机训练的启动方式，为后面所有实践任务打基础。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "初识 DeepSpeed：定位、构建与启动"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l1",
             "u1-l3"
@@ -156,7 +155,7 @@
           "topic": "精读 deepspeed/__init__.py 中的 initialize()：参数如何解析、引擎类型如何选择（训练引擎/流水线引擎/推理引擎）、config 字符串与字典两种传入方式。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l1"
           ],
@@ -165,26 +164,29 @@
           "learning_goals": [
             "掌握 train_batch_size、micro_batch_size、gradient_accumulation_steps 三者关系",
             "追踪一个配置项从 JSON 到引擎属性的读取链路",
+            "了解 deterministic_mode 等新增顶层布尔开关在 _do_sanity_check 前经由 determinism.configure_determinism 挂载的方式",
             "学会用 DeepSpeedConfigWriter 生成配置文件"
           ],
           "level": "beginner",
           "minimal_modules": [
             "DeepSpeedConfig 构造",
+            "configure_determinism 挂载点",
             "DeepSpeedConfigWriter",
             "batch size 推导公式"
           ],
           "order": 2,
-          "practice_task": "手写一份包含 bf16、zero stage 2、offload 的完整 JSON 配置，加载进 DeepSpeedConfig 并断言 gradient_accumulation_steps 等推导值与手算一致。",
+          "practice_task": "手写一份包含 bf16、zero stage 2、offload 与 deterministic_mode 的完整 JSON 配置，加载进 DeepSpeedConfig 并断言 gradient_accumulation_steps 等推导值与手算一致，同时验证 deterministic_mode 属性被正确设置。",
           "source_files": [
             "deepspeed/runtime/config.py",
             "deepspeed/runtime/config_utils.py",
+            "deepspeed/runtime/determinism.py",
             "docs/_pages/config-json.md"
           ],
           "title": "配置系统：从 JSON 到 DeepSpeedConfig",
-          "topic": "解析 DeepSpeedConfig 如何校验并展开 JSON 配置的 batch size、优化器、调度器、并行度等字段，以及 DeepSpeedConfigWriter 的反向生成能力。"
+          "topic": "解析 DeepSpeedConfig 如何校验并展开 JSON 配置的 batch size、优化器、调度器、并行度等字段，新增的 deterministic_mode 顶层开关如何在配置构造期被解析，以及 DeepSpeedConfigWriter 的反向生成能力。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l2"
           ],
@@ -193,24 +195,27 @@
           "learning_goals": [
             "按顺序列出引擎构造的 8 个关键阶段",
             "理解 optimizer、basic_optimizer、engine.optimizer 三层包装关系",
-            "弄清 modules_to_save、external parameters 等特殊注册机制在初始化中何时生效"
+            "说明 deterministic_mode 在引擎构造早期应用确定性策略的时机与前提（CUBLAS_WORKSPACE_CONFIG 检查）",
+            "弄清 modules_to_save、external parameters、AutoTP 冻结参数记录（_autotp_frozen_replicated_params）等特殊注册机制在初始化中何时生效"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "_configure_with_arguments",
+            "apply_determinism 应用点",
             "优化器包装链",
             "并行组初始化调用点"
           ],
           "order": 3,
-          "practice_task": "在 DeepSpeedEngine.__init__ 中按执行顺序整理一份初始化阶段清单（配置、专家并行、AutoTP、ZeRO、优化器、检查点加载），并给每个阶段标注对应源码行号。",
+          "practice_task": "在 DeepSpeedEngine.__init__ 中按执行顺序整理一份初始化阶段清单（配置、确定性策略、专家并行、AutoTP、ZeRO、优化器、检查点加载），并给每个阶段标注对应源码行号。",
           "source_files": [
-            "deepspeed/runtime/engine.py"
+            "deepspeed/runtime/engine.py",
+            "deepspeed/runtime/determinism.py"
           ],
           "title": "引擎构造：DeepSpeedEngine.__init__ 全流程",
-          "topic": "逐段阅读 DeepSpeedEngine 构造函数：参数配置、AutoEP/AutoTP 注入、优化器包装（fp16/bf16/ZeRO）、数据加载器、监控、检查点加载等阶段的先后顺序与交互。"
+          "topic": "逐段阅读 DeepSpeedEngine 构造函数：参数配置、确定性策略应用（deterministic_mode）、AutoEP/AutoTP 注入（含冻结参数记录）、优化器包装（fp16/bf16/ZeRO）、数据加载器、监控、检查点加载等阶段的先后顺序与交互。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l3"
           ],
@@ -219,12 +224,14 @@
           "learning_goals": [
             "画出 train_batch 一次调用的内部时序图",
             "解释 is_gradient_accumulation_boundary 对梯度同步频率的影响",
+            "描述 _backward_prologue 中对 AutoTP 冻结复制参数的防御性检查（unfreeze 后训练会静默漂移，引擎改为直接报错）",
             "实现不带 DeepSpeed 引擎的手动 backward/step（unmanaged 模式）"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "train_batch 状态机",
             "梯度累积边界判定",
+            "_backward_prologue 防御检查",
             "DeepSpeedDataLoader 迭代协议"
           ],
           "order": 4,
@@ -235,18 +242,18 @@
             "deepspeed/runtime/base_optimizer.py"
           ],
           "title": "训练主循环：train_batch、backward 与 step",
-          "topic": "追踪一次 train_batch 调用的完整链路：数据迭代、前向、loss 缩放、backward、梯度边界判定、优化器 step、LR 调度与监控写入。"
+          "topic": "追踪一次 train_batch 调用的完整链路：数据迭代、前向、loss 缩放、backward（含 _backward_prologue 中新增的 AutoTP 冻结参数检查）、梯度边界判定、优化器 step、LR 调度与监控写入。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "核心用法：initialize 与训练引擎"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u1-l2"
           ],
@@ -255,27 +262,30 @@
           "learning_goals": [
             "列举 AbstractAccelerator 定义的 20+ 设备无关接口",
             "解释 real_accelerator.py 的按环境变量/库探测加载机制",
+            "以 XPU 后端为例，说明一个 accelerator 如何绕过 torch、用 ctypes 直接驱动 Level Zero ext_memmap 扩展注册 pinned host memory",
             "理解 AGENTS 规则『禁止直接 import torch.distributed』背后的设计原因"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "AbstractAccelerator 接口",
             "real_accelerator 探测器",
-            "CUDA 实现"
+            "CUDA 实现",
+            "XPU 的 Level Zero pinned memory 注册"
           ],
           "order": 1,
-          "practice_task": "阅读 abstract_accelerator.py 中的方法签名，挑 5 个关键方法（如 available_memory、communication_backend_name）对比 cuda_accelerator.py 与 cpu_accelerator.py 的实现差异并列表总结。",
+          "practice_task": "阅读 abstract_accelerator.py 中的方法签名，挑 5 个关键方法（如 available_memory、communication_backend_name）对比 cuda_accelerator.py 与 cpu_accelerator.py 的实现差异并列表总结；再对照 accelerator/xpu_accelerator.py 中新增的 _l0_loader 与 pinned memory 注册路径，总结「torch 通道不可用时后端自力更生」的实现模式。",
           "source_files": [
             "deepspeed/accelerator/abstract_accelerator.py",
             "deepspeed/accelerator/real_accelerator.py",
             "deepspeed/accelerator/cuda_accelerator.py",
-            "deepspeed/accelerator/cpu_accelerator.py"
+            "deepspeed/accelerator/cpu_accelerator.py",
+            "accelerator/xpu_accelerator.py"
           ],
           "title": "加速器抽象层：一套代码支持多种硬件",
-          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端。"
+          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端，并以本周期 XPU 通过 Level Zero ZE_extension_external_memmap_sysmem 注册页锁定主机内存为例展示后端深度适配。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -304,7 +314,7 @@
           "topic": "解析 comm 包如何包装 torch.distributed（nccl/gloo/mpi）并提供 init_distributed、allgather、reduce 等统一 API，以及 ccl/mori 等非 CUDA 后端的适配方式。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -331,7 +341,7 @@
           "topic": "精读 groups.py：data/tensor/pipeline/expert/zero 各并行维度的进程组如何创建、缓存与查询，这是 ZeRO 与所有并行策略的坐标系统。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4"
           ],
@@ -359,15 +369,15 @@
           "topic": "阅读 runner.py 的 hostfile 解析、include/exclude 资源筛选与 multinode_runner 的远端命令拼装，理解从 deepspeed 命令到每个节点 python 训练脚本的完整链路。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "运行时基础设施：加速器、通信与进程组"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u2-l4"
@@ -395,7 +405,7 @@
           "topic": "解读 loss_scaler.py 中静态/动态 LossScaler：溢出检测、scale 窗口调整、scale_wrt_gas 的含义，以及 fp16 训练为何必须配合 loss scaling。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -404,7 +414,7 @@
           "learning_goals": [
             "描述 fp16 梯度到 fp32 主权重的拷贝时机",
             "对比 fused 与 unfused 两条路径的适用条件",
-            "理解 zero_grad/sstep 在包装层中的委托关系"
+            "理解 zero_grad/step 在包装层中的委托关系"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -423,7 +433,7 @@
           "topic": "对比 unfused_optimizer 与 fused_optimizer：如何维护 fp32 主权重、如何调用 FusedAdam 与 CPU 端变体，以及 zero_grad/step 的包装逻辑。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -451,7 +461,7 @@
           "topic": "解读 BF16_Optimizer：为何 bf16 不需要 loss scaling、fp32 主权重可选策略（keep_in_fp32）、以及新版本引入的低精度 master state 支持。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -478,15 +488,15 @@
           "topic": "阅读 lr_schedules.py：WarmupLR/WarmupDecayLR 等内置调度器的实现，get_lr_scheduler 工厂，以及引擎如何在梯度累积边界推进调度器。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "混合精度与优化器包装体系"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -514,7 +524,7 @@
           "topic": "综述 ZeRO 的动机（optimizer state/gradient/parameter 三级切分）与 DeepSpeed 中 zero 包的文件布局、配置类继承结构，为后续 7 篇建立框架。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u3-l2"
@@ -542,7 +552,7 @@
           "topic": "精读 partition_parameters.py：模型构建期如何在线实例化即切分参数、padding/对齐策略、NoGather 优化以及 external parameter 注册。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -550,7 +560,7 @@
           "id": "u5-l3",
           "learning_goals": [
             "追踪 reduce 的流水线深度与 bucket 生成算法",
-            "解释 deepspeed.zero градIENT 与平均化的两种模式",
+            "解释 deepspeed.zero 梯度平均化的两种模式",
             "定位 step 中 flatten/reduce_scatter/allgather 的调用顺序"
           ],
           "level": "intermediate",
@@ -560,7 +570,7 @@
             "step/zero_grad"
           ],
           "order": 3,
-          "practice_task": "在两卡 ZeRO-2 训练中把 IPG bucket 调成不同大小（通过 contigious_gradients 与 overlap_comm 组合），对比每步耗时与通信量，解释 bucket 对吞吐的影响。",
+          "practice_task": "在两卡 ZeRO-2 训练中把 IPG bucket 调成不同大小（通过 contiguous_gradients 与 overlap_comm 组合），对比每步耗时与通信量，解释 bucket 对吞吐的影响。",
           "source_files": [
             "deepspeed/runtime/zero/stage_1_and_2.py",
             "deepspeed/runtime/zero/config.py"
@@ -569,7 +579,7 @@
           "topic": "精读 stage_1_and_2.py 的 DeepSpeedZeroOptimizer：独立并行梯度（IPG）bucket、overlap 通信、梯度 reduce-scatter 与扁平化缓冲区管理。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3",
             "u3-l1"
@@ -598,7 +608,7 @@
           "topic": "解读 ZeRO-Offload 的实现：优化器状态与 fp32 梯度卸载到 CPU pinned memory、cpu_adam 内核的调用方式，以及单一/双重 offload 的区别。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -626,7 +636,7 @@
           "topic": "解读 parameter_offload.py 与 partitioned_param_coordinator.py：module hook 如何按需 allgather 参数、预取下一层参数、以及 parameter_offload 的 ds_status 状态机。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u5-l5",
             "u4-l1"
@@ -636,11 +646,13 @@
           "learning_goals": [
             "列出 stage3 step 中 reduce_scatter 参数梯度与更新 ds_tensor 的顺序",
             "解释 contiguous_memory_allocator 如何降低碎片",
+            "说明 partial offload 时子组设备串如何通过公共 accelerator API（device_name()）而非私有 _name 构造",
             "理解 reduce_scatter 配置项对性能的影响"
           ],
           "level": "advanced",
           "minimal_modules": [
             "DeepSpeedZeroOptimizer_Stage3.step",
+            "subgroup_to_device 与 partial_offload",
             "reduce_bucket 与 allgather bucket",
             "contiguous 分配器"
           ],
@@ -652,10 +664,10 @@
             "deepspeed/runtime/zero/partitioned_param_profiler.py"
           ],
           "title": "ZeRO-3 优化器：stage3 主循环与连续内存",
-          "topic": "精读 stage3.py 的 DeepSpeedZeroOptimizer_Stage3：step 中梯度 reduce-scatter、参数按分区更新、contiguous memory 分配，以及与 stage1/2 共享的 loss scaling 机制。"
+          "topic": "精读 stage3.py 的 DeepSpeedZeroOptimizer_Stage3：step 中梯度 reduce-scatter、参数按分区更新、partial offload 子组设备分配（改用 get_accelerator().device_name() 公共接口）、contiguous memory 分配，以及与 stage1/2 共享的 loss scaling 机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l4",
             "u5-l5"
@@ -686,7 +698,7 @@
           "topic": "解读 swap_tensor 包与 nvme/io_engine：参数/优化器状态在 GPU/CPU/NVMe 三级存储间的交换、异步 IO 内核（csrc/aio）与 pipelined swapper 的实现。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l3",
             "u5-l6"
@@ -716,15 +728,15 @@
           "topic": "解读引擎 save/load_checkpoint 对 ZeRO 分片状态的处理：优化器状态/参数/调度器状态如何按 rank 保存，zero_to_fp32 如何按需重组出完整 fp32 权重。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "ZeRO 显存优化（核心单元）"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u2-l3",
             "u3-l3"
@@ -732,29 +744,33 @@
           "filename": "u6-l1-autotp.md",
           "id": "u6-l1",
           "learning_goals": [
-            "解释 AutoTPMeta 如何从模型 config 推断切分维度",
+            "解释 AutoTPMeta 如何从模型 config 推断切分维度，以及新增的 training 字段如何让每个模型记住自己被切分时的训练模式",
+            "解释 training_mode=None 时层按模型级而非进程级跟随 set_autotp_mode 的语义（冻结 teacher + 训练 student 共存于一个进程）",
+            "理解 register_replicated_grad_hooks 对冻结参数（requires_grad=False）跳过注册并返回清单、引擎在 backward 前拒绝后续 unfreeze 的防御逻辑",
             "对比推理注入与训练模式下 TP 的不同实现路径",
             "实现一个自定义 policy 适配自己的模型结构"
           ],
           "level": "intermediate",
           "minimal_modules": [
-            "AutoTPMeta 切分推断",
+            "AutoTPMeta 切分与 training 模式推断",
             "policy 策略",
-            "模块替换流程"
+            "模块替换流程",
+            "冻结参数的梯度 all-reduce 处理"
           ],
           "order": 1,
-          "practice_task": "用 HuggingFace 的小模型（如 sshleifer/tiny-gpt2）开 tensor_parallel.size=2，遍历替换后的模型打印每个线性层的 in/out features，验证按 head 切分是否正确。",
+          "practice_task": "用 HuggingFace 的小模型（如 sshleifer/tiny-gpt2）开 tensor_parallel.size=2，遍历替换后的模型打印每个线性层的 in/out features，验证按 head 切分是否正确；再做一个实验：把某层参数 freeze 后传入 AutoTP（training_mode 显式指定），观察 register_replicated_grad_hooks 的跳过清单与引擎 backward 时的报错信息。",
           "source_files": [
             "deepspeed/module_inject/auto_tp.py",
             "deepspeed/module_inject/tp_shard.py",
+            "deepspeed/module_inject/layers.py",
             "deepspeed/module_inject/policy.py",
             "deepspeed/module_inject/replace_module.py"
           ],
           "title": "AutoTP：自动张量并行注入",
-          "topic": "解读 module_inject 包：如何按 policy 识别模型中的线性/注意力层，tp_shard 如何按 head 维度切分权重并注入并行版 Linear。"
+          "topic": "解读 module_inject 包：如何按 policy 识别模型中的线性/注意力层，tp_shard 如何按 head 维度切分权重并注入并行版 Linear；本周期新增按模型管理 AutoTP 训练模式（AutoTPMeta.training、TensorParallel_Layer.is_training_mode 的 per-model 语义）与冻结模型支持（frozen replicated params 的跳过与引擎侧 unfreeze 防线）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l3"
           ],
@@ -782,7 +798,7 @@
           "topic": "解读 sequence/layer.py 的 DistributedAttention：all-to-all 把序列维切分转为 head 维切分，以及 auto_sp 自动判定哪些层可做序列并行。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -809,7 +825,7 @@
           "topic": "解读 pipe/module.py 的 layer_specs 声明式分层与 topology.py 的多维并行拓扑计算：进程如何映射到 (data/tensor/model) 网格、层如何按 stage 划分。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -818,7 +834,7 @@
           "learning_goals": [
             "按时间轴画出 PipeSchedule 的 micro-batch 流动图",
             "区分 train_batch 在引擎与流水线引擎中的不同实现",
-            "解释气泡时间占比公式 bubble=（p-1）/m 的含义"
+            "解释气泡时间占比公式 bubble=(p-1)/m 的含义"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -838,7 +854,7 @@
           "topic": "解读 schedule.py 的 1F1B/填空式调度类与 PipelineEngine 如何驱动 micro-batch 在 stage 间流动，p2p 通信的封装，以及与 DeepSpeedEngine 的继承关系。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u3-l3"
@@ -868,7 +884,7 @@
           "topic": "解读 moe 包的 DeepSpeedMoE 层：gate 路由、all-to-all token 分发、experts 的分组实现与负载均衡 loss。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l5"
           ],
@@ -897,15 +913,15 @@
           "topic": "解读 module_inject/auto_ep* 系列与 moe/ep_* 内核：如何自动把 HuggingFace MoE 模型转换为专家并行布局，fused kernel 的 Triton 实现。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "多维并行：张量、序列、流水线与专家"
     },
     {
       "id": "u7",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -933,7 +949,7 @@
           "topic": "解读 inference/engine.py：如何按 policy 把 HF 模型的注意力/前向层替换为 DeepSpeed 高性能 kernel，以及 mp_size 张量并行推理的支持。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -962,7 +978,7 @@
           "topic": "解读 v2 目录的重构版推理引擎：engine_v2 的装配流程、配置系统、参数对象与模块实现的注册机制。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -991,7 +1007,7 @@
           "topic": "解读 ragged 子系统：变长 batch 的统一表示、blocked allocator 显存池与 KV cache 的生命周期管理，这是 v2 高吞吐推理的关键。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2",
             "u2-l4"
@@ -1021,15 +1037,15 @@
           "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环。"
         }
       ],
+      "level": "advanced",
       "order": 7,
       "title": "推理引擎与混合引擎"
     },
     {
       "id": "u8",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -1057,13 +1073,12 @@
           "topic": "解读 DeepSpeed 定制版 checkpointing：可配置 partition/contiguous/CPU offload 的激活重计算机制，以及与 PyTorch 原生 checkpoint 的差异。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
           "filename": "u8-l2-checkpoint-engines.md",
           "id": "u8-l2",
-          "learning_modules": null,
           "learning_goals": [
             "描述 checkpoint engine 的统一接口",
             "对比 torch 保存与 decoupled/fast 引擎的实现差异",
@@ -1087,7 +1102,7 @@
           "topic": "解读 checkpoint_engine 包：torch/fast/decoupled 三种引擎的可插拔抽象，以及引擎如何决定状态实际写到哪（本地盘、共享存储、异步服务）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u8-l2",
             "u5-l8"
@@ -1117,7 +1132,7 @@
           "topic": "解读 universal checkpoint：定义与具体训练拓扑无关的参数存储格式，使 ZeRO-3、3D 并行、不同 world_size 之间可以互相加载权重。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l6",
             "u2-l4"
@@ -1148,7 +1163,7 @@
           "topic": "解读 compile 包：用 FX 捕获训练图，把 ZeRO-3 的参数 allgather/reduce-scatter 与计算自动重叠（list scheduling），以及 inductor 后端集成。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l4"
           ],
@@ -1157,7 +1172,7 @@
           "learning_goals": [
             "配置 tensorboard/wandb/csv 三种 monitor 的 JSON 字段",
             "解读 FLOPsProfiler 报告中各列的含义",
-            "用 profiling 结出模型的理论加速上限"
+            "用 profiling 估计模型的理论加速上限"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -1177,7 +1192,7 @@
           "topic": "解读 monitor 包的标签聚合监控机制与 flops_profiler 的逐层 FLOPs/内存/延迟剖析能力。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u1-l4"
@@ -1205,17 +1220,85 @@
           ],
           "title": "自动调优 Autotuning",
           "topic": "解读 autotuning 包：如何自动探索 ZeRO stage、bucket size、offload 等关键配置并选择吞吐最优组合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l3",
+            "u6-l1"
+          ],
+          "filename": "u8-l7-affine-shard-transfer.md",
+          "id": "u8-l7",
+          "learning_goals": [
+            "解释 affine.py 如何用仿射映射（affine map）统一描述 ZeRO/AutoTP/AutoEP 产生的参数分片布局",
+            "追踪 plan_transfer 如何为「从一种切分搬到另一种切分」生成按轮次组织的搬运计划",
+            "解读新增的 affine_transfer_executor：先对计划摘要（plan_digest）达成共识，再按「先挂接收后发发送」的轮次协议执行，用 StagingBudget 约定每 peer 的在途字节上限",
+            "理解 TransferEndpoints 为何把源 rank 与目标 rank 分成两个独立映射（两个 rank 命名空间不是同一个 world_size）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "affine 分片描述",
+            "TransferPlan 计划生成",
+            "execute_transfer 轮次执行与 staging 预算",
+            "计划摘要共识与错误拒止"
+          ],
+          "order": 7,
+          "practice_task": "参考 tests/unit/checkpoint/test_affine_transfer_executor.py 的写法，用 plan_transfer + execute_transfer 在两个进程组之间完成一次小型参数重分片，验证目标分片内容与「先 gather 完整张量再 re-scatter」的朴素做法逐元素一致，再调小 StagingBudget(bytes_per_peer) 观察轮次数变化。",
+          "source_files": [
+            "deepspeed/checkpoint/affine.py",
+            "deepspeed/checkpoint/affine_transfer.py",
+            "deepspeed/checkpoint/affine_transfer_executor.py",
+            "docs/code-docs/source/affine-transfer.rst",
+            "tests/unit/checkpoint/test_affine_transfer_executor.py"
+          ],
+          "title": "Affine 分片迁移：跨切分方式的参数直搬",
+          "topic": "本周期新增的 affine_transfer_executor.py 与既有 affine.py/affine_transfer.py 构成三件套：用仿射映射描述任意并行方式产生的分片、规划两种分片间的搬运、并以有界 peer staging 直接在分片缓冲区间执行计划而不重建完整逻辑张量，这是 Universal Checkpoint 之外另一条跨并行度迁移参数的底层通道。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u2-l3"
+          ],
+          "filename": "u8-l8-deterministic-mode.md",
+          "id": "u8-l8",
+          "learning_goals": [
+            "解释 deterministic_mode 的设计定位：opt-in 的确定性执行策略，独立于数值兼容性，且当前仅支持 NVIDIA CUDA（KLXPU/ROCm 明确拒绝）",
+            "追踪配置到生效的完整链路：DeepSpeedConfig 构造期 configure_determinism 解析布尔开关 -> 引擎构造早期 apply_determinism 应用 torch.use_deterministic_algorithms 与 TF32/cuDNN 开关",
+            "说明 CUBLAS_WORKSPACE_CONFIG 前置环境变量检查的必要性（cuBLAS workspace 必须在 CUDA 初始化前确定）",
+            "理解确定性要求如何传导到 Triton 内核（group_gemm 的 USE_IEEE 路径用 input_precision=\"ieee\" 替代 TF32 tensor core）",
+            "辨析该开关的边界：不改变精度/NCCL 算法/并行与重叠，不保证自定义内核与分布式调度的比特级可重复"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "configure_determinism 配置解析",
+            "apply_determinism 引擎应用点与后端限制",
+            "Triton 内核的 IEEE 精度路径",
+            "确定性边界与文档声明"
+          ],
+          "order": 8,
+          "practice_task": "在 NVIDIA CUDA 环境下先设 CUBLAS_WORKSPACE_CONFIG=:4096:8，再以 deterministic_mode=true 跑两次相同随机种子的 SimpleModel 训练，对比逐步 loss 与最终权重哈希是否一致；随后在 CPU 后端重复实验复现 ValueError，并对照 tests/unit/runtime/test_determinism.py 检查你的断言方式。",
+          "source_files": [
+            "deepspeed/runtime/determinism.py",
+            "deepspeed/runtime/engine.py",
+            "deepspeed/runtime/config.py",
+            "deepspeed/ops/triton_ops/group_gemm_triton.py",
+            "docs/_tutorials/deterministic-mode.md",
+            "tests/unit/runtime/test_determinism.py"
+          ],
+          "title": "确定性执行：deterministic_mode 从配置到内核",
+          "topic": "本周期新增的 opt-in 确定性执行策略：determinism.py 负责解析与应用（引擎构造早期），配套 triton group_gemm/swiglu 内核增加 IEEE 精度路径、transformer 内核拒绝 stochastic_mode 组合，并辅以专门教程与测试，讲清它能保证什么、不能保证什么。"
         }
       ],
+      "level": "advanced",
       "order": 8,
-      "title": "高级机制：检查点、编译、监控与调优"
+      "title": "高级机制：检查点、迁移、编译、确定性、监控与调优"
     },
     {
       "id": "u9",
-      "level": "advanced",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -1244,7 +1327,7 @@
           "topic": "精读 OpBuilder 基类：环境探测（nvcc/ROCm/hipify）、编译缓存、版本指纹与加载失败自动 JIT 的机制，以及 ALL_OPS 注册表。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u9-l1"
           ],
@@ -1253,29 +1336,32 @@
           "learning_goals": [
             "阅读 multi_tensor_apply 的 kernel launch 与分块策略",
             "解释 frontend 如何用多 tensor 批处理摊薄 launch 开销",
+            "理解 DeepSpeedTransformerLayer 新增的 stochastic_mode 与确定性执行互斥校验（_validate_stochastic_mode 在构造/前向/反向三处把关）",
+            "分析 clamped SwiGLU eager fallback 为何改为在 fp32 中间态计算再转回输入 dtype（OAI 变体中先缩放后 sigmoid 的舍入放大问题）",
             "为 fused 算子添加一个自定义变体（如新 epsilon 参数）"
           ],
           "level": "advanced",
           "minimal_modules": [
             "FusedAdamBuilder",
             "multi_tensor kernel",
-            "transformer kernel 集合"
+            "transformer kernel 集合",
+            "SwiGLU eager fallback 数值路径"
           ],
           "order": 2,
-          "practice_task": "仿照 fused_adam 的模式写一个最小的自定义 op builder（可先只包含一个简单 CUDA kernel），完成编译、加载并在 Python 端调用成功。",
+          "practice_task": "仿照 fused_adam 的模式写一个最小的自定义 op builder（可先只包含一个简单 CUDA kernel），完成编译、加载并在 Python 端调用成功；再对 swiglu 的 eager fallback 用 fp16 极端输入复现新旧实现的数值差异，说明 fp32 中间态为何更稳。",
           "source_files": [
             "op_builder/fused_adam.py",
             "deepspeed/ops/adam/fused_adam.py",
             "csrc/adam/multi_tensor_adam.cu",
             "csrc/adam/fused_adam_frontend.cpp",
-            "csrc/transformer/ds_transformer_cuda.cpp",
-            "op_builder/transformer.py"
+            "deepspeed/ops/transformer/transformer.py",
+            "deepspeed/ops/triton_ops/swiglu_triton.py"
           ],
           "title": "CUDA 算子实战：fused_adam 与 transformer 内核",
-          "topic": "以 fused_adam 为例精读一个 CUDA 算子的三件套：C++ frontend、multi_tensor kernel、以及 Python builder，再横向看 transformer 推理内核的组织方式。"
+          "topic": "以 fused_adam 为例精读一个 CUDA 算子的三件套：C++ frontend、multi_tensor kernel、以及 Python builder；再横向看 transformer 推理内核的组织方式，包括本周期新增的 stochastic_mode/determinism 互斥校验与 SwiGLU eager fallback 的 fp32 中间态修复。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l4",
             "u5-l6"
@@ -1306,7 +1392,7 @@
           "topic": "解读最新一代 offload 引擎：zenflow 的 stall-free 卸载调度与 superoffload 的 stage3 变体，理解它们对传统 ZeRO-Offload 瓶颈的改进。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u2-l1"
@@ -1325,7 +1411,7 @@
             "贡献流程与 CI"
           ],
           "order": 4,
-          "practice_task": "挑选 tests/unit 中的一个测试文件，在本地用不同 dist_init/zero stage 参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
+          "practice_task": "挑选 tests/unit 中的一个测试文件（如本周期新增的 tests/unit/runtime/test_determinism.py 或 tests/unit/checkpoint/test_affine_transfer_executor.py），在本地用不同参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
           "source_files": [
             "tests/unit/simple_model.py",
             "tests/unit/common.py",
@@ -1337,6 +1423,7 @@
           "topic": "了解 tests/unit 的组织方式（simple_model 基建、参数化 fixture、多后端标记）与 AGENTS.md/CONTRIBUTING.md 定义的贡献纪律，为二次开发落地做准备。"
         }
       ],
+      "level": "advanced",
       "order": 9,
       "title": "内核工程、前沿方向与二次开发"
     }

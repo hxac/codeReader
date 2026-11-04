@@ -8,7 +8,7 @@
 
 1. 说清楚 DeepSpeed 解决的三大核心痛点：**显存墙**（模型放不进显存）、**通信墙**（多卡之间数据搬运太慢）、**训练吞吐**（整体训练太慢）。
 2. 列举 DeepSpeed 的代表性系统创新：**ZeRO**、**ZeRO-Infinity / ZeRO-Offload**、**3D-Parallelism**、**Ulysses 序列并行**、**DeepSpeed-MoE** 等。
-3. 知道仓库当前版本（0.19.9）、文档入口（deepspeed.ai 与 `docs/` 目录），以及它与 HuggingFace Transformers / Accelerate / Lightning 等框架的集成关系。
+3. 知道仓库当前版本（本周期已从 0.19.9 推进到 **0.19.10**）、文档入口（deepspeed.ai 与 `docs/` 目录），以及它与 HuggingFace Transformers / Accelerate / Lightning 等框架的集成关系。
 4. 学会用 `git log` 观察一个开源项目「最近在忙什么」，把 README 的新闻列表和实际代码提交互相印证。
 
 ## 2. 前置知识
@@ -33,7 +33,7 @@
 | --- | --- |
 | `README.md` | 项目第一入口：新闻、定位、集成生态、硬件支持表、安装方式、论文列表 |
 | `docs/_pages/training.md` | 官网「训练总览」页面的源文件，相当于官方版能力矩阵与特性清单 |
-| `version.txt` | 单行文件，记录当前版本号（0.19.9），是发布线的源头 |
+| `version.txt` | 单行文件，记录当前版本号（0.19.10），是发布线的源头 |
 | `setup.py` | 安装脚本，从这里消费 `version.txt` |
 | `deepspeed/__init__.py` | 主包入口，把版本号暴露为 `deepspeed.__version__` |
 
@@ -71,18 +71,20 @@ DeepSpeed 的 README 把这些信息分散在几个板块里：
 
 > 这些创新包括 ZeRO、ZeRO-Infinity、3D-Parallelism、Ulysses Sequence Parallelism、DeepSpeed-MoE 等。
 
-见 [README.md:L71-L73](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L71-L73)。这段话就是整本学习手册的「课程大纲」：单元 5 讲 ZeRO 系列，单元 6 讲 3D 并行 / Ulysses / MoE。README 还点出 DeepSpeed 训练过 MT-530B、BLOOM 等当时的最大模型，见 [README.md:L84-L95](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L84-L95)。
+见 [README.md:L71-L73](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L71-L73)。这段话就是整本学习手册的「课程大纲」：单元 5 讲 ZeRO 系列，单元 6 讲 3D 并行 / Ulysses / MoE。README 还点出 DeepSpeed 训练过 MT-530B、BLOOM 等当时的最大模型，见 [README.md:L84-L95](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L84-L95)。
 
-**② Latest News：项目的活跃战线。** 新闻列表从 2026/05 一直排到 2025/06，见 [README.md:L27-L51](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L27-L51)。几个值得记住的条目：
+**② Latest News：项目的活跃战线。** 新闻列表从 2026/05 一直排到 2025/06，见 [README.md:L27-L51](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L27-L51)。几个值得记住的条目：
 
 - Muon 优化器支持与 ZeRO-3 的 SDMA 卸载（2026/05，L29-L31）；
 - SuperOffload 获 ASPLOS 2026 最佳论文提名（2026/03，L35）；
 - Core API 更新：PyTorch 风格 backward 与低精度主权重（2025/12，L37）；
 - ZenFlow 无停顿卸载引擎（2025/08，L47）。
 
-折叠区「More news」里还有三条：DeepCompile（编译优化）、AutoTP（自动张量并行）、Ulysses-Offload（长上下文），见 [README.md:L55-L67](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L55-L67)。这些名字后续单元都会对应到具体源码目录（如 `deepspeed/compile/`、`deepspeed/module_inject/auto_tp.py`、`deepspeed/runtime/zenflow/`）。
+折叠区「More news」里还有三条：DeepCompile（编译优化）、AutoTP（自动张量并行）、Ulysses-Offload（长上下文），见 [README.md:L55-L67](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L55-L67)。这些名字后续单元都会对应到具体源码目录（如 `deepspeed/compile/`、`deepspeed/module_inject/auto_tp.py`、`deepspeed/runtime/zenflow/`）。
 
-**③ 集成生态：DeepSpeed 是「被集成」的库。** README 用一张表列出与主流框架的集成文档，见 [README.md:L97-L106](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L97-L106)：
+一个重要提醒：**新闻比提交滞后**。以本讲 HEAD（`d8241a9ba`）为例，最近合入的确定性执行策略（提交 `dfc63adfb`）连 README 新闻都还没上，但配套教程 [deterministic-mode.md](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_tutorials/deterministic-mode.md) 已经落盘。所以「README 新闻 + git log」要双轨对照，缺一不可。
+
+**③ 集成生态：DeepSpeed 是「被集成」的库。** README 用一张表列出与主流框架的集成文档，见 [README.md:L97-L106](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L97-L106)：
 
 - HuggingFace **Transformers**（L101）——最常见用法：`TrainingArguments` 里打开 `deepspeed` 即可；
 - HuggingFace **Accelerate**（L102）；
@@ -90,9 +92,9 @@ DeepSpeed 的 README 把这些信息分散在几个板块里：
 
 这说明 DeepSpeed 的生态位是**底层训练加速库**：用户通常不直接面对它，而是通过这些上层框架间接使用。但要看懂它为什么快、为什么省显存，必须回到源码——这正是本手册的目的。
 
-**④ 硬件能力矩阵。** CI 表见 [README.md:L110-L121](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L110-L121)：NVIDIA、AMD、CPU、Intel Gaudi（hpu）、Intel XPU、华为昇腾 NPU 都有独立 CI。社区贡献的硬件表见 [README.md:L141-L151](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L141-L151)，列出各加速器的短名（`npu`、`hpu`、`cpu`、`xpu`、`sdaa`、`klxpu`）。这张表解释了为什么源码里会有一整套「加速器抽象层」（`deepspeed/accelerator/`，单元 3 精读）：一套代码要同时跑在这么多硬件上。
+**④ 硬件能力矩阵。** CI 表见 [README.md:L110-L121](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L110-L121)：NVIDIA、AMD、CPU、Intel Gaudi（hpu）、Intel XPU、华为昇腾 NPU 都有独立 CI。社区贡献的硬件表见 [README.md:L141-L151](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L141-L151)，列出各加速器的短名（`npu`、`hpu`、`cpu`、`xpu`、`sdaa`、`klxpu`）。这张表解释了为什么源码里会有一整套「加速器抽象层」（`deepspeed/accelerator/`，单元 3 精读）：一套代码要同时跑在这么多硬件上。最近的提交也在持续为这张表添砖加瓦——例如 `36b2ab3b2` 为 Intel XPU 增加了通过 Level Zero 扩展注册页锁定主机内存的能力。
 
-**⑤ 论文索引。** [README.md:L223-L262](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L223-L262) 的 Publications 列表是按技术查论文的入口：ZeRO 原论文（L224）、ZeRO-Infinity（L229）、DeepSpeed-MoE（L233）、ZeRO++（L245）、ZenFlow（L260）、SuperOffload（L262）等。读源码卡住时，回这里找对应论文往往能豁然开朗。
+**⑤ 论文索引。** [README.md:L223-L262](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L223-L262) 的 Publications 列表是按技术查论文的入口：ZeRO 原论文（L224）、ZeRO-Infinity（L229）、DeepSpeed-MoE（L233）、ZeRO++（L245）、ZenFlow（L260）、SuperOffload（L262）等。读源码卡住时，回这里找对应论文往往能豁然开朗。
 
 #### 4.1.4 代码实践
 
@@ -100,7 +102,7 @@ DeepSpeed 的 README 把这些信息分散在几个板块里：
 
 **操作步骤**：
 
-1. 打开仓库根目录的 `README.md`（本讲用 HEAD `dc046b15d` 的版本）。
+1. 打开仓库根目录的 `README.md`（本讲用 HEAD `d8241a9ba` 的版本）。
 2. 用编辑器搜索以下小标题并记下其起始行号：`Latest News`、`Extreme Speed`、`DeepSpeed Adoption`、`Build Pipeline Status`、`Installation`、`Contributed HW support`、`Publications`。
 3. 为每个板块用一句话总结它回答的问题，填进 4.1.1 的表格里替换掉我们的答案。
 4. 统计 Latest News 中 2025-2026 年条目里出现次数最多的技术关键词（提示：offload/ZenFlow/SuperOffload 相关条目出现了 4 次以上）。
@@ -113,15 +115,15 @@ DeepSpeed 的 README 把这些信息分散在几个板块里：
 
 **练习 1**：README 说 DeepSpeed 的核心创新包括哪五项？分别对应手册的哪个单元？
 
-答案：ZeRO、ZeRO-Infinity、3D-Parallelism、Ulysses 序列并行、DeepSpeed-MoE（见 [README.md:L73](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L73)）。对应关系：ZeRO → 单元 5；3D 并行与 Ulysses → 单元 6；MoE → 单元 6；ZeRO-Infinity（NVMe 交换）→ 单元 5 第 7 讲。
+答案：ZeRO、ZeRO-Infinity、3D-Parallelism、Ulysses 序列并行、DeepSpeed-MoE（见 [README.md:L73](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L73)）。对应关系：ZeRO → 单元 5；3D 并行与 Ulysses → 单元 6；MoE → 单元 6；ZeRO-Infinity（NVMe 交换）→ 单元 5 第 7 讲。
 
 **练习 2**：如果你在用 HuggingFace Transformers 训练模型，README 里哪个链接告诉你如何配合 DeepSpeed 使用？
 
-答案：集成表第一行的 [Transformers with DeepSpeed](https://huggingface.co/docs/transformers/deepspeed) 文档链接，见 [README.md:L101](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L101)。
+答案：集成表第一行的 [Transformers with DeepSpeed](https://huggingface.co/docs/transformers/deepspeed) 文档链接，见 [README.md:L101](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L101)。
 
 **练习 3**：README 的 CI 表为什么要为 AMD、CPU、Gaudi、XPU、昇腾分别设置流水线？这对源码结构有什么暗示？
 
-答案：因为 DeepSpeed 明确支持多硬件平台（每个平台一个 CI workflow 保证不回归），见 [README.md:L110-L121](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L110-L121)。源码结构上的暗示是：一定存在一层设备无关抽象把硬件差异挡住——即 `deepspeed/accelerator/`（单元 3 会精读），项目规则也禁止直接 `import torch.distributed` 而要求走统一通信层。
+答案：因为 DeepSpeed 明确支持多硬件平台（每个平台一个 CI workflow 保证不回归），见 [README.md:L110-L121](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L110-L121)。源码结构上的暗示是：一定存在一层设备无关抽象把硬件差异挡住——即 `deepspeed/accelerator/`（单元 3 会精读），项目规则也禁止直接 `import torch.distributed` 而要求走统一通信层。
 
 ### 4.2 训练文档结构
 
@@ -153,17 +155,17 @@ training.md 的叙事结构本身就是一条问题-方案链，推荐按这个�
 
 **① 问题描述：为什么需要 DeepSpeed。** 文档开篇直接点出双重痛点——既要搭好分布式/混合精度这些「样板代码」，又可能得不到理想的性能；大模型在纯数据并行下显存直接爆掉，而模型并行又难用：
 
-见 [training.md:L9-L17](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L9-L17)。这句「a large model easily runs out of memory with pure data parallelism」就是第 2 节讲的显存墙的官方表述。
+见 [training.md:L9-L17](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L9-L17)。这句「a large model easily runs out of memory with pure data parallelism」就是第 2 节讲的显存墙的官方表述。
 
-**② 产品哲学：轻量包装，不另起炉灶。** DeepSpeed API 被定位为「PyTorch 之上的轻量包装」——你仍用 PyTorch 的一切，DeepSpeed 接管分布式训练、混合精度、梯度累积、检查点这些样板技术，见 [training.md:L19-L27](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L19-L27)。这解释了为什么手册单元 2 讲 `initialize()` 时你会看到：模型、优化器、数据加载器都还是 PyTorch 对象，DeepSpeed 只是「包」了一层引擎。
+**② 产品哲学：轻量包装，不另起炉灶。** DeepSpeed API 被定位为「PyTorch 之上的轻量包装」——你仍用 PyTorch 的一切，DeepSpeed 接管分布式训练、混合精度、梯度累积、检查点这些样板技术，见 [training.md:L19-L27](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L19-L27)。这解释了为什么手册单元 2 讲 `initialize()` 时你会看到：模型、优化器、数据加载器都还是 PyTorch 对象，DeepSpeed 只是「包」了一层引擎。
 
-**③ 显存效率：ZeRO 的官方定义。** 文档给出了 ZeRO 的一句话定义——与普通数据并行「复制」模型状态不同，ZeRO 把模型状态和梯度「切分」到各数据并行进程上，见 [training.md:L62-L69](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L62-L69)。同一节还给出量化对比：单卡 13B 参数 vs 传统 DDP 约 1.4B 就 OOM（L57-L60），ZeRO-2 最多省 8 倍内存（L66-L67）；ZeRO-Offload 进一步用「单张 V100 训 13B」打开局面，见 [training.md:L77](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L77)。
+**③ 显存效率：ZeRO 的官方定义。** 文档给出了 ZeRO 的一句话定义——与普通数据并行「复制」模型状态不同，ZeRO 把模型状态和梯度「切分」到各数据并行进程上，见 [training.md:L62-L69](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L62-L69)。同一节还给出量化对比：单卡 13B 参数 vs 传统 DDP 约 1.4B 就 OOM（L57-L60），ZeRO-2 最多省 8 倍内存（L66-L67）；ZeRO-Offload 进一步用「单张 V100 训 13B」打开局面，见 [training.md:L77](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L77)。
 
-**④ 可扩展性与 3D 并行。** 「3D 并行」= 数据并行 + 张量并行 + 流水线并行三者组合，官方文档说明它支撑过万亿参数模型，见 [training.md:L79-L88](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L79-L88)。这三个维度分别对应单元 5（ZeRO 数据并行）、单元 6（张量/序列并行、流水线并行）。
+**④ 可扩展性与 3D 并行。** 「3D 并行」= 数据并行 + 张量并行 + 流水线并行三者组合，官方文档说明它支撑过万亿参数模型，见 [training.md:L79-L88](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L79-L88)。这三个维度分别对应单元 5（ZeRO 数据并行）、单元 6（张量/序列并行、流水线并行）。
 
-**⑤ 核心 API 清单。** 文档后半部分总结了 DeepSpeed 的核心 API，只有寥寥几个方法：`initialize`、`backward`、`step`、`add_config_arguments`、`load_checkpoint` / `store_checkpoint`，见 [training.md:L305-L314](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L305-L314)。这是单元 2 的预习提纲：整个训练引擎对用户暴露的入口就这么几个。
+**⑤ 核心 API 清单。** 文档后半部分总结了 DeepSpeed 的核心 API，只有寥寥几个方法：`initialize`、`backward`、`step`、`add_config_arguments`、`load_checkpoint` / `store_checkpoint`，见 [training.md:L305-L314](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L305-L314)。这是单元 2 的预习提纲：整个训练引擎对用户暴露的入口就这么几个。
 
-**⑥ 特性深读区（后半页）。** 从 [training.md:L233-L259](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L233-L259) 开始逐项解释 ZeRO 的子优化（优化器状态与梯度切分、激活切分、恒定缓冲区优化 CBO、连续内存优化 CMO）——这四个名词在单元 5 读 `stage_1_and_2.py` / `stage3.py` 时会一一对应到具体代码。ZeRO-Offload 的展开说明见 [training.md:L279-L283](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L279-L283)。
+**⑥ 特性深读区（后半页）。** 从 [training.md:L233-L259](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L233-L259) 开始逐项解释 ZeRO 的子优化（优化器状态与梯度切分、激活切分、恒定缓冲区优化 CBO、连续内存优化 CMO）——这四个名词在单元 5 读 `stage_1_and_2.py` / `stage3.py` 时会一一对应到具体代码。ZeRO-Offload 的展开说明见 [training.md:L279-L283](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L279-L283)。
 
 #### 4.2.4 代码实践
 
@@ -175,7 +177,7 @@ training.md 的叙事结构本身就是一条问题-方案链，推荐按这个�
 2. 打开 `docs/_pages/training.md`，观察第 1-7 行和第 165-171 行的两段 front matter，确认它们分别是 `/training/` 与 `/features/` 两个页面。
 3. 在 training.md 中搜索 `zero`（不区分大小写），记下每个 ZeRO 相关小节的行号。
 4. 在仓库根目录执行 `ls deepspeed/runtime/zero/`，把源码目录名（如 `stage_1_and_2.py`、`stage3.py`）与文档小节一一配对。
-5. 打开 [config-json.md](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/config-json.md)，找到 `train_batch_size` 的说明位置并加书签——它是单元 2 第 2 讲的主战场。
+5. 打开 [config-json.md](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/config-json.md)，找到 `train_batch_size` 的说明位置并加书签——它是单元 2 第 2 讲的主战场。顺带看一眼 `deterministic_mode` 这个新字段：它是本周期刚加入配置文档的确定性执行开关（单元 8 第 8 讲专讲）。
 
 **需要观察的现象**：文档里的几乎每个特性小节，都能在 `deepspeed/` 包里找到一个同名或近名的模块（monitor → `deepspeed/monitor/`，flops profiler → `deepspeed/profiling/flops_profiler/`，MoE → `deepspeed/moe/`）。
 
@@ -185,15 +187,15 @@ training.md 的叙事结构本身就是一条问题-方案链，推荐按这个�
 
 **练习 1**：training.md 中 ZeRO 的官方一句话定义是什么？它和数据并行的本质区别在哪里？
 
-答案：ZeRO 与「在数据并行进程间复制内存状态」的基本数据并行不同，它把模型状态（model states）和梯度**切分（partition）**到各进程以节省内存（见 [training.md:L62-L65](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L62-L65)）。本质区别：复制 vs 切分——切分换来的是显存节省，付出的是用时需临时通信聚合。
+答案：ZeRO 与「在数据并行进程间复制内存状态」的基本数据并行不同，它把模型状态（model states）和梯度**切分（partition）**到各进程以节省内存（见 [training.md:L62-L65](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L62-L65)）。本质区别：复制 vs 切分——切分换来的是显存节省，付出的是用时需临时通信聚合。
 
 **练习 2**：文档说 DeepSpeed 的核心 API「只有一把手能数得过来的几个方法」，请列举它们。
 
-答案：`initialize`（初始化）、`backward` 和 `step`（训练）、`add_config_arguments`（参数解析）、`load_checkpoint` 和 `store_checkpoint`（检查点），见 [training.md:L305-L310](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L305-L310)。
+答案：`initialize`（初始化）、`backward` 和 `step`（训练）、`add_config_arguments`（参数解析）、`load_checkpoint` 和 `store_checkpoint`（检查点），见 [training.md:L305-L310](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L305-L310)。
 
 **练习 3**：「3D 并行」中的三个维度是什么？ZeRO 在其中扮演哪个维度？
 
-答案：数据并行、张量/模型并行、流水线并行（见 [training.md:L80-L82](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L80-L82)）。ZeRO 强化的是数据并行这一维（内存高效的数据并行），且可与另外两类并行组合。
+答案：数据并行、张量/模型并行、流水线并行（见 [training.md:L80-L82](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L80-L82)）。ZeRO 强化的是数据并行这一维（内存高效的数据并行），且可与另外两类并行组合。
 
 ### 4.3 版本与发布线
 
@@ -202,7 +204,7 @@ training.md 的叙事结构本身就是一条问题-方案链，推荐按这个�
 「这个仓库现在是哪个版本？」看似简单，但在 DeepSpeed 里版本信息有一条清晰的**传递链**：
 
 ```
-version.txt（唯一事实来源，当前 0.19.9）
+version.txt（唯一事实来源，当前 0.19.10）
    ├─→ setup.py 打包时读取 → PyPI 发布的包版本
    └─→ (构建期写入) deepspeed/git_version_info.py
           └─→ deepspeed/__init__.py 导出 __version__ / __git_hash__ / __git_branch__
@@ -210,13 +212,13 @@ version.txt（唯一事实来源，当前 0.19.9）
 
 理解这条链的意义在于：**用户看到的 `deepspeed.__version__` 与仓库里的 `version.txt` 是同源的**；而且 DeepSpeed 还把 git 提交哈希打进包里，运行时日志会打印 version + git-hash + git-branch，这对你排查「线上到底跑的是哪份代码」极其有用（阅读源码时也能用它确认代码与讲义引用的 HEAD 一致）。
 
-另一个要点是**发布节奏**：DeepSpeed 是「rolling master」模式——master 分支持续合入，定期打 tag 发 PyPI。所以 `git log` 里的最新提交就是最真实的项目动态，比新闻列表更细粒度。
+另一个要点是**发布节奏**：DeepSpeed 是「rolling master」模式——master 分支持续合入，定期打 tag 发 PyPI。每次发布后，维护者会立刻把 `version.txt` bump 到下一个版本号开启新周期。本讲 HEAD 之前不久就有一个现成例子：提交 `2cd4984ae`「Update version.txt post-v0.19.9 release」把版本号从 0.19.9 推到了 0.19.10。所以 `git log` 里的最新提交就是最真实的项目动态，比新闻列表更细粒度。
 
 #### 4.3.2 核心流程
 
 版本信息的生命周期：
 
-1. 开发期：`version.txt` 由维护者更新，`0.19.9` 表示主版本 0、次版本 19、补丁版本 9。
+1. 开发期：`version.txt` 由维护者更新，`0.19.10` 表示主版本 0、次版本 19、补丁版本 10。
 2. 构建期：`setup.py` 读取 `version.txt`；如果设置了 `DS_BUILD_STRING` 环境变量则附加 `.devX` 后缀，否则把 git 哈希写入版本串，并生成 `deepspeed/git_version_info.py`。
 3. 运行期：`import deepspeed` 时从 `git_version_info` 导入 version / git_hash / git_branch，暴露为 `deepspeed.__version__`、`deepspeed.__git_hash__`。
 4. 日志期：每次 `initialize()` 都会打印 `DeepSpeed info: version=..., git-hash=..., git-branch=...`。
@@ -225,15 +227,15 @@ version.txt（唯一事实来源，当前 0.19.9）
 
 **① 唯一事实来源：version.txt。** 整个文件只有一行：
 
-见 [version.txt:L1](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/version.txt#L1)——内容就是 `0.19.9`。这就是本手册撰写时仓库的版本号，也就是大纲中所说的 v0.19.9。
+见 [version.txt:L1](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/version.txt#L1)——内容就是 `0.19.10`。这就是本手册撰写时仓库的版本号，也就是大纲中所说的 v0.19.10（上一版讲义基于 0.19.9，本周期经由提交 `2cd4984ae` 更新）。
 
 **② setup.py 消费版本号。** 安装脚本在打包时读取该文件：
 
-见 [setup.py:L228-L229](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/setup.py#L228-L229)，注释明确写着「Parse the DeepSpeed version string from version.txt」。紧随其后（L231 起）的逻辑决定是否附加 `.dev` 后缀或 git 哈希。
+见 [setup.py:L228-L229](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/setup.py#L228-L229)，注释明确写着「Parse the DeepSpeed version string from version.txt」。紧随其后（L231 起）的逻辑决定是否附加 `.dev` 后缀或 git 哈希。
 
 **③ 包入口导出版本三元组与 git 信息。** `import deepspeed` 时：
 
-见 [deepspeed/__init__.py:L70](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/deepspeed/__init__.py#L70)，从 `git_version_info`（构建时生成）导入 version、git_hash、git_branch；随后在 [deepspeed/__init__.py:L75-L85](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/deepspeed/__init__.py#L75-L85) 解析出主/次/补丁三元组并导出 `__version__`、`__git_hash__`、`__git_branch__`。同一个文件里，[deepspeed/__init__.py:L88](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/deepspeed/__init__.py#L88) 附近的 `dist = None` 是个伏笔：分布式通信句柄被设计为延迟绑定（引擎初始化时才指向 `deepspeed.comm`），单元 3 会展开。
+见 [deepspeed/__init__.py:L70](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/deepspeed/__init__.py#L70)，从 `git_version_info`（构建时生成）导入 version、git_hash、git_branch；随后在 [deepspeed/__init__.py:L75-L85](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/deepspeed/__init__.py#L75-L85) 解析出主/次/补丁三元组并导出 `__version__`、`__git_hash__`、`__git_branch__`。同一个文件里，[deepspeed/__init__.py:L88](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/deepspeed/__init__.py#L88) 附近的 `dist = None` 是个伏笔：分布式通信句柄被设计为延迟绑定（引擎初始化时才指向 `deepspeed.comm`），单元 3 会展开。
 
 顺带一提，`deepspeed/__init__.py:498` 与 `721` 附近各有一行 `log_dist("DeepSpeed info: version={}, git-hash={}, git-branch={}"...)`——这就是运行时日志里版本行的出处。
 
@@ -243,28 +245,29 @@ version.txt（唯一事实来源，当前 0.19.9）
 
 **操作步骤**：
 
-1. `cat version.txt` → 记下输出（预期 `0.19.9`）。
+1. `cat version.txt` → 记下输出（预期 `0.19.10`）。
 2. `grep -n "version.txt" setup.py` → 确认 setup.py 第 229 行在读取它。
-3. 若本地已安装 deepspeed：`python -c "import deepspeed; print(deepspeed.__version__, deepspeed.__git_hash__)"` → 对比输出与第 1 步结果，并核对 `__git_hash__` 的前 9 位是否等于 `git rev-parse --short=9 HEAD`（本仓库 HEAD 为 `dc046b15d`）。
-4. `pip index versions deepspeed 2>/dev/null || pip install deepspeed==` → 观察 PyPI 上可用的版本列表，看看 0.19.9 处在发布线的什么位置。
+3. 若本地已安装 deepspeed：`python -c "import deepspeed; print(deepspeed.__version__, deepspeed.__git_hash__)"` → 对比输出与第 1 步结果，并核对 `__git_hash__` 的前 9 位是否等于 `git rev-parse --short=9 HEAD`（本仓库 HEAD 为 `d8241a9ba`）。
+4. `git log --oneline -- version.txt -5` → 观察这个文件的修改历史，你会看到 `2cd4984ae` 这条「post-v0.19.9 release」的 bump 提交，它就是发布节奏的直接物证。
+5. `pip index versions deepspeed 2>/dev/null || pip install deepspeed==` → 观察 PyPI 上可用的版本列表，看看 0.19.10 处在发布线的什么位置。
 
-**需要观察的现象**：第 3 步中 `__version__` 与 `version.txt` 一致；若你是 `pip install deepspeed` 装的正式发行版，`__git_hash__` 是打包那次提交的哈希；若是源码 editable 安装（`pip install -e .`），哈希应与你本地 HEAD 一致。
+**需要观察的现象**：第 3 步中 `__version__` 与 `version.txt` 一致；若你是 `pip install deepspeed` 装的正式发行版，`__git_hash__` 是打包那次提交的哈希；若是源码 editable 安装（`pip install -e .`），哈希应与你本地 HEAD 一致。第 4 步中 `version.txt` 的提交频率远低于代码提交——它只在发布边界被触碰。
 
-**预期结果**：三个环节读出的版本号完全一致。第 3、4 步依赖本地 Python 环境，**待本地验证**。
+**预期结果**：三个环节读出的版本号完全一致。第 3、5 步依赖本地 Python 环境，**待本地验证**。
 
 #### 4.3.5 小练习与答案
 
 **练习 1**：DeepSpeed 的版本号「唯一事实来源」是哪个文件？当前值是多少？
 
-答案：仓库根目录的 `version.txt`，当前值为 `0.19.9`（见 [version.txt:L1](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/version.txt#L1)）。
+答案：仓库根目录的 `version.txt`，当前值为 `0.19.10`（见 [version.txt:L1](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/version.txt#L1)）。
 
 **练习 2**：为什么 `deepspeed.__version__` 之外还要导出 `__git_hash__`？举一个实际用途。
 
-答案：因为 PyPI 版本号更新有间隔，而 rolling master 每天都有合入，仅凭 `0.19.9` 无法区分「同一版本号下不同的代码状态」。`__git_hash__`（见 [deepspeed/__init__.py:L84](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/deepspeed/__init__.py#L84)）能精确定位到具体提交。实际用途：报 bug 时把 `initialize()` 日志里的 version/git-hash 行贴出来，维护者即可复现你的代码版本；本手册也用它保证所有永久链接指向同一提交。
+答案：因为 PyPI 版本号更新有间隔，而 rolling master 每天都有合入，仅凭 `0.19.10` 无法区分「同一版本号下不同的代码状态」。`__git_hash__`（见 [deepspeed/__init__.py:L84](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/deepspeed/__init__.py#L84)）能精确定位到具体提交。实际用途：报 bug 时把 `initialize()` 日志里的 version/git-hash 行贴出来，维护者即可复现你的代码版本；本手册也用它保证所有永久链接指向同一提交。
 
 **练习 3**：如果不小心删除了 `version.txt`，安装（`pip install -e .`）会在哪一步失败？
 
-答案：在 `setup.py` 执行到 [setup.py:L229](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/setup.py#L229) 的 `open('version.txt', 'r')` 时直接抛 `FileNotFoundError`，打包元数据无法生成。这体现了该文件作为唯一事实来源的地位。
+答案：在 `setup.py` 执行到 [setup.py:L229](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/setup.py#L229) 的 `open('version.txt', 'r')` 时直接抛 `FileNotFoundError`，打包元数据无法生成。这体现了该文件作为唯一事实来源的地位。
 
 ## 5. 综合实践
 
@@ -282,33 +285,33 @@ version.txt（唯一事实来源，当前 0.19.9）
    git log --oneline -20
    ```
 
-2. 把输出按主题分组。分组线索：提交信息开头的方括号标签（`[Hybrid Engine]`、`[AutoEP]`、`[AffineIR]`、`[VocabTP]`）和前缀（`ZeRO-1/2:`、`ZeRO-3:`、`ci:`）。
-3. 打开 [README.md:L27-L67](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L27-L67) 的 Latest News（含 More news），为每个分组找一条时间上最近的新闻佐证。
+2. 把输出按主题分组。分组线索：提交信息开头的方括号标签（`[AutoTP]`、`[checkpoint]`、`[Hybrid Engine]`）和前缀（`ZeRO-3:`、`XPU:`）。
+3. 打开 [README.md:L27-L67](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L27-L67) 的 Latest News（含 More news），为每个分组找一条时间上最近的新闻佐证；找不到新闻佐证时，改找配套文档/教程（如 `docs/_tutorials/`）佐证。
 4. 用 `git log --oneline -20 -- deepspeed/runtime/zero/` 这样的路径过滤命令，分别统计各主题目录的提交热度。
 5. 写成 1 页笔记，每个方向包含：方向名、证据提交（哈希 + 一句话）、README 佐证新闻（日期 + 标题）、一句话判断它解决的是显存墙 / 通信墙 / 吞吐中的哪一个。
 
-**参考范例**（以下为撰写本讲时对 HEAD `dc046b15d` 的真实观察，可作为你的笔记样例）：
+**参考范例**（以下为撰写本讲时对 HEAD `d8241a9ba` 的真实观察，可作为你的笔记样例）：
 
-- **ZeRO 卸载与显存优化**：`dc046b15d`「ZeRO-1/2: preserve gradients across request boundaries until step」、`c6291b7e1`「ZeRO-3: copy offloaded master weights back to the device through pinned buffer」——佐证新闻：SuperOffload 获 ASPLOS 2026 提名（2026/03）、ZenFlow（2025/08）。主攻**显存墙**。
-- **专家并行 AutoEP / AffineIR**：`66fef47b2`、`f81850499`、`12ffb9903`、`7501610ee` 四条 AutoEP/AffineIR 相关提交——佐证新闻：Ray x DeepSpeed Meetup 中提到的专家并行与 fused kernel 工作（2025/10）。主攻**吞吐与显存**。
-- **混合引擎与张量并行**：`ab7fd98fa`「[Hybrid Engine] Enable graph capture ... on non-CUDA accelerators」、`1a956270f`「[VocabTP] vocab_parallel_ce support fused LM-head projection + loss」——佐证新闻：AutoTP（2025/03，More news）。主攻**推理/训练一体化与通信墙**。
+- **确定性执行与数值稳定性**：`dfc63adfb`「Add an opt-in deterministic execution policy」、`961df84b1`「Keep float32 intermediates in the clamped SwiGLU eager fallback」——佐证材料：新增官方教程 [deterministic-mode.md](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_tutorials/deterministic-mode.md)（README 新闻尚未收录，属于「提交先于新闻」的典型）。主攻**训练可复现性与数值正确性**。
+- **跨切分方式的参数迁移与 AutoTP 训练化**：`f3c6cbb2e`「[checkpoint] Execute affine transfer plans with bounded peer staging」、`d8241a9ba`「[AutoTP] Support frozen AutoTP models and manage AutoTP mode per model」——佐证新闻：AutoTP 自动张量并行（2025/03，More news）。主攻**显存墙与通信墙**（分片直搬，避免重建完整张量）。
+- **ZeRO 卸载与多硬件后端**：`d9225000c`「ZeRO-3: build the partial-offload device string from the public accelerator API」、`36b2ab3b2`「XPU: register pinned host memory via Level Zero ext_memmap」——佐证新闻：SuperOffload 获 ASPLOS 2026 提名（2026/03）、ZenFlow（2025/08）；硬件佐证见 CI 表 Intel XPU 行。主攻**显存墙与硬件版图扩展**。
 
-**需要观察的现象**：git log 的主题分布与 README 新闻的优先级高度吻合——新闻是「宣言」，提交是「行动」；两者不一致的地方（例如某特性上了新闻但近期无提交）通常意味着该方向已进入稳定维护期。
+**需要观察的现象**：git log 的主题分布与 README 新闻的优先级高度吻合——新闻是「宣言」，提交是「行动」；两者不一致的地方（例如确定性执行已合入但尚未上新闻）通常意味着该方向刚刚起步、下个新闻周期才会宣发，而上了新闻但近期无提交的方向通常已进入稳定维护期。
 
-**预期结果**：一份含 3 个方向、每个方向有提交证据 + 新闻佐证 + 一句话定位的 1 页笔记。完成后建议存档在 `DeepSpeed-tutorial/` 之外的自有笔记目录里，学习单元 5 和单元 6 时回头验证你的判断。
+**预期结果**：一份含 3 个方向、每个方向有提交证据 + 新闻（或文档）佐证 + 一句话定位的 1 页笔记。完成后建议存档在 `DeepSpeed-tutorial/` 之外的自有笔记目录里，学习单元 5 和单元 6 时回头验证你的判断。
 
 ## 6. 本讲小结
 
-- DeepSpeed 是面向超大模型训练与推理的**底层优化库**，三大痛点是**显存墙、通信墙、训练吞吐**；核心创新包括 ZeRO、ZeRO-Infinity、3D 并行、Ulysses 序列并行与 DeepSpeed-MoE（[README.md:L71-L73](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L71-L73)）。
+- DeepSpeed 是面向超大模型训练与推理的**底层优化库**，三大痛点是**显存墙、通信墙、训练吞吐**；核心创新包括 ZeRO、ZeRO-Infinity、3D 并行、Ulysses 序列并行与 DeepSpeed-MoE（[README.md:L71-L73](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L71-L73)）。
 - README 的板块结构本身就是一张能力矩阵：News 看方向、Adoption 看生态（Transformers/Accelerate/Lightning 都在集成它）、CI 与 HW 表看硬件版图（NVIDIA/AMD/CPU/Gaudi/XPU/昇腾等）。
 - `docs/_pages/training.md` 是官方能力矩阵的展开版：按「难 → 快 → 省 → 大 → 通 → 效 → 易」的问题链组织；其中 ZeRO 的定义（切分而非复制）与核心 API 清单（`initialize`/`backward`/`step`/checkpoint）是单元 2 的直接预习材料。
-- 版本传递链：`version.txt`（0.19.9）→ `setup.py` 打包 → `deepspeed.__version__` / `__git_hash__`；运行时日志会打印 version + git-hash + git-branch，用于精确定位代码版本。
-- 阅读 »README News + git log« 双轨对照是判断开源项目活跃方向的标准手法；当前最活跃的三条线是 ZeRO 卸载（ZenFlow/SuperOffload 系）、专家并行（AutoEP/AffineIR）、混合引擎/张量并行。
+- 版本传递链：`version.txt`（本周期经 `2cd4984ae` 更新为 0.19.10）→ `setup.py` 打包 → `deepspeed.__version__` / `__git_hash__`；运行时日志会打印 version + git-hash + git-branch，用于精确定位代码版本。
+- 阅读「README News + git log」双轨对照是判断开源项目活跃方向的标准手法；本周期 HEAD 上最活跃的三条线是确定性执行与数值稳定性、跨切分参数迁移（affine transfer）与 AutoTP 训练化、ZeRO 卸载与多硬件后端深化。
 
 ## 7. 下一步学习建议
 
 下一讲（u1-l2「代码地图：仓库目录结构与模块导览」）将钻进 `deepspeed/` 主包，逐一认识 runtime、ops、module_inject、csrc 等目录的职责分工，并精读 `deepspeed/__init__.py` 的导出列表。在进入下一讲之前，建议你：
 
 1. 把本讲的「文档小节 ↔ 源码目录」对照表再过一遍，下一讲会把每个目录展开讲。
-2. 通读一遍 [README.md:L123-L169](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/README.md#L123-L169) 的安装章节，留意「JIT 编译」与「预编译」两种算子构建方式的区别——这是 u1-l3 的主题。
-3. 如果想提前建立 ZeRO 直觉，可泛读 [training.md:L233-L283](https://github.com/deepspeedai/DeepSpeed/blob/dc046b15d7a58f6c8dacba435508b52b1ebc620c/docs/_pages/training.md#L233-L283) 关于 ZeRO 各子优化的说明，不求全懂。
+2. 通读一遍 [README.md:L123-L169](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/README.md#L123-L169) 的安装章节，留意「JIT 编译」与「预编译」两种算子构建方式的区别——这是 u1-l3 的主题。
+3. 如果想提前建立 ZeRO 直觉，可泛读 [training.md:L233-L283](https://github.com/deepspeedai/DeepSpeed/blob/d8241a9ba266405e1a58fadf19e24b2370f6d7fa/docs/_pages/training.md#L233-L283) 关于 ZeRO 各子优化的说明，不求全懂。
