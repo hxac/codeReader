@@ -67847,7 +67847,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4ecf041f-69cc-4a63-a4bc-d324c2dbab74\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"287ba858-dd59-4367-ae4a-8c833d0c9639\",\"total_co"
         },
         "u10-l1": {
           "status": "pending",
@@ -67891,7 +67891,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/reasoning-from-scratch/reasoning-from-scratch-tutorial",
       "last_head": "b8646024377b0a35b44eddd2ec506c1a63f1b791",
-      "last_run_at": "2026-11-06T11:02:48Z",
+      "last_run_at": "2026-11-06T13:02:48Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rasbt/machine-learning-book": {
@@ -68168,7 +68168,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"921b66e0-66f2-49ab-8235-fa1bdb86dc37\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1522267c-24c3-4d0c-aedf-a14b977c4efe\",\"total_co"
         },
         "u16-l2": {
           "status": "pending",
@@ -68217,7 +68217,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/machine-learning-book/machine-learning-book-tutorial",
       "last_head": "63bee951ca45420ac33ccf803ceb337afc3c0a91",
-      "last_run_at": "2026-11-06T11:02:48Z",
+      "last_run_at": "2026-11-06T13:02:48Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rasbt/deeplearning-models": {
@@ -68424,7 +68424,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e5bffcea-46e3-4012-852a-0293a3edc747\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"589b7d83-43b8-4f1f-95d4-a327228f2b22\",\"total_co"
         },
         "u6-l6": {
           "status": "pending",
@@ -68503,7 +68503,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/deeplearning-models/deeplearning-models-tutorial",
       "last_head": "59beda3aa25337e576564f1c18c6edd26f9f30e3",
-      "last_run_at": "2026-11-06T11:02:48Z",
+      "last_run_at": "2026-11-06T13:02:48Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "deepspeedai/DeepSpeed": {
@@ -68755,8 +68755,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "6d64e1b9746d77ae1c1cd652006cb3bafeb09afe",
-      "last_run_at": "2026-11-06T11:02:48Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-11-06T13:02:48Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7d7f7d10-0fba-4122-b7df-ceced3529c93\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "triple-mu/fast-ulysses": {},
     "KellerJordan/Muon": {},
