@@ -1,7 +1,7 @@
 {
-  "head": "6d64e1b9746d77ae1c1cd652006cb3bafeb09afe",
+  "head": "02f7978481cb3d3297f111c02b16d768b890b256",
   "project": "DeepSpeed",
-  "rationale": "增量更新（d8241a9 -> 6d64e1b，版本维持 0.19.10）：九单元主线结构不变，仍按「入门 -> 核心用法 -> 运行时基础设施 -> 混合精度 -> ZeRO 核心 -> 多维并行 -> 推理引擎 -> 高级机制 -> 内核工程」推进。本周期代码变化集中在五条线：一是 ZeRO-3 在权重已是 master dtype 时直接复用权重分区作为主副本（stage3 的 aliased_fp32_sub_groups 与 offload_states/reload_states 联动、_point_aliased_fp32_partitions_at_lp_buffer），u5-l6 重度 update；连带 Adagrad 初始化两处修复（stage_1_and_2/stage3 改用 optimizer.param_groups 重建、unfused_optimizer 在 param.device 上建初始梯度）与低精度梯度恢复前清空 offload scratch，u5-l3、u4-l2 轻度 update。二是 AutoEP+AutoTP folding 校验从布尔细化为 offload device 语义，放开 ZeRO-3 + CPU 优化器卸载（engine/auto_ep_config/auto_ep_folding 联动），ep_experts 用 _ZeroEmptyExpertGrad 清零空专家梯度、clip_grad_norm_ 改为在专家并行组上求范数并用世界组投票保证各 rank 一致（u6-l6、u2-l4 update）。三是 Hybrid Engine 图捕获改为加速器显式 opt-in（AbstractAccelerator 新增 is_graph_capture_supported、CUDA 返回 True，rollout 两条路径不支持时 warning 回退 eager），静态图 decode 改传预构建 4-D 加性掩码，DeepSpeedStaticCache 新增 get_query_offset 支持 Transformers 5.20（u3-l1、u7-l4 update）。四是 affine 映射转换新增「每个元素恰好写一次」的覆盖/自重叠校验（_overlaps_itself/_place/_require_placed/written 掩码），u8-l7 尚未生成故仍为 new 并充实目标。五是工程细节：Gloo 子组拆分兜底与 CUDA 张量经 CPU 暂存（u3-l2 update）、FX DCE 保留 vmap nesting 标记（u8-l4 update）、ZeRO-3 linear 的 autocast 设备跟随操作数（u5-l5 update）。另外 fp_quantizer/QuantizedLinear 一系修复（q_bits=12 尾数位 4->7、Python/C++ 双侧 group_size 校验、E4M3 按 fp16 位布局反量化、共享内存不足自动降 num_stages、.to() 保持子类）填补了手册的量化空白，新增 u9-l5 专讲；PR CI 新增 v1 多 rank CPU 套件并裁撤旧 NV 工作流（u9-l4 update）；其余未受影响讲义全部 keep。",
+  "rationale": "增量更新（6d64e1b -> 02f7978，版本维持 0.19.10，共 10 个提交）：九单元主线结构不变，仍按「入门 -> 核心用法 -> 运行时基础设施 -> 混合精度 -> ZeRO 核心 -> 多维并行 -> 推理引擎 -> 高级机制 -> 内核工程」推进。本周期代码变化集中在五条线：一是 fp32 masters 的恢复语义补全（#8892）：ZeRO-3 的 _rigid_load_state_dict/_load_universal_checkpoint 新增 load_from_fp32_weights=False 分支并用 refresh_fp32_params() 从 bit16 权重重建分区，BF16_Optimizer 同场景调用 _restore_from_bit16_weights，引擎流水线串行加载先检查 ZeRO 分片存在再进入 dist.recv（缺失即 raise 而非死等），universal 加载跳过优化器状态时保留 optim_fragment 使 safe_get/set_full_optimizer_state 仍可用——u4-l3、u5-l8、u8-l3 相应 update。二是 AutoEP+AutoTP folding 的梯度裁剪修复（#8823）：折叠后 TP peers 各持不同路由专家，stage_1_and_2 的 get_grad_norm_direct 新增 process_group/expert_parallel_group 参数，_is_folded_expert_group（按 ds_zero_placement_family==\"autoep_expert\" 判定）的范数改为在实际 expert-DP 分区组与 EP owner 组上求和且不再做专家范数平均，稠密组与原生 MoE 组保持原路径并可与折叠组共存，契约写入 docs/code-docs/source/autoep.rst——u5-l3、u6-l6 update（u6-l6 同时并入 #9029 的 transformers _CanRecordRegistry dict 兼容）。三是两处卸载正确性修复：ZeRO-3 NVMe 参数预取去重（#9014，参数 trace 每次使用一条，末层 forward+backward、检查点重算与共享层双计导致 swap_in 二次分配缓冲断言）落在 partitioned_param_coordinator，u5-l5 update；DeepNVMe 静默 I/O 失败修复（#8985，完成请求结果检查抛 RuntimeError、非对齐/非连续走 bounce buffer、fast init 用填充 staging 读非对齐分区、EINTR 重试）重写 csrc/aio 与 optimizer_utils，u5-l7 update。四是 CPU 优化器状态精度（#8974）：DeepSpeedCPUAdam/Lion/Adagrad 改继承新基类 DeepSpeedCPUOptimizer，load_state_dict 用 restore_optimizer_state_dtype 把 fp32_optimizer_states 下的浮点状态恢复为 fp32，u5-l4 update。五是 Hybrid Engine 非贪婪采样进入快路径（#8939）：_token_selector 统一 graph decode/continuous batching/continuous batching+graph 三条路径的 token 选择（temperature<=0 argmax，否则按 generate() 顺序在 float32 logits 上应用 Temperature/TopK/TopP warper 后 multinomial），采样在 host 端图之外故图捕获不再要求 greedy，continuous batching 移除 temperature>0 拒绝且 repetition penalty 调整到 warper 之前，u7-l4 update。其余 CI/测试杂项（#9032 workflow exit code 5 处理、#9020 移除 deepspeed-kernels、#9028 测试改 forkserver）不改变任何讲义所教内容，全部 keep；u8-l7、u8-l8、u9-l5 上周期新增讲义尚未生成，维持 new。",
   "units": [
     {
       "id": "u1",
@@ -14,7 +14,7 @@
           "learning_goals": [
             "说出 DeepSpeed 解决的核心痛点：显存墙、通信墙、训练吞吐",
             "列举 ZeRO、ZeRO-Infinity、3D-Parallelism、Ulysses、MoE 等系统创新点",
-            "了解仓库版本（本周期推进到 0.19.10）、文档入口和与 HuggingFace/Accelerate 等框架的集成关系"
+            "了解仓库版本（本周期维持 0.19.10）、文档入口和与 HuggingFace/Accelerate 等框架的集成关系"
           ],
           "level": "beginner",
           "minimal_modules": [
@@ -215,7 +215,7 @@
           "topic": "逐段阅读 DeepSpeedEngine 构造函数：参数配置、确定性策略应用（deterministic_mode）、AutoEP/AutoTP 注入（含冻结参数记录）、优化器包装（fp16/bf16/ZeRO）、数据加载器、监控、检查点加载等阶段的先后顺序与交互。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l3"
           ],
@@ -225,7 +225,7 @@
             "画出 train_batch 一次调用的内部时序图",
             "解释 is_gradient_accumulation_boundary 对梯度同步频率的影响",
             "描述 _backward_prologue 中对 AutoTP 冻结复制参数的防御性检查（unfreeze 后训练会静默漂移，引擎改为直接报错）",
-            "追踪 _take_model_step 的 fp32 梯度裁剪链路：clip_fp32_gradients -> clip_grad_norm_，以及本周期 MoE 感知改造——专家参数不再对 DP 组求平均，而是在专家并行组上求范数（每个专家只计一次），并用一次世界组 all_reduce 投票保证所有 rank 走同一条集体通信路径",
+            "追踪 _take_model_step 的 fp32 梯度裁剪链路：clip_fp32_gradients -> clip_grad_norm_，以及 MoE 感知改造——专家参数不再对 DP 组求平均，而是在专家并行组上求范数（每个专家只计一次），并用一次世界组 all_reduce 投票保证所有 rank 走同一条集体通信路径",
             "实现不带 DeepSpeed 引擎的手动 backward/step（unmanaged 模式）"
           ],
           "level": "intermediate",
@@ -245,7 +245,7 @@
             "deepspeed/runtime/utils.py"
           ],
           "title": "训练主循环：train_batch、backward 与 step",
-          "topic": "追踪一次 train_batch 调用的完整链路：数据迭代、前向、loss 缩放、backward（含 _backward_prologue 中新增的 AutoTP 冻结参数检查）、梯度边界判定、梯度裁剪（fp32 路径经 clip_grad_norm_，MoE 参数本周期改走专家并行组求范数）、优化器 step、LR 调度与监控写入。"
+          "topic": "追踪一次 train_batch 调用的完整链路：数据迭代、前向、loss 缩放、backward（含 _backward_prologue 中的 AutoTP 冻结参数检查）、梯度边界判定、梯度裁剪（fp32 路径经 clip_grad_norm_，MoE 参数在专家并行组上求范数）、优化器 step、LR 调度与监控写入。"
         }
       ],
       "level": "beginner",
@@ -256,7 +256,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -266,7 +266,7 @@
             "列举 AbstractAccelerator 定义的 20+ 设备无关接口",
             "解释 real_accelerator.py 的按环境变量/库探测加载机制",
             "以 XPU 后端为例，说明一个 accelerator 如何绕过 torch、用 ctypes 直接驱动 Level Zero ext_memmap 扩展注册 pinned host memory",
-            "解释本周期新增的 is_graph_capture_supported 显式 opt-in 设计：默认 False（只暴露图 API 的后端留在 eager 路径），CUDA 返回 True 且要求先实现 is_current_stream_capturing（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）",
+            "解释 is_graph_capture_supported 显式 opt-in 设计：默认 False（只暴露图 API 的后端留在 eager 路径），CUDA 返回 True 且要求先实现 is_current_stream_capturing（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）",
             "理解 AGENTS 规则『禁止直接 import torch.distributed』背后的设计原因"
           ],
           "level": "intermediate",
@@ -287,10 +287,10 @@
             "accelerator/xpu_accelerator.py"
           ],
           "title": "加速器抽象层：一套代码支持多种硬件",
-          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端；以 XPU 通过 Level Zero ZE_extension_external_memmap_sysmem 注册页锁定主机内存、以及本周期图捕获能力改为按后端显式 opt-in（is_graph_capture_supported）为例展示后端深度适配。"
+          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端；以 XPU 通过 Level Zero ZE_extension_external_memmap_sysmem 注册页锁定主机内存、以及图捕获能力改为按后端显式 opt-in（is_graph_capture_supported）为例展示后端深度适配。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -299,7 +299,7 @@
           "learning_goals": [
             "解释 comm 模块对 torch.distributed 的日志与监控包装",
             "追踪 init_distributed 的 backend 协商与进程组建立过程",
-            "解读本周期 TorchBackend 的两个 Gloo 兼容修复：_ensure_gloo_subgroup_split 兜底 PyTorch 2.7~2.10 对非成员 rank 调用 perform_nocolor_split（Gloo 未实现该 NCCL 专属方法）导致的 AttributeError；stage_on_cpu 把 CPU 暂存从仅 MPS 张量扩展到「进程组本身是 gloo 时的 CUDA 张量」（避免 writev EFAULT），并按签名解析出 group 判断后端",
+            "解读 TorchBackend 的两个 Gloo 兼容修复：_ensure_gloo_subgroup_split 兜底 PyTorch 2.7~2.10 对非成员 rank 调用 perform_nocolor_split（Gloo 未实现该 NCCL 专属方法）导致的 AttributeError；stage_on_cpu 把 CPU 暂存从仅 MPS 张量扩展到「进程组本身是 gloo 时的 CUDA 张量」（避免 writev EFAULT），并按签名解析出 group 判断后端",
             "理解 dist = None 延迟绑定的设计意图"
           ],
           "level": "intermediate",
@@ -319,7 +319,7 @@
             "deepspeed/comm/constants.py"
           ],
           "title": "deepspeed.comm：分布式通信统一入口",
-          "topic": "解析 comm 包如何包装 torch.distributed（nccl/gloo/mpi）并提供 init_distributed、allgather、reduce 等统一 API，ccl/mori 等非 CUDA 后端的适配方式，以及本周期针对 Gloo 的子组拆分兜底与 CUDA 张量 CPU 暂存两个兼容层修复。"
+          "topic": "解析 comm 包如何包装 torch.distributed（nccl/gloo/mpi）并提供 init_distributed、allgather、reduce 等统一 API，ccl/mori 等非 CUDA 后端的适配方式，以及针对 Gloo 的子组拆分兜底与 CUDA 张量 CPU 暂存两个兼容层修复。"
         },
         {
           "action": "keep",
@@ -413,7 +413,7 @@
           "topic": "解读 loss_scaler.py 中静态/动态 LossScaler：溢出检测、scale 窗口调整、scale_wrt_gas 的含义，以及 fp16 训练为何必须配合 loss scaling。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -423,7 +423,7 @@
             "描述 fp16 梯度到 fp32 主权重的拷贝时机",
             "对比 fused 与 unfused 两条路径的适用条件",
             "理解 zero_grad/step 在包装层中的委托关系",
-            "说明 initialize_optimizer_states 为何本周期改为在 param.device（而非当前加速器设备）上创建初始梯度：Adagrad 在构造期就初始化状态，设备错位会让 CPU/卸载参数直接报错"
+            "说明 initialize_optimizer_states 为何要在 param.device（而非当前加速器设备）上创建初始梯度：Adagrad 在构造期就初始化状态，设备错位会让 CPU/卸载参数直接报错"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -443,7 +443,7 @@
           "topic": "对比 unfused_optimizer 与 fused_optimizer：如何维护 fp32 主权重、如何调用 FusedAdam 与 CPU 端变体、zero_grad/step 的包装逻辑，以及 initialize_optimizer_states 中 Adagrad 构造期初始化的设备修复。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u4-l1"
           ],
@@ -452,23 +452,26 @@
           "learning_goals": [
             "解释 bf16 无需 loss scaling 的数值原因",
             "描述 bf16 主权重 + fp32 优化器状态的内存布局",
-            "说明 2025/12 引入的低精度 master states 的配置方式"
+            "说明 2025/12 引入的低精度 master states 的配置方式",
+            "解读本周期 load_state_dict 的 masters 恢复语义：load_from_fp32_weights=False 时调用 _restore_from_bit16_weights() 从 bit16 权重重建 fp32 主权重（与 ZeRO stage 1/2 对齐），而引擎 load_checkpoint 的正常恢复仍传 True 保留已保存的 masters，load_optimizer_states=False 则保留 masters 并让 Adam moments 重新开始"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "BF16_Optimizer 主循环",
             "keep_in_fp32 精度策略",
-            "precision_config 解析"
+            "precision_config 解析",
+            "load_state_dict 的 masters 重建"
           ],
           "order": 3,
-          "practice_task": "对同一个模型分别用 fp16 与 bf16 配置训练，对比每步显存占用（torch.cuda.max_memory_allocated）与最终 loss，解释差异来源。",
+          "practice_task": "对同一个模型分别用 fp16 与 bf16 配置训练，对比每步显存占用（torch.cuda.max_memory_allocated）与最终 loss，解释差异来源；再参考 tests/unit/checkpoint/test_fp32_master_stage3_bf16.py，对 BF16_Optimizer 分别以 load_from_fp32_weights=True/False 调用 load_state_dict，断言前者保留保存的 fp32 masters、后者从 bit16 权重重建。",
           "source_files": [
             "deepspeed/runtime/bf16_optimizer.py",
             "deepspeed/runtime/keep_in_fp32.py",
-            "deepspeed/runtime/precision_config.py"
+            "deepspeed/runtime/precision_config.py",
+            "tests/unit/checkpoint/test_fp32_master_stage3_bf16.py"
           ],
           "title": "BF16 优化器与低精度主权重",
-          "topic": "解读 BF16_Optimizer：为何 bf16 不需要 loss scaling、fp32 主权重可选策略（keep_in_fp32）、以及新版本引入的低精度 master state 支持。"
+          "topic": "解读 BF16_Optimizer：为何 bf16 不需要 loss scaling、fp32 主权重可选策略（keep_in_fp32）、低精度 master state 支持，以及本周期 load_state_dict 在 load_from_fp32_weights=False 时改为从 bit16 权重重建 masters 的恢复语义。"
         },
         {
           "action": "keep",
@@ -573,7 +576,8 @@
             "解释 deepspeed.zero 梯度平均化的两种模式",
             "定位 step 中 flatten/reduce_scatter/allgather 的调用顺序",
             "说明 Adagrad 初始化修复：为何改用 self.optimizer.param_groups（而非 single_partition_of_fp32_groups）重建优化器，以保留每个参数自己的选项",
-            "理解低精度 master（low_precision_master_weights_and_grads）从 CPU 恢复梯度前先 dest_buffer.zero_() 的原因：共享 scratch 里残留的上一步 NaN 会被溢出检查读到"
+            "理解低精度 master（low_precision_master_weights_and_grads）从 CPU 恢复梯度前先 dest_buffer.zero_() 的原因：共享 scratch 里残留的上一步 NaN 会被溢出检查读到",
+            "解读本周期折叠专家（AutoEP+AutoTP folding）的梯度裁剪修复：get_grad_norm_direct 新增 process_group/expert_parallel_group 参数，_is_folded_expert_group（组内参数 ds_zero_placement_family 全为 autoep_expert）的范数改为在实际 expert-DP 分区组与 EP owner 组上求和，且 _average_expert_grad_norms 不再对折叠组做专家范数平均——折叠后 TP peers 各持不同路由专家，旧的「过滤到 TP rank 0」路径会漏掉专家属主；稠密组与原生 MoE 组（含两者共存）保持原路径"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -581,19 +585,20 @@
             "GradPartitionBufferGroup",
             "step/zero_grad",
             "Adagrad param_groups 重建",
-            "低精度恢复的 scratch 清零"
+            "低精度恢复的 scratch 清零",
+            "折叠专家的梯度范数组"
           ],
           "order": 3,
-          "practice_task": "在两卡 ZeRO-2 训练中把 IPG bucket 调成不同大小（通过 contiguous_gradients 与 overlap_comm 组合），对比每步耗时与通信量，解释 bucket 对吞吐的影响；再开启低精度 master states + offload，构造一次人为溢出后恢复，验证 scratch 清零后不再误报 overflow。",
+          "practice_task": "在两卡 ZeRO-2 训练中把 IPG bucket 调成不同大小（通过 contiguous_gradients 与 overlap_comm 组合），对比每步耗时与通信量，解释 bucket 对吞吐的影响；再开启低精度 master states + offload，构造一次人为溢出后恢复，验证 scratch 清零后不再误报 overflow；最后阅读 tests/unit/v1/moe/test_autoep_autotp_sharded_attention.py 中 TestShardedAttentionClippedUpdate 的对照断言（折叠切分下的实际 SGD 更新 vs 未切分 ZeRO-0 参考），解释折叠专家组为何不能走专家范数平均。",
           "source_files": [
             "deepspeed/runtime/zero/stage_1_and_2.py",
             "deepspeed/runtime/zero/config.py"
           ],
           "title": "ZeRO-1/2：梯度切分与 IPG 流水线",
-          "topic": "精读 stage_1_and_2.py 的 DeepSpeedZeroOptimizer：独立并行梯度（IPG）bucket、overlap 通信、梯度 reduce-scatter 与扁平化缓冲区管理，以及本周期两处修复（Adagrad 用 param_groups 重建、低精度梯度恢复前清空共享 scratch）。"
+          "topic": "精读 stage_1_and_2.py 的 DeepSpeedZeroOptimizer：独立并行梯度（IPG）bucket、overlap 通信、梯度 reduce-scatter 与扁平化缓冲区管理，Adagrad 用 param_groups 重建、低精度梯度恢复前清空共享 scratch，以及本周期折叠专家的梯度范数改为在 expert-DP 分区组与 EP owner 组上求和的裁剪修复。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l3",
             "u3-l1"
@@ -603,23 +608,27 @@
           "learning_goals": [
             "描述 offload 时优化器状态、梯度和参数分别驻留在哪类内存",
             "解释 pinned memory 在 CPU 优化器中的作用",
-            "对比 fused CPU 优化器与 torch CPU 优化器的性能差异"
+            "对比 fused CPU 优化器与 torch CPU 优化器的性能差异",
+            "说明本周期 DeepSpeedCPUAdam/CPULion/CPUAdagrad 改为继承新基类 DeepSpeedCPUOptimizer（deepspeed/ops/cpu_optimizer.py）：fp32_optimizer_states 开启时（默认）step 以 fp32 维护状态，但 torch 的 load_state_dict 会把状态 cast 成参数 dtype，基类覆盖它并用 utils/torch.restore_optimizer_state_dtype 把浮点状态恢复为 fp32，bf16/fp16 卸载恢复不再被静默降成低精度 moments"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "DeepSpeedCPUAdam 类",
+            "DeepSpeedCPUOptimizer 基类",
             "pinned buffer 管理",
             "offload 配置解析"
           ],
           "order": 4,
-          "practice_task": "写一个直接使用 DeepSpeedCPUAdam 的基准脚本：在 CPU 上对 1M 参数向量分别用 torch.optim.Adam 与 DeepSpeedCPUAdam 各跑 100 步并对比耗时。",
+          "practice_task": "写一个直接使用 DeepSpeedCPUAdam 的基准脚本：在 CPU 上对 1M 参数向量分别用 torch.optim.Adam 与 DeepSpeedCPUAdam 各跑 100 步并对比耗时；再用 bf16 参数 + fp32_optimizer_states=True 构造 DeepSpeedCPUAdam，保存/加载 state_dict 后断言 exp_avg/exp_avg_sq 仍为 torch.float（参考 tests/unit/ops/adam/test_cpu_adam.py 的断言）。",
           "source_files": [
             "deepspeed/runtime/zero/stage_1_and_2.py",
             "deepspeed/ops/adam/cpu_adam.py",
+            "deepspeed/ops/cpu_optimizer.py",
+            "deepspeed/utils/torch.py",
             "csrc/adam/cpu_adam.cpp"
           ],
           "title": "ZeRO-Offload：CPU 卸载与 cpu_adam",
-          "topic": "解读 ZeRO-Offload 的实现：优化器状态与 fp32 梯度卸载到 CPU pinned memory、cpu_adam 内核的调用方式，以及单一/双重 offload 的区别。"
+          "topic": "解读 ZeRO-Offload 的实现：优化器状态与 fp32 梯度卸载到 CPU pinned memory、cpu_adam 内核的调用方式、单一/双重 offload 的区别，以及本周期新增 DeepSpeedCPUOptimizer 公共基类让 load_state_dict 保留 fp32 优化器状态的精度修复。"
         },
         {
           "action": "update",
@@ -632,17 +641,19 @@
             "解释参数 module hook（pre/post forward）触发 allgather 的机制",
             "描述参数 ds_status 生命周期（AVAILABLE/INFLIGHT/NOT_AVAILABLE）",
             "理解 hidden size 对齐与 contiguous 分配如何减少碎片",
-            "解读 zero/linear.py 中 LinearFunctionForZeroStage3 的 autocast 设备修复：设备类型跟随操作数所在设备而非当前加速器（CPU autocast 在 CUDA 机器上也必须正确生效），前向的设备选择被缓存到 ctx 供反向复用"
+            "解读 zero/linear.py 中 LinearFunctionForZeroStage3 的 autocast 设备修复：设备类型跟随操作数所在设备而非当前加速器（CPU autocast 在 CUDA 机器上也必须正确生效），前向的设备选择被缓存到 ctx 供反向复用",
+            "解读本周期 NVMe 预取去重修复（#4072）：参数 trace 按「每次使用」记录一条，末层（forward 后紧跟 backward）、梯度检查点重算层与共享层都会在预取窗口内出现两次，__prefetch_nvme_param_partitions 现在用集合跳过重复参数，避免 swap_in() 第二次分配缓冲触发 param already assigned swap buffer 断言"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "DeepSpeedZeRoOffload",
             "hook 注册",
             "参数预取窗口",
+            "NVMe 预取窗口的去重",
             "ZeRO-3 Linear 的 autocast 设备判定"
           ],
           "order": 5,
-          "practice_task": "在 ZeRO-3 训练中给一个自定义 Module 加 forward_pre_hook，打印触发时参数的 ds_status 与 ds_tensor 形状，验证参数按需物化过程；再参考 tests/unit/v1/zero/test_zero_functorch_linear.py，在 CPU 张量 + torch.autocast('cpu') 场景下验证 LinearFunctionForZeroStage3 前后向 dtype 一致。",
+          "practice_task": "在 ZeRO-3 训练中给一个自定义 Module 加 forward_pre_hook，打印触发时参数的 ds_status 与 ds_tensor 形状，验证参数按需物化过程；再参考 tests/unit/v1/zero/test_zero_functorch_linear.py，在 CPU 张量 + torch.autocast('cpu') 场景下验证 LinearFunctionForZeroStage3 前后向 dtype 一致；最后阅读 tests/unit/v1/zero/test_zero3_nvme_param_prefetch.py 的双计参数回归，说明去重修复前后的行为差异。",
           "source_files": [
             "deepspeed/runtime/zero/parameter_offload.py",
             "deepspeed/runtime/zero/partitioned_param_coordinator.py",
@@ -650,10 +661,10 @@
             "deepspeed/runtime/zero/linear.py"
           ],
           "title": "ZeRO-3：参数卸载与参数协调器",
-          "topic": "解读 parameter_offload.py 与 partitioned_param_coordinator.py：module hook 如何按需 allgather 参数、预取下一层参数、parameter_offload 的 ds_status 状态机，以及 zero/linear.py 中 ZeRO-3 定制 Linear 的 autocast 设备类型修复。"
+          "topic": "解读 parameter_offload.py 与 partitioned_param_coordinator.py：module hook 如何按需 allgather 参数、预取下一层参数、parameter_offload 的 ds_status 状态机、NVMe 预取窗口的重复参数去重修复，以及 zero/linear.py 中 ZeRO-3 定制 Linear 的 autocast 设备类型修复。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l5",
             "u4-l1"
@@ -664,7 +675,7 @@
             "列出 stage3 step 中 reduce_scatter 参数梯度与更新 ds_tensor 的顺序",
             "解释 contiguous_memory_allocator 如何降低碎片",
             "说明 partial offload 时子组设备串如何通过公共 accelerator API（device_name()）而非私有 _name 构造",
-            "解读本周期新增的 aliased_fp32_sub_groups：当权重已是 master dtype（fp32 模型，含 autocast 场景）时 fp32 分区直接复用权重分区，offload_states/reload_states 中这些子组没有独立存储、必须随 lp_params 一起搬运（_point_aliased_fp32_partitions_at_lp_buffer），单独 offload hp_params 不省显存并触发 warning_once",
+            "解读 aliased_fp32_sub_groups：当权重已是 master dtype（fp32 模型，含 autocast 场景）时 fp32 分区直接复用权重分区，offload_states/reload_states 中这些子组没有独立存储、必须随 lp_params 一起搬运（_point_aliased_fp32_partitions_at_lp_buffer），单独 offload hp_params 不省显存并触发 warning_once",
             "理解 reduce_scatter 配置项对性能的影响"
           ],
           "level": "advanced",
@@ -683,10 +694,10 @@
             "deepspeed/runtime/zero/partitioned_param_profiler.py"
           ],
           "title": "ZeRO-3 优化器：stage3 主循环与连续内存",
-          "topic": "精读 stage3.py 的 DeepSpeedZeroOptimizer_Stage3：step 中梯度 reduce-scatter、参数按分区更新、partial offload 子组设备分配（改用 get_accelerator().device_name() 公共接口）、contiguous memory 分配，以及本周期「权重分区即 master 副本」（aliased_fp32_sub_groups）对 offload_states/reload_states 的改造与与 stage1/2 共享的 loss scaling 机制。"
+          "topic": "精读 stage3.py 的 DeepSpeedZeroOptimizer_Stage3：step 中梯度 reduce-scatter、参数按分区更新、partial offload 子组设备分配（用 get_accelerator().device_name() 公共接口）、contiguous memory 分配、「权重分区即 master 副本」（aliased_fp32_sub_groups）对 offload_states/reload_states 的改造与与 stage1/2 共享的 loss scaling 机制。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l4",
             "u5-l5"
@@ -696,28 +707,33 @@
           "learning_goals": [
             "描述 PartitionedParamSwapper 的读写队列与线程模型",
             "解释 aio 样本缓冲、线程数、块大小等调优参数的含义",
-            "理解参数从 NVMe->CPU->GPU 的两级流水"
+            "理解参数从 NVMe->CPU->GPU 的两级流水",
+            "解读本周期 DeepNVMe 静默 I/O 失败修复：wait()/sync_pread()/sync_pwrite() 现在检查每个完成请求的结果并抛 RuntimeError（写满文件、只读文件等不再假装成功）；非连续或未按文件所需对齐（statx 探测、缺省 512 字节）的张量改走 bounce buffer；优化器 fast init 对非对齐长度分区用填充 staging 张量读整块再 narrow 拷出；io_submit 错误不再 assert、io_pgetevents 处理 EINTR 重试、io_queue_init 失败抛错"
           ],
           "level": "advanced",
           "minimal_modules": [
             "PartitionedParamSwapper",
             "AIO 句柄与线程池",
+            "I/O 结果检查与错误传播",
+            "对齐检测与 bounce buffer",
             "nvme 探测与调优工具"
           ],
           "order": 7,
-          "practice_task": "运行 deepspeed 的 nvme 性能探测（参考 deepspeed/nvme/parse_nvme_stats.py 对输出格式的定义）对自己的磁盘做一次测速，确定最优线程数/块大小组合。",
+          "practice_task": "运行 deepspeed 的 nvme 性能探测（参考 deepspeed/nvme/parse_nvme_stats.py 对输出格式的定义）对自己的磁盘做一次测速，确定最优线程数/块大小组合；再阅读 tests/unit/v1/nvme/test_aio.py 中未对齐视图与错误注入（写满文件、只读文件）用例，对照修复前后行为说明为什么 O_DIRECT 下错位缓冲会静默丢数据。",
           "source_files": [
             "deepspeed/runtime/swap_tensor/partitioned_param_swapper.py",
+            "deepspeed/runtime/swap_tensor/optimizer_utils.py",
             "deepspeed/runtime/swap_tensor/async_swapper.py",
             "deepspeed/nvme/io_engine.py",
             "op_builder/async_io.py",
-            "csrc/aio/py_lib/deepspeed_py_aio_handle.cpp"
+            "csrc/aio/py_lib/deepspeed_py_aio_handle.cpp",
+            "tests/unit/v1/nvme/test_aio.py"
           ],
           "title": "ZeRO-Infinity：NVMe 交换与异步 IO",
-          "topic": "解读 swap_tensor 包与 nvme/io_engine：参数/优化器状态在 GPU/CPU/NVMe 三级存储间的交换、异步 IO 内核（csrc/aio）与 pipelined swapper 的实现。"
+          "topic": "解读 swap_tensor 包与 nvme/io_engine：参数/优化器状态在 GPU/CPU/NVMe 三级存储间的交换、异步 IO 内核（csrc/aio）与 pipelined swapper 的实现，以及本周期 DeepNVMe 对齐/错误检查修复（完成请求结果校验、bounce buffer、staging 读取、EINTR 重试）。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u5-l3",
             "u5-l6"
@@ -727,24 +743,29 @@
           "learning_goals": [
             "解释为何训练时只有 rank0 持有完整优化器状态也能恢复",
             "用 zero_to_fp32.py 从 ZeRO 检查点提取可部署的单文件模型",
-            "理解 tensor_fragment 如何只读必要分片加速导出"
+            "理解 tensor_fragment 如何只读必要分片加速导出",
+            "解读本周期 fp32 masters 的恢复矩阵：引擎 load_checkpoint 的正常恢复总是加载保存的 fp32 masters；load_optimizer_states=False 保留 masters 并让 Adam moments 重新开始；load_module_only=True 时 ZeRO-3 仍读取 fp32 分区（模型检查点不含分区权重）；stage3 的 _rigid_load_state_dict/_load_universal_checkpoint 新增 load_from_fp32_weights=False 分支，用 refresh_fp32_params() 从 bit16 权重重建分区",
+            "说明流水线串行加载的分片预检查：进入 dist.recv 等待前先确认 ZeRO 分片存在，缺失时直接 raise 而非让各 rank 死等"
           ],
           "level": "advanced",
           "minimal_modules": [
             "save/load 检查点链路",
             "zero_to_fp32 权重提取",
-            "tensor_fragment 局部读取"
+            "tensor_fragment 局部读取",
+            "fp32 masters 的恢复矩阵",
+            "流水线加载的分片预检查"
           ],
           "order": 8,
-          "practice_task": "跑一次两卡 ZeRO-2 训练，保存检查点后用 python -m deepspeed.utils.zero_to_fp32（或等价 API）导出完整 fp32 权重，加载回单进程模型验证权重一致性。",
+          "practice_task": "跑一次两卡 ZeRO-2 训练，保存检查点后用 python -m deepspeed.utils.zero_to_fp32（或等价 API）导出完整 fp32 权重，加载回单进程模型验证权重一致性；再参考 tests/unit/checkpoint/test_fp32_master_only.py，分别以 load_optimizer_states=False 与 load_module_only=True 加载，断言 masters 的保留/重建行为符合恢复矩阵。",
           "source_files": [
             "deepspeed/utils/zero_to_fp32.py",
             "deepspeed/utils/tensor_fragment.py",
             "deepspeed/runtime/model_checkpointing/utils.py",
-            "deepspeed/runtime/engine.py"
+            "deepspeed/runtime/engine.py",
+            "tests/unit/checkpoint/test_fp32_master_only.py"
           ],
           "title": "ZeRO 检查点保存与权重导出",
-          "topic": "解读引擎 save/load_checkpoint 对 ZeRO 分片状态的处理：优化器状态/参数/调度器状态如何按 rank 保存，zero_to_fp32 如何按需重组出完整 fp32 权重。"
+          "topic": "解读引擎 save/load_checkpoint 对 ZeRO 分片状态的处理：优化器状态/参数/调度器状态如何按 rank 保存、zero_to_fp32 如何按需重组出完整 fp32 权重，以及本周期 fp32 masters 恢复矩阵的补全（masters-only/module-only 加载语义、stage3 从 bit16 权重重建、流水线串行加载的分片预检查）。"
         }
       ],
       "level": "intermediate",
@@ -763,7 +784,7 @@
           "filename": "u6-l1-autotp.md",
           "id": "u6-l1",
           "learning_goals": [
-            "解释 AutoTPMeta 如何从模型 config 推断切分维度，以及新增的 training 字段如何让每个模型记住自己被切分时的训练模式",
+            "解释 AutoTPMeta 如何从模型 config 推断切分维度，以及 training 字段如何让每个模型记住自己被切分时的训练模式",
             "解释 training_mode=None 时层按模型级而非进程级跟随 set_autotp_mode 的语义（冻结 teacher + 训练 student 共存于一个进程）",
             "理解 register_replicated_grad_hooks 对冻结参数（requires_grad=False）跳过注册并返回清单、引擎在 backward 前拒绝后续 unfreeze 的防御逻辑",
             "对比推理注入与训练模式下 TP 的不同实现路径",
@@ -786,7 +807,7 @@
             "deepspeed/module_inject/replace_module.py"
           ],
           "title": "AutoTP：自动张量并行注入",
-          "topic": "解读 module_inject 包：如何按 policy 识别模型中的线性/注意力层，tp_shard 如何按 head 维度切分权重并注入并行版 Linear；本周期新增按模型管理 AutoTP 训练模式（AutoTPMeta.training、TensorParallel_Layer.is_training_mode 的 per-model 语义）与冻结模型支持（frozen replicated params 的跳过与引擎侧 unfreeze 防线）。"
+          "topic": "解读 module_inject 包：如何按 policy 识别模型中的线性/注意力层，tp_shard 如何按 head 维度切分权重并注入并行版 Linear；按模型管理 AutoTP 训练模式（AutoTPMeta.training、TensorParallel_Layer.is_training_mode 的 per-model 语义）与冻结模型支持（frozen replicated params 的跳过与引擎侧 unfreeze 防线）。"
         },
         {
           "action": "keep",
@@ -913,8 +934,10 @@
             "描述 auto_ep 的模块替换与 config 推断流程",
             "解释 fused expert kernel 与传统专家循环的对比",
             "定位 engine 中 AutoEP 折叠（folding）优化的触发点",
-            "解读本周期 folding 校验的细化：validate_folding_global 从「是否开 offload」两个布尔改为 offload_optimizer_device/offload_param_device 设备语义——ZeRO-3 + offload_optimizer.device=cpu 现在允许（梯度校正与范数都取自分区，与优化器状态位置无关），参数 offload 与 ZeRO-1/2 + NVMe 仍被拒绝，Muon+卸载+folding 显式报错",
-            "理解 ep_experts 的 _ZeroEmptyExpertGrad：grouped-GEMM 后端对零 token 专家的权重梯度是未定义的，用 autograd Function 只把这些行清零，保证梯度裁剪范数每个专家只计一次且可复现"
+            "解读 folding 校验的 offload device 语义：ZeRO-3 + offload_optimizer.device=cpu 允许（梯度校正与范数都取自分区），参数 offload 与 ZeRO-1/2 + NVMe 仍被拒绝，Muon+卸载+folding 显式报错",
+            "理解 ep_experts 的 _ZeroEmptyExpertGrad：grouped-GEMM 后端对零 token 专家的权重梯度是未定义的，用 autograd Function 只把这些行清零，保证梯度裁剪范数每个专家只计一次且可复现",
+            "解读本周期折叠专家梯度裁剪修复：AutoEP+AutoTP folding 让 TP peers 各持不同路由专家，ZeRO-1/2 旧的「过滤到 TP rank 0 再专家范数平均」会漏掉专家属主；现在 _is_folded_expert_group（组内参数 ds_zero_placement_family 全为 autoep_expert）的范数改为在实际 expert-DP 分区组与 EP owner 组上求和且不再做专家范数平均，稠密组与原生 MoE 组保持原路径（native ETP 与 AutoEP 组可共存），契约写入 docs/code-docs/source/autoep.rst",
+            "了解 router_logits 输出捕获注册表的兼容修复：transformers main 把 _CAN_RECORD_REGISTRY 换成重载 get/__setitem__ 的 _CanRecordRegistry，auto_ep_presets/base.py 用 _registry_get/_registry_set 直接调用 dict 方法以同时支持两种形态"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -922,20 +945,23 @@
             "ep_kernels Triton 内核",
             "expert folding 优化",
             "folding 与 ZeRO offload 的兼容矩阵",
-            "空专家梯度清零"
+            "折叠专家的梯度范数归约",
+            "空专家梯度清零",
+            "输出捕获注册表兼容"
           ],
           "order": 6,
-          "practice_task": "对一个小型 MoE 模型同时启用 AutoTP 与 AutoEP，在日志中确认注入的层类型，并用 nsight 或 torch profiler 抓一次前向，验证 fused expert kernel 被调用；再分别尝试 offload_optimizer.device=cpu（ZeRO-3，应通过校验）与 offload_param.device=cpu（应触发 ValueError），对照 validate_folding_global 的报错信息理解兼容矩阵。",
+          "practice_task": "对一个小型 MoE 模型同时启用 AutoTP 与 AutoEP，在日志中确认注入的层类型，并用 nsight 或 torch profiler 抓一次前向，验证 fused expert kernel 被调用；再分别尝试 offload_optimizer.device=cpu（ZeRO-3，应通过校验）与 offload_param.device=cpu（应触发 ValueError），对照 validate_folding_global 的报错信息理解兼容矩阵；最后阅读 tests/unit/v1/moe/test_autoep_autotp_sharded_attention.py 的 clipped-update 回归（折叠切分的实际 SGD 更新对照未切分 ZeRO-0 参考，覆盖全部 45 个参数族），理解折叠专家范数的正确归约路径。",
           "source_files": [
             "deepspeed/module_inject/auto_ep.py",
             "deepspeed/module_inject/auto_ep_config.py",
             "deepspeed/module_inject/auto_ep_folding.py",
+            "deepspeed/module_inject/auto_ep_presets/base.py",
             "deepspeed/moe/ep_kernels.py",
             "deepspeed/moe/ep_experts.py",
-            "deepspeed/ops/triton_ops/autoep_fused_token_ops.py"
+            "docs/code-docs/source/autoep.rst"
           ],
           "title": "AutoEP：新一代专家并行注入",
-          "topic": "解读 module_inject/auto_ep* 系列与 moe/ep_* 内核：如何自动把 HuggingFace MoE 模型转换为专家并行布局，fused kernel 的 Triton 实现；本周期 folding 与 ZeRO 卸载的兼容矩阵细化为按设备判定（放开 ZeRO-3+CPU 优化器卸载）、ep_experts 对空专家梯度清零以支持「每个专家只计一次」的裁剪范数。"
+          "topic": "解读 module_inject/auto_ep* 系列与 moe/ep_* 内核：如何自动把 HuggingFace MoE 模型转换为专家并行布局、fused kernel 的 Triton 实现；folding 与 ZeRO 卸载的兼容矩阵按设备判定、ep_experts 对空专家梯度清零，以及本周期折叠专家（AutoEP+AutoTP）在 ZeRO-1/2 中的梯度裁剪范数改为按 expert-DP 分区组与 EP owner 组归约（契约文档化于 autoep.rst）和 transformers 输出捕获注册表的 dict 兼容修复。"
         }
       ],
       "level": "intermediate",
@@ -1042,9 +1068,9 @@
           "learning_goals": [
             "描述训练权重与推理 kernel 之间的双向转换流程",
             "解释 continuous batching 的调度循环",
-            "理解图捕获（graph capture）本周期改为加速器显式 opt-in：validate_graph_capture_support 与 rollout 两条生成路径都改查 is_graph_capture_supported()，未 opt-in 的后端 warning_once 后回退 eager 而非报错",
-            "解读静态图 decode 前向为何改传预构建的 4-D 加性掩码（static_causal_attn）：Transformers 从 2-D mask 构建 SDPA 掩码时的 host 端检查会同步 stream、破坏 CUDA graph 捕获，每步 decode 由 _update_static_causal_attention 多解掩一列",
-            "了解 DeepSpeedStaticCache 新增 get_query_offset 的动机：掩码构建先于当前 KV 写入、get_seq_length 不够用，以支持 Transformers 5.20 的 cache query offsets"
+            "理解图捕获的加速器显式 opt-in：validate_graph_capture_support 与 rollout 两条生成路径都改查 is_graph_capture_supported()，未 opt-in 的后端 warning_once 后回退 eager 而非报错",
+            "解读静态图 decode 前向传预构建 4-D 加性掩码（static_causal_attn）的原因：Transformers 从 2-D mask 构建 SDPA 掩码时的 host 端检查会同步 stream、破坏 CUDA graph 捕获；DeepSpeedStaticCache 新增 get_query_offset 以支持 Transformers 5.20 的 cache query offsets",
+            "解读本周期非贪婪采样进入快路径：_token_selector(sampling) 统一 graph decode、continuous batching 与 continuous batching+graph 三条路径的 token 选择——temperature<=0 走 argmax，否则按 generate() 的顺序在 float32 logits 上应用 Temperature/TopK/TopP warper 后 torch.multinomial；采样发生在 host 端、图之外，因此图捕获不再要求 greedy；continuous batching 移除 temperature>0 的拒绝，repetition penalty 调整到 warper 之前（generate() 的顺序），_hf_sampling_kwargs 统一主 generate() 调用与无 cache-class prefill 的采样参数"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1052,19 +1078,21 @@
             "rollout 调度器",
             "图捕获 opt-in 与 eager 回退",
             "静态图 decode 的 4-D 掩码",
+            "_token_selector 与采样 warper 链",
             "DeepSpeedStaticCache 的 query offset"
           ],
           "order": 4,
-          "practice_task": "用 tests/unit/hybrid_engine 与 tests/unit/runtime/rollout/test_hybrid_engine_rollout.py 的用例作为模板，跑通一个 train->generate->train 的混合引擎循环，记录每次切换的训练/推理耗时分解；再对比 greedy（可用图捕获）与非 greedy 采样路径的输出与耗时，并在日志中确认不支持图捕获的后端会打印回退警告。",
+          "practice_task": "用 tests/unit/hybrid_engine 与 tests/unit/runtime/rollout/test_hybrid_engine_rollout.py 的用例作为模板，跑通一个 train->generate->train 的混合引擎循环，记录每次切换的训练/推理耗时分解；再对比 greedy 与非 greedy（temperature=0.7, top_k=5, top_p=0.8）采样路径的输出与耗时，在日志中确认不支持图捕获的后端会打印回退警告；参考 test_hybrid_engine_rollout.py 的 token selector 分布测试（固定 logits 两万次抽样对照独立计算的参考分布）与 tests/unit/v1/test_hybrid_engine_rollout_v1.py 的 test_decode_sampling_matches_hf_generate（同种子下与 HF generate() 逐 token 一致），验证三条路径的采样分布等价。",
           "source_files": [
             "deepspeed/runtime/hybrid_engine.py",
             "deepspeed/runtime/rollout/hybrid_engine_rollout.py",
             "deepspeed/runtime/rollout/continuous_batching.py",
             "deepspeed/runtime/hybrid_engine_graph.py",
-            "deepspeed/utils/static_cache.py"
+            "deepspeed/utils/static_cache.py",
+            "docs/code-docs/source/inference-engine.rst"
           ],
           "title": "Hybrid Engine：训练与推理一体化",
-          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；本周期图捕获改为按加速器显式 opt-in（不支持时回退 eager）、静态图 decode 改用预构建 4-D 加性掩码避免 host 端同步破坏捕获，DeepSpeedStaticCache 增加 query offset 支持 Transformers 5.20。"
+          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；图捕获按加速器显式 opt-in（不支持时回退 eager）、静态图 decode 用预构建 4-D 加性掩码避免 host 端同步破坏捕获、DeepSpeedStaticCache 增加 query offset 支持 Transformers 5.20，以及本周期非贪婪采样通过 _token_selector 统一进入 graph decode 与 continuous batching 快路径（采样分布与 HF generate() 一致）。"
         }
       ],
       "level": "advanced",
@@ -1132,7 +1160,7 @@
           "topic": "解读 checkpoint_engine 包：torch/fast/decoupled 三种引擎的可插拔抽象，以及引擎如何决定状态实际写到哪（本地盘、共享存储、异步服务）。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u8-l2",
             "u5-l8"
@@ -1142,27 +1170,30 @@
           "learning_goals": [
             "读取 universal checkpoint 目录的文件命名与 metadata 结构",
             "解释 ZeRO 状态与 universal 格式的转换规则",
-            "用转换工具完成一次跨并行度恢复实验"
+            "用转换工具完成一次跨并行度恢复实验",
+            "说明本周期 universal 加载跳过优化器状态（masters-only）时保留 optim_fragment 的修复：load_hp_checkpoint_state 只在 load_optimizer_states=True 时清空 optim_fragment，masters-only 加载后 safe_get_full_optimizer_state/safe_set_full_optimizer_state 仍然可用"
           ],
           "level": "advanced",
           "minimal_modules": [
             "universal 格式约定",
             "加载时的重切分",
-            "格式转换器"
+            "格式转换器",
+            "optim_fragment 的保留"
           ],
           "order": 3,
-          "practice_task": "把一个 ZeRO-3 训练的检查点用 ds_to_universal（或等价流程）转为 universal 格式，再用不同的并行度配置加载恢复，验证 loss 曲线连续。",
+          "practice_task": "把一个 ZeRO-3 训练的检查点用 ds_to_universal（或等价流程）转为 universal 格式，再用不同的并行度配置加载恢复，验证 loss 曲线连续；对照 tests/unit/checkpoint/test_zero_optimizer.py 的断言，验证跳过优化器状态的加载不会破坏后续的优化器状态读写工具。",
           "source_files": [
             "deepspeed/checkpoint/universal_checkpoint.py",
             "deepspeed/checkpoint/zero_checkpoint.py",
             "deepspeed/checkpoint/ds_to_universal.py",
-            "deepspeed/checkpoint/utils.py"
+            "deepspeed/checkpoint/utils.py",
+            "tests/unit/checkpoint/test_zero_optimizer.py"
           ],
           "title": "Universal Checkpoint：跨并行度检查点迁移",
-          "topic": "解读 universal checkpoint：定义与具体训练拓扑无关的参数存储格式，使 ZeRO-3、3D 并行、不同 world_size 之间可以互相加载权重。"
+          "topic": "解读 universal checkpoint：定义与具体训练拓扑无关的参数存储格式，使 ZeRO-3、3D 并行、不同 world_size 之间可以互相加载权重；本周期 masters-only 加载保留 optim_fragment 使优化器状态读写工具链保持可用。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l6",
             "u2-l4"
@@ -1194,7 +1225,7 @@
             "deepspeed/runtime/compiler.py"
           ],
           "title": "DeepCompile：编译器式重叠优化",
-          "topic": "解读 compile 包：用 FX 捕获训练图，把 ZeRO-3 的参数 allgather/reduce-scatter 与计算自动重叠（list scheduling），以及 inductor 后端集成；本周期 sp/tp 两个编译 pass 的规范化死代码消除学会保留 vmap nesting 这类副作用节点。"
+          "topic": "解读 compile 包：用 FX 捕获训练图，把 ZeRO-3 的参数 allgather/reduce-scatter 与计算自动重叠（list scheduling），以及 inductor 后端集成；sp/tp 两个编译 pass 的规范化死代码消除学会保留 vmap nesting 这类副作用节点。"
         },
         {
           "action": "keep",
@@ -1268,7 +1299,7 @@
             "追踪 plan_transfer 如何为「从一种切分搬到另一种切分」生成按轮次组织的搬运计划",
             "解读 affine_transfer_executor：先对计划摘要（plan_digest）达成共识，再按「先挂接收后发发送」的轮次协议执行，用 StagingBudget 约定每 peer 的在途字节上限",
             "理解 TransferEndpoints 为何把源 rank 与目标 rank 分成两个独立映射（两个 rank 命名空间不是同一个 world_size）",
-            "解读本周期 rebuild/extract 新增的「每个元素恰好写一次」校验：_overlaps_itself 拒绝自重叠视图、_place/_require_placed 拒绝分片内地址复用或漏写、written 掩码区分 _UNWRITTEN/_SINGLE_HOLDER/_REPLICA 以抓住两个 rank 争写同一块或整体覆盖不全"
+            "解读 rebuild/extract 的「每个元素恰好写一次」校验：_overlaps_itself 拒绝自重叠视图、_place/_require_placed 拒绝分片内地址复用或漏写、written 掩码区分 _UNWRITTEN/_SINGLE_HOLDER/_REPLICA 以抓住两个 rank 争写同一块或整体覆盖不全"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1289,7 +1320,7 @@
             "docs/code-docs/source/affine-transfer.rst"
           ],
           "title": "Affine 分片迁移：跨切分方式的参数直搬",
-          "topic": "affine.py/affine_transfer.py/affine_transfer_executor.py 三件套：用仿射映射描述任意并行方式产生的分片、规划两种分片间的搬运、并以有界 peer staging 直接在分片缓冲区间执行计划而不重建完整逻辑张量；本周期 affine 映射转换新增「每个元素恰好写一次」的完整校验（自重叠视图、分片内地址复用、全量覆盖与副本一致性），这是 Universal Checkpoint 之外另一条跨并行度迁移参数的底层通道。"
+          "topic": "affine.py/affine_transfer.py/affine_transfer_executor.py 三件套：用仿射映射描述任意并行方式产生的分片、规划两种分片间的搬运、并以有界 peer staging 直接在分片缓冲区间执行计划而不重建完整逻辑张量；affine 映射转换带「每个元素恰好写一次」的完整校验（自重叠视图、分片内地址复用、全量覆盖与副本一致性），这是 Universal Checkpoint 之外另一条跨并行度迁移参数的底层通道。"
         },
         {
           "action": "new",
@@ -1429,7 +1460,7 @@
           "topic": "解读最新一代 offload 引擎：zenflow 的 stall-free 卸载调度与 superoffload 的 stage3 变体，理解它们对传统 ZeRO-Offload 瓶颈的改进。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l2",
             "u2-l1"
@@ -1440,7 +1471,7 @@
             "用 pytest 参数化组合跑一个最小测试子集",
             "描述 DeepSpeed 的 pre-commit、yapf/flake8 与 DCO 门槛",
             "定位新功能/新算子应配套的测试类型（单测/集成/多硬件）",
-            "了解 PR CI 本周期起运行 v1 多 rank CPU 套件（cpu-torch-latest-v1-multirank.yml），legacy NV 系列 workflow 被裁撤"
+            "了解 PR CI 运行 v1 多 rank CPU 套件（cpu-torch-latest-v1-multirank.yml，含空选择与全被过滤的绿色跳过处理），legacy NV 系列 workflow 已裁撤"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1449,7 +1480,7 @@
             "贡献流程与 CI"
           ],
           "order": 4,
-          "practice_task": "挑选 tests/unit 中的一个测试文件（如本周期新增的 tests/unit/runtime/test_runtime_utils.py、tests/unit/v1/zero/test_zero.py 或 tests/unit/utils/test_static_cache.py），在本地用不同参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
+          "practice_task": "挑选 tests/unit 中的一个测试文件（如 tests/unit/runtime/test_runtime_utils.py、tests/unit/v1/zero/test_zero.py、tests/unit/utils/test_static_cache.py 或本周期新增的 tests/unit/v1/zero/test_zero3_nvme_param_prefetch.py），在本地用不同参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
           "source_files": [
             "tests/unit/simple_model.py",
             "tests/unit/common.py",
@@ -1471,7 +1502,7 @@
           "id": "u9-l5",
           "learning_goals": [
             "解释 QuantizedParameter 如何在 .to(device) 时就地量化权重、前向时按需 dequantized()，以及 QuantizedLinear 仅支持 bfloat16 的现状",
-            "说明 FP_Quantize 对 fp8/fp12/fp6/fp4 的 mantissa/exponent 位分配与 group_size 分组缩放，以及本周期把 q_bits=12 的尾数位从 4 修正为 7 的数值含义",
+            "说明 FP_Quantize 对 fp8/fp12/fp6/fp4 的 mantissa/exponent 位分配与 group_size 分组缩放，以及 q_bits=12 的尾数位从 4 修正为 7 的数值含义",
             "追踪 group_size 约束的双侧校验（Python _validate_shape 与 C++ TORCH_CHECK：为正、可被 8 整除、元素数整除）与空张量零组早退",
             "阅读 fp8_gemm_triton 中 E4M3 反量化的位技巧：把 E4M3 位按 fp16 布局摆放（低 4 位指数与 subnormal 对齐）再用 *256 修正指数偏差，以及 OutOfResources 时按设备/tile 缓存逐级降低 num_stages 的自适应启动",
             "理解 QuantizedParameter.to() 必须重建子类并回填 __dict__ 的原因：HuggingFace 克隆参数时会绕过 __new__ 导致量化器丢失"
@@ -1495,7 +1526,7 @@
             "tests/unit/linear/test_quant_param.py"
           ],
           "title": "低比特量化内核：FP_Quantizer、QuantizedLinear 与 FP8 GEMM",
-          "topic": "解读 DeepSpeed 的权重量化栈：deepspeed/linear/quantization.py 的 QuantizedParameter/QuantizedLinear（权重以量化形式驻留 GPU、前向时反量化）、deepspeed/ops/fp_quantizer 的 FP_Quantize（fp8/fp12/fp6/fp4 分组量化）与 csrc/fp_quantizer CUDA 内核、fp8_gemm_triton 的反量化 GEMM；本周期一系列修复（q_bits=12 尾数位 4->7、Python/C++ 双侧 group_size 校验、空张量早退、.to() 保持子类、E4M3 位布局修正、共享内存不足自动降 num_stages）让这条路径首次值得系统讲解。"
+          "topic": "解读 DeepSpeed 的权重量化栈：deepspeed/linear/quantization.py 的 QuantizedParameter/QuantizedLinear（权重以量化形式驻留 GPU、前向时反量化）、deepspeed/ops/fp_quantizer 的 FP_Quantize（fp8/fp12/fp6/fp4 分组量化）与 csrc/fp_quantizer CUDA 内核、fp8_gemm_triton 的反量化 GEMM；一系列修复（q_bits=12 尾数位 4->7、Python/C++ 双侧 group_size 校验、空张量早退、.to() 保持子类、E4M3 位布局修正、共享内存不足自动降 num_stages）让这条路径首次值得系统讲解。"
         }
       ],
       "level": "advanced",
