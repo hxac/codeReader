@@ -67843,41 +67843,53 @@
           "error": null
         },
         "u9-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9949944000000001,
+          "error": null
+        },
+        "u10-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.86202,
+          "error": null
+        },
+        "u10-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9404248000000001,
+          "error": null
+        },
+        "u10-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.0167344,
+          "error": null
+        },
+        "u10-l4": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5403536,
+          "error": null
+        },
+        "u10-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1437751999999999,
+          "error": null
+        },
+        "u10-l6": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"82b60f34-8e20-4cc5-a36c-0bcb66b6fb82\",\"total_co"
-        },
-        "u10-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l5": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u10-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1f06c87d-8e1c-484a-b1a1-148f418e36df\",\"total_co"
         },
         "u10-l7": {
           "status": "pending",
@@ -67891,7 +67903,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/reasoning-from-scratch/reasoning-from-scratch-tutorial",
       "last_head": "b8646024377b0a35b44eddd2ec506c1a63f1b791",
-      "last_run_at": "2026-11-07T13:02:33Z",
+      "last_run_at": "2026-11-08T11:02:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rasbt/machine-learning-book": {
@@ -68164,46 +68176,60 @@
           "error": null
         },
         "u16-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9167848,
+          "error": null
+        },
+        "u16-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.9131191999999999,
+          "error": null
+        },
+        "u16-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7722664000000001,
+          "error": null
+        },
+        "u17-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6490600000000001,
+          "error": null
+        },
+        "u17-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8892584,
+          "error": null
+        },
+        "u18-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7931071999999999,
+          "error": null
+        },
+        "u18-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.7770248000000001,
+          "error": null
+        },
+        "u19-l1": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8e645b96-8b65-4fb0-aea7-9a0e2d8f9fc9\",\"total_co"
-        },
-        "u16-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u16-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u17-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u17-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u18-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u18-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u19-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"3a8470cc-890e-40cc-81a1-42ad14c4b844\",\"total_co"
         },
         "u19-l2": {
           "status": "pending",
@@ -68217,7 +68243,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/machine-learning-book/machine-learning-book-tutorial",
       "last_head": "63bee951ca45420ac33ccf803ceb337afc3c0a91",
-      "last_run_at": "2026-11-07T13:02:33Z",
+      "last_run_at": "2026-11-08T11:02:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "rasbt/deeplearning-models": {
@@ -68420,36 +68446,46 @@
           "error": null
         },
         "u6-l5": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.8130392000000001,
+          "error": null
+        },
+        "u6-l6": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.3479728,
+          "error": null
+        },
+        "u7-l1": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 0.6652808000000001,
+          "error": null
+        },
+        "u7-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.5521656000000001,
+          "error": null
+        },
+        "u7-l3": {
+          "status": "failed",
+          "action": "new",
+          "retries": 1,
+          "cost": null,
+          "error": "ClaudeRunnerError: agent 非零退出（分类匹配）：\n # find position of first line of source in raw file (rough)\\n        print(f'  cell {i:2d} [{c[\\\\\\\"cell_type\\\\\\\"]:8s}] lines={len(c[\\\\\\\"source\\\\\\\"]):3d} | {first_line}')\\n\\\"\",\"descr"
+        },
+        "u7-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"98d32a2e-8c7d-44c8-b569-1df6202c655a\",\"total_co"
-        },
-        "u6-l6": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l1": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l2": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u7-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6bfed5e2-bd73-43e8-8378-53392345af59\",\"total_co"
         },
         "u7-l5": {
           "status": "pending",
@@ -68503,7 +68539,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/rasbt/deeplearning-models/deeplearning-models-tutorial",
       "last_head": "59beda3aa25337e576564f1c18c6edd26f9f30e3",
-      "last_run_at": "2026-11-07T13:02:33Z",
+      "last_run_at": "2026-11-08T11:02:49Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "deepspeedai/DeepSpeed": {
@@ -68545,22 +68581,18 @@
           "retries": 0
         },
         "u2-l4": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 1.4202112,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l1": {
-          "status": "failed",
-          "action": "update",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"753c46e8-c52c-41d0-86f2-3af91d5fc6c4\",\"total_co"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "pending",
-          "action": "update",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u3-l3": {
@@ -68579,14 +68611,16 @@
           "retries": 0
         },
         "u4-l2": {
-          "status": "pending",
-          "action": "update",
-          "retries": 0
-        },
-        "u4-l3": {
           "status": "keep",
           "action": "keep",
           "retries": 0
+        },
+        "u4-l3": {
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.10258,
+          "error": null
         },
         "u4-l4": {
           "status": "keep",
@@ -68604,34 +68638,44 @@
           "retries": 0
         },
         "u5-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1565256000000004,
+          "error": null
         },
         "u5-l4": {
-          "status": "keep",
-          "action": "keep",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 0.9898552,
+          "error": null
         },
         "u5-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3609255999999998,
+          "error": null
         },
         "u5-l6": {
-          "status": "pending",
-          "action": "update",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u5-l7": {
-          "status": "keep",
-          "action": "keep",
-          "retries": 0
+          "status": "done",
+          "action": "update",
+          "retries": 0,
+          "cost": 1.5352184,
+          "error": null
         },
         "u5-l8": {
-          "status": "keep",
-          "action": "keep",
-          "retries": 0
+          "status": "failed",
+          "action": "update",
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b97392e8-4cd6-4d38-9dc6-7872352f3be2\",\"total_co"
         },
         "u6-l1": {
           "status": "keep",
@@ -68694,13 +68738,13 @@
           "retries": 0
         },
         "u8-l3": {
-          "status": "keep",
-          "action": "keep",
+          "status": "pending",
+          "action": "update",
           "retries": 0
         },
         "u8-l4": {
-          "status": "pending",
-          "action": "update",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u8-l5": {
@@ -68739,8 +68783,8 @@
           "retries": 0
         },
         "u9-l4": {
-          "status": "pending",
-          "action": "update",
+          "status": "keep",
+          "action": "keep",
           "retries": 0
         },
         "u9-l5": {
@@ -68749,14 +68793,14 @@
           "retries": 0
         }
       },
-      "manifest_head": "6d64e1b9746d77ae1c1cd652006cb3bafeb09afe",
-      "prev_head": "d8241a9ba266405e1a58fadf19e24b2370f6d7fa",
+      "manifest_head": "02f7978481cb3d3297f111c02b16d768b890b256",
+      "prev_head": "6d64e1b9746d77ae1c1cd652006cb3bafeb09afe",
       "phase": "workers",
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
-      "last_head": "6d64e1b9746d77ae1c1cd652006cb3bafeb09afe",
-      "last_run_at": "2026-11-07T13:02:33Z",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7c3fc2e7-6c4e-4681-ae26-87592c83e30a\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
+      "last_head": "02f7978481cb3d3297f111c02b16d768b890b256",
+      "last_run_at": "2026-11-08T11:02:49Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "triple-mu/fast-ulysses": {},
     "KellerJordan/Muon": {},
