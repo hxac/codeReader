@@ -1,0 +1,449 @@
+{
+  "head": "f98f1cacc0263b04290753e32be8d498c1efc806",
+  "project": "Muon",
+  "rationale": "Muon 是一个极小而精的研究型项目：核心实现全部集中在 muon.py 一个文件（约 290 行）中，包含 3 个函数（zeropower_via_newtonschulz5、muon_update、adam_update）和 4 个优化器类（Muon、SingleDeviceMuon、MuonWithAuxAdam、SingleDeviceMuonWithAuxAdam）。因此大纲不按目录漫游式组织，而是按「背景上手 → 数学与核心机制 → 组合优化器与分布式 → 数值实验与二次开发」的递进顺序逐段精读同一文件。第一单元解决『项目是什么、怎么装、代码长什么样、四个类怎么选』；第二单元自底向上讲清正交化数学、Newton-Schulz 迭代、动量与尺度缩放，并补齐 PyTorch Optimizer 扩展约定（这是读懂 step() 的前提）；第三单元先手写 AdamW（adam_update），再讲 MuonWithAuxAdam 的 use_muon 参数组设计，随后攻克本项目最难的分布式参数分片 + all_gather 同步，最后落到一个完整训练实战；第四单元面向进阶读者做数值实验（NS 系数与 bfloat16 行为）、横向对比其他优化器，并动手定制 Muon 变体。依赖链保证每篇讲义只建立在此前讲义之上，实践任务全部可用 CPU（SingleDevice 系列与手写验证）完成，分布式一讲提供 torchrun 可选练习。",
+  "units": [
+    {
+      "id": "u1",
+      "title": "入门：认识 Muon 项目并跑起来",
+      "level": "beginner",
+      "order": 1,
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "项目总览：Muon 是什么、为什么值得学",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 Muon（MomentUm Orthogonalized by Newton-schulz）的项目定位：它是为神经网络隐藏层权重设计的优化器，内部先跑 SGD 动量、再用 Newton-Schulz 迭代把更新正交化；并结合 README 中的 speedrun 战绩理解它为什么出名。",
+          "learning_goals": [
+            "说出 Muon 的定位：只用于隐藏层权重矩阵的优化器，其余参数用 AdamW",
+            "了解 Muon 的来源（NanoGPT/CIFAR-10 speedrun）与它解决的问题",
+            "理解『动量 + 正交化后处理』这一句话级算法摘要"
+          ],
+          "source_files": [
+            "README.md",
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "README.md 项目介绍",
+            "muon.py 顶部两个函数（zeropower_via_newtonschulz5 / muon_update）",
+            "Muon 类 docstring"
+          ],
+          "practice_task": "阅读 README.md 与 muon.py 顶部 docstring 后，写一个 10 行的 Python 脚本：用 torch.randn 构造两个矩阵参数，按 README 的用法把它们分到 use_muon=True 的参数组并实例化 SingleDeviceMuonWithAuxAdam，打印 optimizer 和 param_groups，观察每个参数组被填充的默认超参。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "安装与运行：setup.py 打包方式和第一个可运行示例",
+          "order": 2,
+          "filename": "u1-l2-install-and-setup.md",
+          "level": "beginner",
+          "topic": "讲解 setup.py 如何用 py_modules=['muon'] 把单文件打包成 muon-optimizer 0.1.0，如何通过 pip 从 git 安装，以及 import muon 后能拿到哪些对象；并跑通第一个最小训练循环。",
+          "learning_goals": [
+            "掌握 pip install git+https://github.com/KellerJordan/Muon 的安装方式并能本地验证",
+            "理解 py_modules=['muon'] 单模块打包与 PyPI 包名 muon-optimizer 的关系",
+            "确认本机 torch 环境，为后续实践做准备"
+          ],
+          "source_files": [
+            "setup.py",
+            "README.md",
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "setup.py",
+            "README.md 安装与用法章节",
+            "muon.py 导入部分（import torch / torch.distributed）"
+          ],
+          "practice_task": "在本地（或虚拟环境）执行 pip install git+https://github.com/KellerJordan/Muon，然后在 Python 中 from muon import Muon, SingleDeviceMuon, MuonWithAuxAdam, SingleDeviceMuonWithAuxAdam 并打印各类的 __module__；再用 SingleDeviceMuon 在一个 torch.randn 生成的 toy 回归任务上跑 50 步 optimizer.step()，确认环境可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "muon.py 代码地图：3 个函数、4 个优化器类如何选型",
+          "order": 3,
+          "filename": "u1-l3-code-map-and-optimizer-selection.md",
+          "level": "beginner",
+          "topic": "给 muon.py（约 290 行）画一张完整代码地图：zeropower_via_newtonschulz5（第 5-31 行）、muon_update（第 34-41 行）、Muon（第 44-96 行）、SingleDeviceMuon（第 99-127 行）、adam_update（第 130-135 行）、MuonWithAuxAdam（第 138-225 行）、SingleDeviceMuonWithAuxAdam（第 228-287 行），并说明按『单机/分布式』和『纯 Muon/带辅助 AdamW』两个维度如何选类。",
+          "learning_goals": [
+            "画出 muon.py 的模块地图：函数与类的分工和行号范围",
+            "根据『是否分布式、是否需要 AdamW 混合』两个维度选出正确的类",
+            "识别贯穿所有类的共同代码骨架（step 循环、state 初始化、p.add_ 更新）"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "zeropower_via_newtonschulz5",
+            "muon_update",
+            "Muon / SingleDeviceMuon",
+            "adam_update",
+            "MuonWithAuxAdam / SingleDeviceMuonWithAuxAdam"
+          ],
+          "practice_task": "写一个 markdown 表格（作为学习笔记）：行为『4 个优化器类 + 3 个函数』，列为『所在行号、是否需要 torch.distributed 初始化、适用参数、一句话用途』，逐项填写；再把 muon.py 复制到自己的练习目录，为每个类加一行导航注释，加深对文件结构的记忆。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "title": "核心机制：正交化数学与更新计算",
+      "level": "intermediate",
+      "order": 2,
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "数学预热：梯度正交化与 SVD 的直觉",
+          "order": 1,
+          "filename": "u2-l1-orthogonalization-and-svd.md",
+          "level": "intermediate",
+          "topic": "讲清 Muon 的核心思想：对二维参数的动量更新做正交化（近似取 SVD 的 U V^T，即所有奇异值拉平为一），使更新的谱范数可控、各方向能量均衡，为下一讲的 Newton-Schulz 迭代建立目标。",
+          "learning_goals": [
+            "会用 torch.linalg.svd 分解一个梯度矩阵并构造 UV^T",
+            "理解把更新替换为最近正交矩阵后 Frobenius 范数与谱范数的变化",
+            "解释为什么正交化更新对 lr 语义（谱范数单位）友好"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "torch.linalg.svd",
+            "zeropower_via_newtonschulz5 的 docstring",
+            "矩阵范数（Frobenius / 谱范数）"
+          ],
+          "practice_task": "写一个验证脚本：取 G = torch.randn(512, 256)，用 torch.linalg.svd 计算 U, S, V，构造 UV^T；验证 (UV^T) @ (UV^T).T ≈ I，比较 G 与 UV^T 的 Frobenius 范数和谱范数；再调用 muon.py 中的 zeropower_via_newtonschulz5(G, steps=10)，数值比较两者的奇异值分布差异。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "zeropower_via_newtonschulz5 逐行精读：五次 Newton-Schulz 迭代",
+          "order": 2,
+          "filename": "u2-l2-newton-schulz-iteration.md",
+          "level": "intermediate",
+          "topic": "逐行精读 muon.py 第 5-31 行：为什么用多项式迭代而不是直接 SVD、为什么先转置成行数不超过列数、谱范数归一化、五次迭代 X = aX + (bA + cA^2)X 的计算图，以及它实际输出 US'V^T（S' 约 Uniform(0.5,1.5)）这一重要细节。",
+          "learning_goals": [
+            "逐行解释 X=G.bfloat16()、mT 转置、谱范数归一化、循环内的三次矩阵乘法",
+            "理解五次迭代系数 (3.4445, -4.7750, 2.0315) 的作用与『零点斜率最大化』取舍",
+            "说明输出是 US'V^T（S' 近似均匀分布在 0.5-1.5）而非精确 UV^T，且这不伤害效果"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "zeropower_via_newtonschulz5",
+            "X @ X.mT 矩阵乘法",
+            "bfloat16 精度",
+            "谱范数归一化 X / (X.norm(...) + 1e-7)"
+          ],
+          "practice_task": "从零重写一个 my_zeropower(G, steps)（不复制原函数，凭理解写），与 muon.py 的版本在同一个 256x256 随机矩阵上比较输出最大绝对误差；再打印 steps=1,2,3,5,10 时输出矩阵的最大与最小奇异值，观察它何时逼近 1 以及最终落在 [0.5, 1.5] 的现象。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "muon_update 精读：动量、Nesterov、卷积权重与尺度缩放",
+          "order": 3,
+          "filename": "u2-l3-muon-update.md",
+          "level": "intermediate",
+          "topic": "精读 muon.py 第 34-41 行：momentum 缓冲区的 lerp_ 更新、Nesterov 动量的两行写法、卷积核（ndim==4）如何 view 成矩阵、以及 max(1, rows/cols)**0.5 尺度因子如何让学习率以谱范数为单位。",
+          "learning_goals": [
+            "解释 momentum.lerp_(grad, 1-beta) 与 Nesterov 形式 grad.lerp_(momentum, beta) 的含义",
+            "说明 ndim==4 时 view(len(update), -1) 如何把卷积核压成矩阵",
+            "推导 update *= max(1, m/n)**0.5 尺度因子对更新 RMS 的影响"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "momentum.lerp_ / grad.lerp_",
+            "conv 权重 reshape（view）",
+            "zeropower_via_newtonschulz5 调用",
+            "尺度因子 max(1, rows/cols)**0.5"
+          ],
+          "practice_task": "写实验脚本验证三点：(1) 分别以 nesterov=True/False 调 muon_update，打印更新矩阵的 Frobenius 范数与逐元素 RMS；(2) 对 (512,1024) 与 (1024,512) 两种形状的输入比较正交化+缩放后的 RMS 是否一致；(3) 构造一个 (64, 3, 7, 7) 的卷积核梯度，手动走 ndim==4 分支，确认输出形状与 reshape 后结果一致。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "PyTorch Optimizer 扩展约定：读懂 step() 之前必备的框架知识",
+          "order": 4,
+          "filename": "u2-l4-pytorch-optimizer-conventions.md",
+          "level": "intermediate",
+          "topic": "补充读懂优化器类的框架知识：muon.py 中四个类都继承 torch.optim.Optimizer，涉及 param_groups、defaults、self.state 惰性初始化、@torch.no_grad()、closure 约定，以及 p.mul_/p.add_ 原地更新模式。",
+          "learning_goals": [
+            "解释 param_groups、defaults、self.state[p] 的结构与作用",
+            "理解 @torch.no_grad() 装饰器与 closure 可选参数的用途",
+            "掌握 p.mul_(1 - lr*wd); p.add_(update, alpha=-lr) 这种原地更新写法"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "torch.optim.Optimizer.__init__",
+            "param_groups / defaults 机制",
+            "self.state 状态字典",
+            "@torch.no_grad() 与 closure"
+          ],
+          "practice_task": "模仿本仓库风格，从零实现一个 MySGDMomentum(torch.optim.Optimizer)（构造函数、step、momentum_buffer 状态），用它在 y=x@W 的线性回归任务上训练并与 torch.optim.SGD(momentum=0.95) 的 loss 曲线对比，确认曲线基本重合。",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "SingleDeviceMuon.step 精读：最简形态的完整 Muon 优化器",
+          "order": 5,
+          "filename": "u2-l5-single-device-muon-step.md",
+          "level": "intermediate",
+          "topic": "精读 muon.py 第 99-127 行的单机版 step()：惰性 momentum_buffer 初始化、p.grad 为 None 时强制填充零梯度、AdamW 式解耦权重衰减与更新施加顺序，这是后续分布式版和组合版共享的骨架。",
+          "learning_goals": [
+            "逐行解释 SingleDeviceMuon.step 的状态初始化与两行参数更新",
+            "解释 p.grad 为 None 时填充零张量这一『强制同步』设计的原因",
+            "理解 Muon 构造函数中 params 必须显式列表与按 size 排序的含义"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "SingleDeviceMuon.__init__",
+            "SingleDeviceMuon.step 主循环",
+            "momentum_buffer 惰性初始化",
+            "解耦权重衰减 p.mul_(1 - lr*wd)"
+          ],
+          "practice_task": "给 SingleDeviceMuon.step 加 instrumentation（复制 muon.py 到自己的练习文件后修改）：每步记录每个参数更新的 RMS 与更新后权重范数，在一个 3 层 MLP（torch 合成数据）上训练 200 步并打印曲线；再实验 weight_decay=0 与 0.01 两种设置下权重范数的差异。",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "title": "组合优化器与分布式实现",
+      "level": "intermediate",
+      "order": 3,
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "adam_update 精读：30 行手写 AdamW",
+          "order": 1,
+          "filename": "u3-l1-adam-update.md",
+          "level": "intermediate",
+          "topic": "精读 muon.py 第 130-135 行：用 lerp_ 更新一阶/二阶动量、偏差修正、输出 buf1c/(buf2c.sqrt()+eps)，并对照 torch.optim.AdamW 理解每一步。",
+          "learning_goals": [
+            "解释 buf1/buf2 的 lerp_ 更新与两次偏差修正除法",
+            "对比手写 adam_update 与 torch.optim.AdamW 的等价性（含 eps 位置差异）",
+            "理解为什么 MuonWithAuxAdam 内置 AdamW 而不直接复用 torch 实现"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "adam_update 函数",
+            "一阶/二阶动量 lerp_",
+            "偏差修正 1 - beta**step",
+            "torch.optim.AdamW 对照"
+          ],
+          "practice_task": "验证等价性：对一个固定梯度序列（如正弦+噪声构造的 128x128 张量梯度，连续 step 20 次），分别用 adam_update 的逻辑和 torch.optim.AdamW（相同 betas、eps、weight_decay=0）驱动同一个初始权重，逐步打印两者参数差的最大绝对值，确认数值上一致或解释差异来源（提示：eps 加在 sqrt 分母的位置）。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "MuonWithAuxAdam：use_muon 参数组设计与单优化器混合训练",
+          "order": 2,
+          "filename": "u3-l2-muon-with-aux-adam.md",
+          "level": "intermediate",
+          "topic": "精读 muon.py 第 138-287 行：如何用一个优化器同时跑 Muon 和 AdamW——构造函数里的 use_muon 标志、muon 组与 adam 组各自的默认超参和严格的键集合断言，step() 中按 use_muon 走两条路径；同时覆盖单机版 SingleDeviceMuonWithAuxAdam。",
+          "learning_goals": [
+            "解释 use_muon 标志与 param_groups 混合分组机制",
+            "理解构造函数对 muon 组和 adam 组分别注入的默认超参",
+            "说明 SingleDeviceMuonWithAuxAdam.step 中两个分支的差异",
+            "掌握按 named_parameters 的 ndim 与名称划分参数的惯用法"
+          ],
+          "source_files": [
+            "muon.py",
+            "README.md"
+          ],
+          "minimal_modules": [
+            "MuonWithAuxAdam.__init__ 参数组校验",
+            "use_muon=True 分支（复用 muon_update）",
+            "use_muon=False 分支（复用 adam_update）",
+            "SingleDeviceMuonWithAuxAdam"
+          ],
+          "practice_task": "构建一个带 embedding、3 个隐藏线性层和输出头的 MLP，按 docstring 示例用 named_parameters 划分 hidden_matrix_params / embed_params / scalar_params / head_params，分别喂给 SingleDeviceMuonWithAuxAdam 的 muon 组和 adam 组并训练；再故意传入一个含多余键（如 scheduler）的参数组，观察 assert 报错，理解严格校验的设计意图。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "分布式 Muon：Muon.step 的跨卡参数分片与 all_gather 同步",
+          "order": 3,
+          "filename": "u3-l3-distributed-muon.md",
+          "level": "advanced",
+          "topic": "精读 muon.py 第 71-96 行最难的部分：参数按 size 降序排序、用空张量补齐到 world_size 的倍数、每个 rank 只计算自己分到的参数再通过 dist.all_gather 广播，从而把一批参数的更新分摊到各 GPU 上。",
+          "learning_goals": [
+            "解释按参数而非按数据并行的设计：每个 rank 负责第 rank、rank+W、… 个参数",
+            "理解 params 按尺寸排序 + 空张量补齐如何保证 all_gather 张量形状一致",
+            "说明 p.grad 置零与 all_gather 共同保证各 rank 参数一致性的机制",
+            "掌握用 torchrun + gloo 后端在 CPU 上验证分布式代码的方法"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "dist.get_world_size / get_rank",
+            "params 按尺寸排序与补齐",
+            "all_gather 通信原语",
+            "Muon.step 分片循环"
+          ],
+          "practice_task": "编写 torchrun --nproc_per_node=2 可运行的脚本（CPU + gloo 后端，需在脚本里 dist.init_process_group('gloo')）：8 个不同形状矩阵参数交给 Muon，训练若干步后 all_reduce 打印各 rank 参数是否完全一致；再实验去掉排序（打乱 params 顺序）观察补齐张量形状不匹配导致的报错，理解排序的必要性。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l4",
+          "title": "实战迁移：把一个 AdamW 训练脚本改造成 Muon 并调参",
+          "order": 4,
+          "filename": "u3-l4-hands-on-training.md",
+          "level": "intermediate",
+          "topic": "综合实战：按 README 的『替换 AdamW』配方，把一个已有的小型 transformer/MLP 训练脚本改成 hidden weights 用 Muon、embedding/head/标量用内部 AdamW 的单优化器模式，并按 README 调参建议调 lr 和 weight_decay。",
+          "learning_goals": [
+            "掌握把 torch.optim.AdamW 训练脚本改造为 MuonWithAuxAdam 的完整流程",
+            "理解隐藏层权重（ndim>=2）与其余参数（embedding/head/gain/bias）的划分规则",
+            "学习 Muon 的调参经验：动量 0.95、nesterov、ns_steps 默认即可，重点调 lr 与 weight_decay"
+          ],
+          "source_files": [
+            "README.md",
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "README.md 参数组示例",
+            "MuonWithAuxAdam 构造",
+            "use_muon 参数划分",
+            "训练循环 step() 调用"
+          ],
+          "practice_task": "在 torch 合成任务（如字符级玩具语言模型或 MNIST 风格分类 MLP）上做对照实验：同一模型分别用 torch.optim.AdamW 和 SingleDeviceMuonWithAuxAdam 各训练相同步数，记录 loss 曲线；再对 Muon 的 lr 在 {0.005, 0.02, 0.05, 0.1} 中网格搜索并汇报最优值，验证 README 中『只需调 lr 和 weight_decay』的说法。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "title": "专家层：数值实验、横向对比与二次开发",
+      "level": "advanced",
+      "order": 4,
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "数值实验：NS 迭代系数、收敛行为与 bfloat16 精度",
+          "order": 1,
+          "filename": "u4-l1-ns-coefficients-experiments.md",
+          "level": "advanced",
+          "topic": "以实验方式深入第 5-31 行：五次迭代系数如何决定零点附近斜率、为什么『超过收敛临界点继续加大斜率』反而有效、输出奇异值为何落在 0.5-1.5、以及 bfloat16 计算的数值稳定性。",
+          "learning_goals": [
+            "用数值实验展示 ns_steps 增大时输出奇异值如何逼近 1",
+            "验证 docstring 所述输出奇异值近似 Uniform(0.5, 1.5) 的现象",
+            "解释为什么选择 bfloat16：NS 迭代对低精度的稳定性",
+            "理解步数（默认 5）是在精度与速度间的经验折中"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "zeropower_via_newtonschulz5 的系数 a,b,c",
+            "bfloat16 计算路径",
+            "torch.linalg.svd_values 奇异值测量"
+          ],
+          "practice_task": "写实验脚本：(1) 对谱范数 0.1、1、10 的三种输入运行 NS5，打印迭代后奇异值分布直方图数据；(2) 对比 float32 与 bfloat16 下输出误差；(3) 尝试改动系数（如换成三次迭代形式），观察收敛速度与稳定性差异，用表格记录结论。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "Muon vs AdamW/Shampoo/SOAP：理论背景与基准对比",
+          "order": 2,
+          "filename": "u4-l2-muon-vs-other-optimizers.md",
+          "level": "advanced",
+          "topic": "结合 README 链接的资源（Keller Jordan 的 Muon 写作、Jeremy Bernstein 的推导博文、Jianlin Su 的博客、Kimi K2 技术报告、essential.ai 大 batch 研究）横向对比四类优化器，理解正交化在高维矩阵更新中的理论优势。",
+          "learning_goals": [
+            "从更新尺度角度解释 Muon 与 AdamW 的本质区别",
+            "了解 Muon 在 speedrun 与大规模训练（Kimi 技术报告）中的实证结论",
+            "能复述大规模使用 Muon 时的注意事项（参数划分、lr 缩放）"
+          ],
+          "source_files": [
+            "README.md",
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "README.md 资源与战果章节",
+            "muon_update 尺度缩放逻辑",
+            "adam_update 对照逻辑"
+          ],
+          "practice_task": "做一个微型基准：固定一个小 transformer（如 2 层、d_model=64），在相同数据上分别训练 AdamW、SingleDeviceMuonWithAuxAdam、SGD+momentum 各 3 个种子，绘制最终 loss 与到达指定 loss 所需步数对比表，并写 200 字总结 Muon 相对 AdamW 的适用范围与限制。",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "二次开发：定制你自己的 Muon 变体",
+          "order": 3,
+          "filename": "u4-l3-custom-variant.md",
+          "level": "advanced",
+          "topic": "把 muon.py 当作可改造的模板：修改 ns_steps、切换 nesterov、给 muon_update 加梯度裁剪、调整尺度因子；理解每次改动对『lr 以谱范数为单位』这一语义的影响。",
+          "learning_goals": [
+            "识别 muon_update 的 ns_steps/nesterov/beta 三个可调扩展点",
+            "在不破坏谱范数 lr 语义的前提下安全地加入新特性",
+            "学会给定制优化器写最小验证实验"
+          ],
+          "source_files": [
+            "muon.py"
+          ],
+          "minimal_modules": [
+            "muon_update 参数（ns_steps/nesterov/beta）",
+            "update *= max(1, m/n)**0.5 尺度因子",
+            "Muon.step 更新施加两行"
+          ],
+          "practice_task": "复制 muon.py 为 my_muon.py 并实现两个定制：(1) 在 muon_update 中支持梯度裁剪（对动量后的 update 按 Frobenius 范数裁剪）并验证极端大梯度下训练仍稳定；(2) 把尺度因子改为可选关闭，对比开/关两种设置的等效最优 lr 差多少倍；用小型 MLP 任务验证每个改动的效果并记录实验结论。",
+          "depends_on": [
+            "u2-l5",
+            "u3-l4"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}

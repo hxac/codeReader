@@ -1,0 +1,1044 @@
+{
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出项目解决的核心问题：长序列 DiT 中两次 all-to-all 是关键通信",
+            "解释三条关键特性：无 SM 占用、重排即拷贝步长、不均匀分片为一般路径",
+            "对照 README 的限制清单（NVLink 单机、world_size 1-8、dtype 与对齐）判断适用场景"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "零 SM 传输",
+            "重排即步长",
+            "不均匀分片",
+            "性能对比表"
+          ],
+          "order": 1,
+          "practice_task": "在单进程环境（CPU 或单卡）用 torch 复现 baseline 的形状变换：x.permute(2,0,1,3).contiguous() 加 reshape，对 (1, 4096, 40, 384) 的 bf16 张量计时 permute+contiguous 的开销，并写一段注释说明这部分在 fast-ulysses 中为何不存在。",
+          "source_files": [
+            "README.md",
+            "docs/benchmark.md"
+          ],
+          "title": "fast-ulysses 是什么：用拷贝引擎搬运的 Ulysses all-to-all",
+          "topic": "项目定位：把 Ulysses 序列并行的 4D all-to-all 做成 torch 自定义算子，用 GPU 拷贝引擎（不占 SM）在 NVLink 上传输；三条核心特性与性能对比数据。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-ulysses-sequence-parallelism.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "画出 mode 0 / mode 1 前后的张量形状：(b, s_local, n_global, d) 与 (b, s_global, n_local, d)",
+            "解释为何长序列下这两个集合通信成为关键路径",
+            "理解 q/k/v 打包进最后一维等价于一次握手搬完三份张量"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "mode 0/1 形状变换",
+            "包夹注意力",
+            "qkv 打包",
+            "SPMD 调用契约"
+          ],
+          "order": 2,
+          "practice_task": "在单进程内用 torch 的 split/cat 实现等价于 mode 0 和 mode 1 的变换函数（把 ws 个 (b, s_p, n_total, d) 换成 (b, s_total, n_p, d) 及其逆），用随机张量验证两者互逆；对照 test/test_plan.py 的 reference_scatter_head 检查语义。",
+          "source_files": [
+            "README.md",
+            "docs/quickstart.md",
+            "examples/dit_attention.py"
+          ],
+          "title": "Ulysses 序列并行原理：两次 all-to-all 包夹注意力",
+          "topic": "序列如何按 rank 分片；mode 0 用序列分片换头分片、mode 1 换回；两次通信包夹注意力计算；每个 rank 发出相同形状序列的 SPMD 契约。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l3-install-build-run.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "根据已装 torch 的 minor 与 CUDA major 选对 wheel 或源码构建",
+            "用 FAST_ULYSSES_CUDA_ARCH 缩短构建时间并理解 --no-build-isolation 的原因",
+            "用 torchrun 跑通 quickstart 与 examples/dit_attention.py，解读 doctor 输出"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "wheel 选择",
+            "源码构建",
+            "torchrun 启动",
+            "doctor 自检"
+          ],
+          "order": 3,
+          "practice_task": "用 FAST_ULYSSES_CUDA_ARCH=<本机架构> pip install -e . --no-build-isolation 完成构建，然后 torchrun --nproc_per_node=<N> 运行 README quickstart 脚本与 examples/dit_attention.py；无多卡时以 --nproc_per_node=1 运行并记录哪些行为仍然成立（如 world_size=1 跳过屏障）。",
+          "source_files": [
+            "README.md",
+            "docs/install.md",
+            "setup.py",
+            "pyproject.toml"
+          ],
+          "title": "安装、构建与第一次运行",
+          "topic": "wheel 的 (torch minor × CUDA major) 匹配规则、源码构建参数（FAST_ULYSSES_CUDA_ARCH、--no-build-isolation）、用 torchrun 跑通 README 快速开始与 examples；fast-ulysses doctor 自检。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-repo-structure-map.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出每个目录的职责与代表性文件",
+            "解释 a2a_plan.cc 保持无 CUDA/无 torch 的分层动机",
+            "建立从 Python 调用到 CUDA 拷贝的调用链骨架"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录职责",
+            "无 CUDA 无 torch 的 plan 层",
+            "调用链",
+            "开发工具链"
+          ],
+          "order": 4,
+          "practice_task": "画出一次 group.all_to_all_4d(x) 调用从 python/fast_ulysses/group.py 出发，经 src/bindings.cc、src/group.cc、src/a2a_plan.cc 到 src/transfer.cu / src/barrier.cu 的完整调用链（文本图），在每个节点标注所在文件与函数名。",
+          "source_files": [
+            "docs/develop.md",
+            "CMakeLists.txt",
+            "pyproject.toml",
+            "src/a2a_plan.cc"
+          ],
+          "title": "仓库结构与阅读地图",
+          "topic": "include/src/python/test/benchmark/tools/docs 各目录职责；「a2a_plan.cc 无 CUDA、无 torch、无通信库」的分层决策；docs/develop.md 的导航与工具链。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "入门：项目定位与上手"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "filename": "u2-l1-group-construction.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "说明三个构造参数的语义与默认值选择",
+            "解释构造是集合操作的原因（对称内存 bootstrap 注册）",
+            "描述 NVLink 检查的失败开放行为与共享 GPU 时的跳过"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "构造参数",
+            "对称内存注册",
+            "NVLink 拒绝",
+            "子组支持"
+          ],
+          "order": 1,
+          "practice_task": "写一个脚本：初始化 nccl 进程组后分别用默认 WORLD 和 dist.new_group 建出的子组各构造一个 UlyssesGroup 并 destroy（对应 test/distributed/subgroup.py 的场景）；单卡时以 world_size=1 构造，并在代码注释里标出 _require_nvlink 中 all_gather 设备号的那几行。",
+          "source_files": [
+            "python/fast_ulysses/group.py",
+            "docs/api.md",
+            "src/nvlink.cc"
+          ],
+          "title": "UlyssesGroup 构造与 NVLink 检查",
+          "topic": "构造参数 process_group / device / require_nvlink 的语义；构造为何是集合操作；NVLink 拒绝的条件与「检查失败则放行」的失败开放语义；任意子组可用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-all-to-all-4d-contract.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "由输入形状与 mode 推出输出形状",
+            "解释 d*elem_size 必须 16 字节对齐及随 dtype 收紧的规则",
+            "说出契约五条（形状序列、dtype 序列、集合构造、backward 顺序、一缓冲一调用）及违反后果是挂起而非报错"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "mode 形状表",
+            "dtype 与对齐",
+            "Raises 清单",
+            "集体调用契约"
+          ],
+          "order": 2,
+          "practice_task": "写一组 pytest 用例（可运行在 world_size=1）：对 3D 输入、CPU 张量、非法 dtype（如 torch.int32）、d*elem 未 16 字节对齐、mode=2、只传 seq_splits 不传 head_splits 逐一断言抛出 RuntimeError，并把断言的消息片段与 docs/api.md 的 Raises 一节对照。",
+          "source_files": [
+            "python/fast_ulysses/group.py",
+            "docs/api.md",
+            "src/bindings.cc"
+          ],
+          "title": "all_to_all_4d 的形状契约与错误检查",
+          "topic": "mode 与输入输出形状的对应、dtype 白名单与 16 字节对齐规则、docs/api.md 的 Raises 全表；集体调用契约（同形状序列、同 dtype 序列）与「挂起而非报错」的后果。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-uneven-splits.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "由全局长度计算 per-rank seq_splits/head_splits",
+            "解释 make_dims 中 splits 与输入形状的交叉校验逻辑",
+            "说明不均匀分片如何让调用方丢弃序列 padding"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "splits 语义",
+            "形状交叉校验",
+            "偶均分特例",
+            "去 padding 收益"
+          ],
+          "order": 3,
+          "practice_task": "给定 s=75827、ws=8、n_global=40，计算 seq_splits 与 head_splits，构造对应形状的输入执行 mode 0 并验证输出形状；然后故意传入与 splits 矛盾的 x（长度差 1）运行一次，记录报错消息并与 src/group.cc make_dims 中的 TORCH_CHECK 对应。",
+          "source_files": [
+            "docs/quickstart.md",
+            "docs/api.md",
+            "src/a2a_plan.cc",
+            "src/group.cc"
+          ],
+          "title": "不均匀分片：seq_splits 与 head_splits",
+          "topic": "两个列表「都传或都不传」、必须全 rank 一致、与输入形状的交叉校验；去掉序列 padding 的动机与收益（基线花 5-11%，本路径 1.00-1.03×）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-dit-attention-example.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 qkv 打包成 3*head_dim 最后一维的动机与正确性",
+            "说明与单卡参照的输出、梯度双校验方法及 allclose 容差选择",
+            "描述无 autograd.Function 包装的可训练模块形态"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "模块结构",
+            "qkv 打包",
+            "参照对照",
+            "训练循环"
+          ],
+          "order": 4,
+          "practice_task": "把 example 中的单次 qkv 集合通信改成对 q、k、v 三次独立的 all_to_all_4d 调用（先 cat 再 chunk 的方式去掉），运行并比较两者输出一致；再用 CUDA 事件或 _timed 量化握手次数差异，写一段注释解释为什么字节相同但时间不同。",
+          "source_files": [
+            "examples/dit_attention.py",
+            "docs/migration.md"
+          ],
+          "title": "实例精读：序列并行 DiT 注意力块",
+          "topic": "examples/dit_attention.py 逐段精读：qkv 打包进最后一维（一次握手）、两次 all_to_all 包夹 SDPA、与无序列并行的单卡参照做输出与输入梯度双校验、五个优化器步。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "入门：Python API 使用"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u2-l2"
+          ],
+          "filename": "u3-l1-plan-data-structures.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "把 CopyOp 的每个字段映射到 pitched memcpy 的参数",
+            "解释 window_numel 取所有 rank 最大值的原因",
+            "找出 validate 与 checked_mul 防住的非法输入类别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "A2ADims",
+            "CopyOp 字段",
+            "A2APlan",
+            "validate 与溢出防护"
+          ],
+          "order": 1,
+          "practice_task": "用 torch.ops.fast_ulysses.a2a_plan_debug 打印 ws=4、seq_splits=[5,3,0,7] 下每个 rank 的 mode 0 ops 表，手工核对其中一行的 src_offset/dst_offset/pitch/width/rows 计算，并预测 window_numel 后与返回值比对。",
+          "source_files": [
+            "include/fast_ulysses/a2a_plan.hpp",
+            "src/a2a_plan.cc"
+          ],
+          "title": "A2ADims / CopyOp / A2APlan：寻址的纯主机表达",
+          "topic": "三个数据结构如何把 4D all-to-all 描述成一组带源/目的步长的字节拷贝；validate 的防御性检查与 checked_mul/checked_sum 的溢出防护。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-build-plan-modes.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "推导 mode 0 下某 (rank, peer) 对的 src/dst offset 公式",
+            "解释 mode 1 为何必须写跨步（窗口即返回张量）",
+            "说明本 rank 份额也走窗口如何让 copy-out 成为一次平坦拷贝"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "mode 0 scatter 分支",
+            "mode 1 gather 分支",
+            "窗口尺寸取最大",
+            "自份额走窗口"
+          ],
+          "order": 2,
+          "practice_task": "写一个脚本：对同一组真正不均匀的 seq_splits/head_splits 分别生成 mode 0 与 mode 1 的 plan，用 numpy 按 CopyOp 重放（参照 test_plan.py 的 apply_ops），验证往返后数据还原；再解释为什么两个 plan 用的是同一对 splits 而不交换。",
+          "source_files": [
+            "src/a2a_plan.cc",
+            "include/fast_ulysses/a2a_plan.hpp"
+          ],
+          "title": "build_plan 精读：两种模式的拷贝发射",
+          "topic": "mode 0 读跨步写连续、mode 1 读连续写跨步的发射逻辑；window_numel 为何取所有 rank 中最大接收；本 rank 自己的份额也经过窗口这一设计决定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-host-only-plan-tests.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "说明 plan 重放测试如何把布局正确性与传输解耦",
+            "写出 reference_scatter_head/reference_gather_head 的语义",
+            "解释零长度 shard 与非 2 幂 world_size 各自覆盖的代码分支"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "a2a_plan_debug 绑定",
+            "numpy 重放",
+            "all_to_all_single 参照",
+            "往返一致性"
+          ],
+          "order": 3,
+          "practice_task": "为 test/test_plan.py 增加一个新 case：ws=5（非 2 的幂）且 seq_splits 含一个 0，先在纸上预测 window_numel 与每个 rank 的 op 数，再写断言验证；对照 launch_a2a_ce 的非 2 幂 sweep 分支说明这个 world_size 额外覆盖了什么。",
+          "source_files": [
+            "src/plan_bindings.cc",
+            "test/test_plan.py",
+            "docs/develop.md"
+          ],
+          "title": "无 GPU 的布局测试：plan_bindings 与 test_plan",
+          "topic": "a2a_plan_debug 如何把纯主机 plan 暴露给 Python；test_plan.py 用 numpy 字节缓冲重放 CopyOp 并对照 all_to_all_single+permute 参照；这一分层让无 GPU 的 CI 也能验证布局正确性。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "进阶：布局计划——把 all-to-all 表达为带步长拷贝"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l1-symmetric-memory-allocation.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 empty_strided_p2p + rendezvous 各自返回什么、为何都是集合操作",
+            "推导 flag_offset_slots 把 flags[ws]+epoch 放在 signal pad 末尾的原因",
+            "说明分配后清零自身握手区再做 sym->barrier 的必要性"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "empty_strided_p2p",
+            "rendezvous 与 peer 地址",
+            "signal pad 握手布局",
+            "清零与 barrier"
+          ],
+          "order": 1,
+          "practice_task": "写一个独立小脚本用 torch.distributed._symmetric_memory 的 empty_strided_p2p/rendezvous 手工分配一个张量，打印 get_buffer_ptrs() 与 get_signal_pad_ptrs()，验证与本库 allocate() 收集 peer_ptrs/flag_ptrs 的结构一致（需 ≥2 GPU；无 GPU 时写 allocate() 的逐行注释版伪代码并标注每个集合点）。",
+          "source_files": [
+            "src/group.cc",
+            "include/fast_ulysses/group.hpp",
+            "docs/design.md"
+          ],
+          "title": "torch 对称内存与窗口分配",
+          "topic": "allocate() 如何用 empty_strided_p2p 分配、rendezvous 拿到每个 peer 的地址；握手区 flags[ws]+epoch 放在 signal pad 末尾的偏移计算；为何直接走分配入口点而非 MemPool（rendezvous 顺序论证）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-window-lifecycle.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "解释 (role, dtype) 二元组键与 sync/async 两窗口并存的原因",
+            "说明增长路径为何先 erase 再 allocate",
+            "推导「触发分配的量必须全 rank 相同」这条设计约束"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WindowRole",
+            "按需增长",
+            "先释放后分配",
+            "全 rank 一致的分配触发"
+          ],
+          "order": 2,
+          "practice_task": "阅读 window() 与 destroy()，写一段注释回答三个问题：为什么窗口按 (role, dtype) 而不是按 shape 缓存？增长时为何先 windows_.erase 再 allocate？如果把 sync 与 async 共用一个窗口，哪两个流的调用会互相覆盖？用 world_size=1 下先小后大两次调用验证窗口只增长不收缩。",
+          "source_files": [
+            "src/group.cc",
+            "include/fast_ulysses/group.hpp"
+          ],
+          "title": "窗口生命周期：按 (role, dtype) 缓存与增长",
+          "topic": "kSyncWindow/kAsyncWindow 两种角色、每个 dtype 两个内部窗口；window() 的按需增长与「先删旧再分配」让分配器复用段；单缓冲意味着只有同流调用才能共享一个窗口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-empty-output-buffers.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "解释 make_output 返回的是最大窗口的密集前缀视图",
+            "说明 owned_ 按地址记录与 storage 引用计数剪枝的生命周期模型",
+            "描述 out= 的三条路径：对称缓冲零拷贝、普通张量拷入、默认分配"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "make_output 视图",
+            "owned_ 与 prune_owned",
+            "out= 三态",
+            "不可微约定"
+          ],
+          "order": 3,
+          "practice_task": "写一个推理循环：循环外 buf = group.empty_output(x, mode=0)，循环内 y = group.all_to_all_4d(x, mode=0, out=buf)；用 group._timed（或 CUDA 事件）对比有无 out= 两种写法各阶段的耗时，确认 copy_out 阶段消失；再写一个用例验证 out= 下 y.grad_fn is None 且带梯度输入会 raise。",
+          "source_files": [
+            "src/group.cc",
+            "src/bindings.cc",
+            "docs/api.md"
+          ],
+          "title": "empty_output 与调用者持有的缓冲",
+          "topic": "make_output 返回分配密集前缀的视图；窗口必须装下最大 rank 输出的原因；out= 从 empty_output() 来时 peers 直写、无 copy-out；out= 不可微的约定与拒绝行为。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l4-lend-window-rotation.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "复述「槽由调用计数选择、引用计数只做检查」的规则",
+            "解释引用计数为何不能作为选择依据（SPMD 一致性）",
+            "写出 lend=True 的使用边界与违反方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LentPool 轮转",
+            "kLentSlots=4",
+            "use_count 检查",
+            "SPMD 一致性论证"
+          ],
+          "order": 4,
+          "practice_task": "设计并运行一个用例：保持 4 个 lend=True 结果存活时发出第 5 次调用，断言抛出 RuntimeError 并核对消息；再写一段注释论证：如果改为「找引用计数为 1 的空闲槽」，两个 rank 在什么执行顺序下会选中不同窗口并挂起。",
+          "source_files": [
+            "src/group.cc",
+            "include/fast_ulysses/group.hpp",
+            "docs/design.md",
+            "docs/api.md"
+          ],
+          "title": "lend=True：由调用计数驱动的窗口轮转",
+          "topic": "每个 dtype 4 个槽按 calls 计数轮转；为何选择必须是全 rank 相同的量（调用数）而引用计数只能做检查；第 5 个存活结果 raise；与 out= 互斥。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "进阶：对称内存窗口与内存管理"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2",
+            "u4-l1"
+          ],
+          "filename": "u5-l1-copy-engine-transfer.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "把 CopyOp 字段映射到 cudaMemcpy2D/3DAsync 的参数",
+            "解释 XOR 枚举与非 2 幂 sweep 各自覆盖的 peer 集合",
+            "说明为何每次调用新建事件而非复用组级事件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "issue_copy",
+            "XOR peer 顺序",
+            "自份额走调用者流",
+            "事件汇合"
+          ],
+          "order": 1,
+          "practice_task": "用 a2a_plan_debug 统计 b=1 与 b=4、同一 (s, n, d) 下 plan.ops 的数量与 depth 字段差异，写出解释（push_batched 何时把 batch 折叠成一次 3D 拷贝、何时退化为多次 2D）；再画出自 rank 份额与 peer 拷贝分别落在哪条流、由哪个事件汇合。",
+          "source_files": [
+            "src/transfer.cu",
+            "include/fast_ulysses/transfer.hpp",
+            "include/fast_ulysses/common.hpp",
+            "src/a2a_plan.cc"
+          ],
+          "title": "拷贝引擎传输：launch_a2a_ce 精读",
+          "topic": "issue_copy 把 CopyOp 映射为 cudaMemcpy2D/3DAsync；peer 按 rank^k 顺序枚举、非 2 幂 world_size 的补漏扫描；本 rank 份额走调用者流；xfer 流与调用者流之间的事件汇合；为何事件每次新建（循环等待论证）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-zero-sm-property.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "区分 peer 拷贝与同设备拷贝对 SM 的占用差异",
+            "解释 copy-out 为何是遗留的同设备拷贝及其消除方式",
+            "按 zerosm 模式的两列判读法评估一次实测"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "远端拷贝不占 SM",
+            "同设备拷贝竞争",
+            "zerosm A/B 方法",
+            "GEMM 慢化判读"
+          ],
+          "order": 2,
+          "practice_task": "阅读 benchmark/bench_a2a.py 的 zerosm 模式，写出两臂各自匹配的 GEMM 链与两个判读指标（GEMM 自身慢化、成对墙钟比）；有 ≥2 GPU 时在独占卡上运行一次并按「1.00× 且成对比≈1」的判据写出结论，无 GPU 时写出预测。",
+          "source_files": [
+            "src/transfer.cu",
+            "docs/design.md",
+            "benchmark/bench_a2a.py"
+          ],
+          "title": "零 SM 性质的来源与测法",
+          "topic": "零 SM 是远端拷贝的性质：peer 拷贝可与 GEMM 完全重叠，同设备拷贝则竞争内存系统——这正是 out= 消除 copy-out 的论据；zerosm 基准的双臂 A/B 方法论。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1",
+            "u5-l1"
+          ],
+          "filename": "u5-l3-flag-barrier-epoch.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "逐行解释自旋内核的发布-等待协议与内存序指令",
+            "论证 epoch 放在设备上对 CUDA graph 重放正确性的必要性",
+            "列出 sync/async 两条路径的可捕获边界与预热纪律"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "release/acquire PTX",
+            "设备侧 epoch",
+            "CUDA graph 捕获边界",
+            "memop 弃用论证"
+          ],
+          "order": 3,
+          "practice_task": "为 barrier_kernel 写逐行注释，标出每个线程（0、t<ws、t>=ws）各自执行的阶段；然后运行或精读 test/distributed/cudagraph.py，回答：为什么「8 次重放 epoch 恰好 +16 且位精确」能证明重放没有用过陈旧状态？再写出捕获前必须预热所有形状、传 out= 固定地址的原因。",
+          "source_files": [
+            "src/barrier.cu",
+            "include/fast_ulysses/transfer.hpp",
+            "docs/design.md",
+            "test/distributed/cudagraph.py"
+          ],
+          "title": "标志位屏障：自旋内核、设备侧 epoch 与 CUDA graph",
+          "topic": "单块 kernel 用 red.release.sys.max / ld.acquire.sys 发布与等待；epoch 由 atomicAdd 在设备上推进，使 CUDA graph 重放正确；为什么不用 cuStreamWriteValue/WaitValue（实测回归）；捕获边界：sync 调用可捕获（窗口已存在时）、async 不可。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "进阶：拷贝引擎传输与标志位屏障"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u5-l1"
+          ],
+          "filename": "u6-l1-op-registration.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "解释 functional 与 out 变体拆分的 schema 原理",
+            "说出每个 op 注册了哪些 dispatch key 及用途",
+            "说明 epoch_debug/staging_slots_debug 两个测试方法的存在理由"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TORCH_LIBRARY schema",
+            "functional/out 拆分",
+            "自定义类 torchbind",
+            "staged 内部 op"
+          ],
+          "order": 1,
+          "practice_task": "在 Python 中枚举 torch.ops.fast_ulysses 命名空间下的全部 op 与 schema（帮助: torch.ops.fast_ulysses.__dir__ / op._schemas），列出一张「op × dispatch key（CompositeExplicitAutograd / Autograd / Meta / Batched）」表格，并与 src/bindings.cc 的 TORCH_LIBRARY 段逐行对照。",
+          "source_files": [
+            "src/bindings.cc",
+            "python/fast_ulysses/group.py"
+          ],
+          "title": "torch 算子注册：schema 拆分与自定义类",
+          "topic": "TORCH_LIBRARY 注册的六个 op：为什么 functional 与 out 变体必须拆成两个（可变 schema 无法注册 autograd 公式）、staged/staged_out 两个内部 op、UlyssesGroup 作为 torchbind custom class 及其测试方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1",
+            "u4-l2"
+          ],
+          "filename": "u6-l2-call-pipeline-validation.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "按顺序列出 prepare 的全部检查并说明其排序原则",
+            "解释字节区间重叠检查的三个细节（地址查找、按字节比、例外路径）",
+            "追踪 copying / zero-copy / lend 三条路径各自的 buffer 来源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "prepare 校验链",
+            "重叠区间检查",
+            "transfer_on_stream",
+            "copy_out"
+          ],
+          "order": 2,
+          "practice_task": "画出 prepare() 中检查的执行顺序图（check_alive → prune_owned → require_cuda → device → plan → out/lend/empty → 重叠检查）；然后设计一个触发「input overlaps the window」的用例思路（提示：把 empty_output 缓冲切片当输入），并解释为什么必须比较字节区间而不是指针、为什么按窗口自身 nbytes 而不是按调用所需字数。",
+          "source_files": [
+            "src/bindings.cc"
+          ],
+          "title": "一次调用的完整流水线：prepare → 屏障 → 传输 → 屏障 → copy_out",
+          "topic": "prepare() 的校验顺序及其「全部先于第一个屏障」的原则（被拒参数不留任何 rank 等待）；输入/输出与窗口的字节区间重叠检查；run() 的 copying / zero-copy / lend 三条路径。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-autograd-backward-mode.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "证明排列的 vjp 是逆排列、对应另一个 mode",
+            "对比 all_to_all_single 交换 split sizes 与本库不交换的语义差异",
+            "解释 forward AD 走第二条集合通信、reverse functorch 不可用的边界"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "A2AFunction",
+            "backward=1-mode",
+            "splits 不交换",
+            "forward AD 双通道"
+          ],
+          "order": 3,
+          "practice_task": "写一个验证脚本：对同一不均匀 splits，mode 0 前向 + mode 1 前向串联应还原数据（等价 backward 的效果）；再构造一个双重 backward（grad-of-grad）调用解释 A2AFunction::apply 的递归如何保证其工作；对照 examples/dit_attention.py 的梯度校验。",
+          "source_files": [
+            "src/bindings.cc",
+            "docs/api.md",
+            "docs/migration.md"
+          ],
+          "title": "自动微分：backward 是另一个 mode",
+          "topic": "A2AFunction 在 saved_data 里保存 group/mode/splits；vjp=逆排列故 backward 是 1-mode 且 splits 不交换（与 all_to_all_single 的对比）；backward 永走 copying 路径；forward AD（jvp）让 tangent 走第二条集合通信。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-meta-kernel-vmap-refusal.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "解释 Meta 内核为何复用 group->plan() 而不在 Python 重写形状规则",
+            "对每个 op 说出「可 trace / 拒绝 trace」的分类及拒绝理由",
+            "复述 vmap 会按 batch 逐元素循环导致 rank 挂起的论证"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Meta 内核",
+            "empty_output 拒 trace",
+            "staged 拒 trace",
+            "vmap 双 key 拒绝"
+          ],
+          "order": 4,
+          "practice_task": "用 FakeTensorMode（torch._subclasses.fake_tensor）对 all_to_all_4d 做一次形状传播调用，验证输出只有形状、不触碰设备；再分别尝试 torch.vmap 与 torch.func.jacrev 包裹调用，记录两者 raise 的消息并解释为何 vmap 的失败模式是挂起而不是报错、库如何把它变成显式报错。",
+          "source_files": [
+            "src/bindings.cc",
+            "docs/design.md"
+          ],
+          "title": "Meta 内核、FakeTensor 与 vmap 拒绝",
+          "topic": "all_to_all_4d 的 Meta 内核复用 plan() 做纯主机形状传播；empty_output / staged / timed 拒绝被 trace 的理由（集合分配、work registry、真实流句柄）；FuncTorchBatched + Batched 双 key 拒绝 vmap 的 hang 论证。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "进阶：torch 算子集成——schema、校验、autograd 与 trace 边界"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u5-l3"
+          ],
+          "filename": "u7-l1-async-call-overview.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释 comm 流高优先级创建与 caller 流 id/device 的跨语言传递",
+            "说明 AsyncCollectiveTensor 首个 aten op 自动等待、view 操作不等待的行为",
+            "列出 async 结果被丢弃时的注册表残留后果"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "comm 流",
+            "staged op 调用",
+            "record_stream 双流记账",
+            "AsyncCollectiveTensor"
+          ],
+          "order": 1,
+          "practice_task": "写一个推理风格样例：y = group.all_to_all_4d_async(qkv) 后先跑一段 GEMM 链再 y.wait()，用 CUDA 事件量化隐藏比例（参照 benchmark 的 overlap 模式）；并解释 caller.stream_id / caller_device_index 两个参数为什么必须由 Python 侧传入 C++ 而不能在 C++ 里取当前流。",
+          "source_files": [
+            "python/fast_ulysses/group.py",
+            "src/bindings.cc"
+          ],
+          "title": "异步调用全景：comm 流与 AsyncCollectiveTensor",
+          "topic": "group.py 的 all_to_all_4d_async：高优先级 comm 流、caller 流的捕获与跨调用传参、grad 输入拒绝、record_stream 双流记账、AsyncCollectiveTensor 与视图操作的等待语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-staging-pools.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "推导 staging 避免的跨流生命周期问题（record_stream 的替代）",
+            "说明池选择逻辑：eventQuery 复用、新建、池满等待三档",
+            "解释 StagingRelease 在异常路径仍记录释放事件的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "stage 拷贝与事件",
+            "按 (shape,dtype) 的池",
+            "kMaxStagingPerShape",
+            "noexcept 释放"
+          ],
+          "order": 2,
+          "practice_task": "阅读 stage() 并回答：同一 (shape, dtype) 的第 5 个并发异步调用走哪条分支、阻塞发生在哪条流？然后设计一个用 staging_slots_debug 验证池确实长到 4 的测试思路，并解释 scope guard（StagingRelease）为何必须在传输抛异常时也记录 release 事件。",
+          "source_files": [
+            "src/group.cc",
+            "src/bindings.cc",
+            "include/fast_ulysses/group.hpp"
+          ],
+          "title": "暂存池：stage 与 release_staged",
+          "topic": "输入为何必须先拷进 staging 缓冲（调用者张量不跨流存活）；(shape, dtype) 键池、每形状 4 槽、16 形状上限；cudaEventQuery 复用槽、池满等待 front；InferenceMode(false) 与 at::empty 的细节；异常路径的释放保证。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l3-work-registry.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "解释 work registry 按 storage 键把 Work 绑到某次调用的机制",
+            "对比有/无 FAST_ULYSSES_HAS_WORK_REGISTRY 两条路径的行为差异",
+            "说明 CMake 探测 mangled 符号而非读头文件声明的原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "StreamEventWork",
+            "register_work 绑定",
+            "CompletedHandle 退化",
+            "nm 符号探测"
+          ],
+          "order": 3,
+          "practice_task": "在 Python 里对 async 结果做两件事：立即 .wait() 与直接交给一个 aten op（如 y + 1），用 nsys 或事件时间说明两者都不阻塞主机；然后阅读 CMakeLists.txt 的探测段，写出 FAST_ULYSSES_HAS_WORK_REGISTRY=0 时（CompletedHandle 路径）async 调用完整行为差异清单。",
+          "source_files": [
+            "src/work.cc",
+            "include/fast_ulysses/work.hpp",
+            "CMakeLists.txt",
+            "python/fast_ulysses/group.py"
+          ],
+          "title": "工作注册表：StreamEventWork 与完成事件",
+          "topic": "work.cc 把 comm 流上的完成事件注册到 tensor 的 storage（c10d::register_work）；wait() 只在当前流插入依赖、主机不阻塞；无注册表时退化为 CompletedHandle；CMake 用 nm 探测符号决定编译分支。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "高级：异步路径——comm 流、暂存池与完成注册"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u8-l1-nvlink-probe.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "区分 NVML 的 NOT_SUPPORTED/INVALID_ARGUMENT（设备答完）与真正无法询问",
+            "解释每个设备单独记录 answered 防止的「假缺失链路」错误",
+            "描述 fail-open 语义与 doctor 矩阵的判读"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "dlopen NVML",
+            "BDF 匹配",
+            "直连与 NVSwitch 两拓扑",
+            "fail-open"
+          ],
+          "order": 1,
+          "practice_task": "运行 fast-ulysses doctor，将其 NVLink 矩阵与 nvidia-smi topo -m 的输出对照并写一段判读；然后回答三个问题（各三行以内）：NVML 完全不可用时构造函数会怎样？两 rank 共享一 GPU 时检查为何跳过？为什么 cudaDeviceCanAccessPeer 不能替代这个探测？",
+          "source_files": [
+            "src/nvlink.cc",
+            "include/fast_ulysses/nvlink.hpp",
+            "python/fast_ulysses/cli.py"
+          ],
+          "title": "NVLink 拓扑探测：dlopen NVML 与失败开放",
+          "topic": "nvlink_matrix 的三步：BDF 匹配设备、直连 GPU-GPU 链路、NVSwitch 全互连补全；每个设备单独确认「回答过」的原因；检查失败即放行的 fail-open 语义；doctor 的矩阵输出。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u8-l2-cmake-setup-build.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "解释 CMAKE_CUDA_ARCHITECTURES 三个快照点的必要性",
+            "说出 register_work nm 探测如何变成编译宏与运行时行为差异",
+            "说明 --no-build-isolation 与 torch 精确 minor 钉住的联动原因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "arch 快照时序",
+            "Blackwell 下限守卫",
+            "register_work 探测",
+            "RPATH 与构建隔离"
+          ],
+          "order": 2,
+          "practice_task": "分别用 FAST_ULYSSES_CUDA_ARCH=90 与默认四架构执行 cmake -S . -B build-90（或完整 pip install -e . --no-build-isolation），对比 configure 输出里的 arch list 与 c10d::register_work 探测行；再写一段注释解释为什么构建不能在 pip 的 build isolation 里运行（torch 必须是用户环境里那份）。",
+          "source_files": [
+            "CMakeLists.txt",
+            "setup.py",
+            "pyproject.toml",
+            "docs/develop.md"
+          ],
+          "title": "构建系统：CMakeLists 与 setup.py",
+          "topic": "架构列表在 project() 前后的快照技巧、Blackwell 需 CUDA 12.8 的守卫、c10d::register_work 的 nm 探测、$ORIGIN 可重定位 RPATH；setup.py 的持久 build 目录、_build_meta.py 生成与 torch 精确 minor 钉住。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "filename": "u8-l3-wheel-abi-matrix.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "解释 PEP 440 local version 排序导致的静默换 torch 陷阱",
+            "按 machine → python → torch minor → CUDA major 的顺序复述匹配算法",
+            "对一次导入失败用 _diagnose 的四分类给出归因"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "wheel_matrix 行结构",
+            "PEP 440 局部版本陷阱",
+            "wheel-url 匹配顺序",
+            "导入失败归因"
+          ],
+          "order": 3,
+          "practice_task": "在当前环境运行 fast-ulysses wheel-url，逐行注释输出的匹配依据；然后构造（或纸面推演）torch minor 不匹配的场景，写出 _match 将打印的提示语；最后用 python -c \"import fast_ulysses\" 在一个无扩展的环境触发失败，对照 _diagnose.explain 的输出指认是 torch、ABI 还是 CUDA 的问题。",
+          "source_files": [
+            "python/fast_ulysses/cli.py",
+            "python/fast_ulysses/_diagnose.py",
+            "python/fast_ulysses/wheel_matrix.json",
+            "docs/install.md"
+          ],
+          "title": "wheel 矩阵与 ABI 匹配",
+          "topic": "wheel_matrix.json 的行结构（torch × CUDA × python × arch）；PEP 440 local version 排序让裸 pip install 静默换 torch 的陷阱；wheel-url 的四轴匹配顺序；_diagnose 对导入失败的归因（undefined symbol / libcudart）。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "高级：拓扑探测、构建与发布工程"
+    },
+    {
+      "id": "u9",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u3-l3"
+          ],
+          "filename": "u9-l1-test-architecture.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "说出四层测试各自的运行前提与覆盖范围",
+            "解释 torchrun 包装器的 SIGTERM→killpg 超时处理为何必要",
+            "描述 CI 的证明边界：编译/加载/布局 vs 多卡行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "host-only 布局测试",
+            "torchrun 包装器",
+            "超时与进程清理",
+            "CI 证明边界"
+          ],
+          "order": 1,
+          "practice_task": "本地运行 pytest -m \"not multigpu\" 并记录结果；然后精读 test_distributed.py 的 _run 超时分支，写注释解释为什么普通 subprocess.run 的 timeout 只杀 torchrun 会孤儿化 rank 进程、而孤儿化的自旋屏障 kernel 会一直占着 GPU。",
+          "source_files": [
+            "test/test_distributed.py",
+            "test/test_plan.py",
+            "docs/develop.md",
+            ".github/workflows/ci.yml"
+          ],
+          "title": "测试架构：分层与运行方式",
+          "topic": "四层测试：host-only 的 test_plan.py、torchrun 包装的 test_distributed.py（超时先 SIGTERM torchrun 再 killpg 的原因）、test_wheel_matrix.py、CI 无 GPU 时能证明什么。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-correctness-validation-workers.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "列出 correctness.py 覆盖的维度清单（模式/分片/out 三态/async/往返/dtype/往返/backward）",
+            "解释位精确对照选择 all_to_all_single+permute 作为参照的理由",
+            "说明「验证先于第一个屏障」如何被 validation.py 检验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "位精确参照",
+            "dtype 全表",
+            "backward 不交换断言",
+            "拒绝消息断言"
+          ],
+          "order": 2,
+          "practice_task": "从 correctness.py 中找出「backward 的 splits 原样传递」的断言，追到 build_plan 里 mode 1 是 mode 0 逆映射的数学依据并写出来；再为 validation.py 设计一个新非法用例（如 mode=3 或 world_size 超界）并写出预期消息。",
+          "source_files": [
+            "test/distributed/correctness.py",
+            "test/distributed/validation.py"
+          ],
+          "title": "correctness 与 validation 工作负载",
+          "topic": "correctness.py 对 torch.distributed 路径的位精确对照（双模式、偶/不均分、out 三态、async、往返、20 轮同窗口、全部 dtype、backward splits 不交换）；validation.py 断言每条文档化拒绝都 raise 且先于第一个握手。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3",
+            "u9-l2"
+          ],
+          "filename": "u9-l3-adversarial-race-tests.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "解释负控制（armed 必须让测试读到陈旧字节）防止的「测试变盲」",
+            "说明 skew 要做进传输长度而非到达时间才能被观察到",
+            "复述单缓冲窗口的读写竞态窗口与双流双窗口隔离的验证方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "CE 可见性假设与负控制",
+            "传输内 skew 设计",
+            "窗口读写竞态",
+            "双流窗口隔离"
+          ],
+          "order": 3,
+          "practice_task": "精读 ce_ordering.py 的 docstring，回答：负控制每次运行都执行防止什么？如果去掉不均匀分片带来的传输长度 skew、改为让 rank 晚到，测试为何会「通过但什么都没测」？再对 window_race.py 的 armed control 写出它必须在每个 rank 上都撕裂的原因。",
+          "source_files": [
+            "test/distributed/ce_ordering.py",
+            "test/distributed/window_race.py",
+            "test/distributed/overlapping_barriers.py",
+            "test/distributed/cudagraph.py"
+          ],
+          "title": "对抗性测试：CE 顺序、窗口竞态与重叠屏障",
+          "topic": "ce_ordering 用 _set_ce_fault 武装自己的负控制（测试必须还能失败才算有效）；window_race 证明写者不会覆盖读者；overlapping_barriers 证明 sync/async 双流用不同窗口；cudagraph 断言 epoch 每次重放 +2。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u9-l4-benchmark-methodology.md",
+          "id": "u9-l4",
+          "learning_goals": [
+            "对每个模式写出一句话的问题定义与判读方法",
+            "解释 hidden% 与 of the fabric 两个归一化指标的含义",
+            "说明独占执行（EXCLUSIVE/CONTENDED）为何是数字有效的前提"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "stages 分解",
+            "overlap 隐藏率",
+            "zerosm A/B",
+            "独占执行纪律"
+          ],
+          "order": 4,
+          "practice_task": "阅读 bench_a2a.py 的 stages 模式，为输出每列写一行判读模板（BASE/raw/a2a/transfer/barrier/copy_out 各回答什么问题）；有 ≥2 GPU 时在 tools/exclusive.sh 包裹下与非包裹各跑一次同一模式，对比两组成数字的离散度并解释为什么 CONTENDED 数字不可用。",
+          "source_files": [
+            "benchmark/bench_a2a.py",
+            "tools/exclusive.sh",
+            "docs/benchmark.md"
+          ],
+          "title": "基准方法论：stages/overlap/zerosm 与独占执行",
+          "topic": "bench_a2a.py 七种模式各自回答的问题与判读（hidden%、of the fabric、barrier 是 floor 不是待优化项）；exclusive.sh 的独占性检查与 EXCLUSIVE/CONTENDED 语义；collect.sh 记录环境。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2",
+            "u5-l3",
+            "u9-l3"
+          ],
+          "filename": "u9-l5-design-assumptions-review.md",
+          "id": "u9-l5",
+          "learning_goals": [
+            "陈述 CE 写入可见性假设的准确边界与四条文档缺位",
+            "复述 PCIe 拒绝的实测依据（不稳定、跨 socket 更差）",
+            "对每个被移除特性写出一句话的移除理由"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "未文档化假设",
+            "NCCL 替代形状",
+            "为何拒绝 PCIe",
+            "被移除的表面"
+          ],
+          "order": 5,
+          "practice_task": "写一篇 300 字左右的设计评审笔记：若要把屏障换成 NCCL 式「flag 作为 D2D 拷贝走同一引擎 + cuStreamWaitValue32 等待」的形状，列出需要改动的文件（src/transfer.cu、src/barrier.cu、include/fast_ulysses/transfer.hpp、src/group.cc 的握手区布局）与 design.md 论证过的代价；再从 migration.md 挑三条「本项目没有的东西」并各写一句迁移对策。",
+          "source_files": [
+            "docs/design.md",
+            "docs/migration.md"
+          ],
+          "title": "设计反思：未文档化的假设与被删掉的方案",
+          "topic": "核心假设「完成的 CE 写入在随后的 release store 到达前对目的地可见」的文档缺位与业界对照（NVSHMEM/TransformerEngine 更弱、NCCL 换形状规避）；为何拒绝 PCIe；被移除的 NVSHMEM、tag、reserve/seal 与各自的理由；迁移要点回顾。"
+        }
+      ],
+      "level": "advanced",
+      "order": 9,
+      "title": "高级：测试、基准与设计反思"
+    }
+  ],
+  "head": "ad1a4a06a42d8129a278f010b1d67a6e206d38e6",
+  "project": "fast-ulysses",
+  "rationale": "本项目是一个「小而深」的系统编程项目：代码量不大（约 10 个 C++/CUDA 文件 + 一个 Python 门面），但每一层都依赖 CUDA 拷贝引擎、torch 对称内存、内联 PTX 屏障和 torch dispatcher 等深层机制，因此学习路线按「先用起来、再逐层钻进机制、最后看工程与设计取舍」三层组织。单元顺序顺着一次调用的数据流排布：u1-u2 让读者从零理解 Ulysses 序列并行为什么需要两次 all-to-all、装好环境、掌握 Python API 的形状契约；u3 从纯主机的 a2a_plan.cc 入手（作者刻意让它无 CUDA/无 torch，可在无 GPU 环境验证），这是理解整个项目「重排即拷贝步长」思想的最佳入口；u4 讲对称内存窗口的分配、生命周期、empty_output 与 lend 轮转；u5 讲拷贝引擎传输与标志位屏障，并在此引入 CUDA graph；u6 讲 bindings.cc 的算子注册、校验流水线、autograd 与 trace 边界；u7 深入异步路径（comm 流、暂存池、work registry）；u8 转向工程面（NVLink 探测、CMake/setup 构建、wheel ABI 矩阵）；u9 以测试体系、基准方法论和 design.md 的假设复盘收尾。依赖链刻意让无 GPU 的读者也能完成 u1-u3 与 u9-l1 的实践（与项目自身「布局可在主机上测试」的哲学一致），多 GPU 实践则标注在需要处。"
+}
