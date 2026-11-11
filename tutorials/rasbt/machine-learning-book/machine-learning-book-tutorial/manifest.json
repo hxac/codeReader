@@ -1,0 +1,1469 @@
+{
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "了解本书的定位与配套代码仓库的关系",
+            "记住 ch01 到 ch19 的主题脉络：经典机器学习到深度学习",
+            "知道每一章都有 .ipynb 与 .py 两种形式的等价代码"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 目录表",
+            "ERRATA 勘误目录",
+            "章节双文件组织 (ipynb/py)"
+          ],
+          "order": 1,
+          "practice_task": "不运行任何代码，仅通过 README.md 的目录和各章文件夹，整理一张「章节号-主题-关键源码文件」对照表，并确认 ch02 与 ch03 各自的 notebook 与脚本文件名。",
+          "source_files": [
+            "README.md",
+            "ch01/README.md",
+            "ERRATA/README.md",
+            "ch02/ch02.ipynb",
+            "ch02/ch02.py"
+          ],
+          "title": "项目定位与仓库结构总览",
+          "topic": "介绍 rasbt/machine-learning-book 仓库是《Machine Learning with PyTorch and Scikit-Learn》一书的官方配套代码，梳理 ch01 到 ch19 的目录组织、每章 notebook 与脚本的对应关系，以及 ERRATA 勘误目录的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-environment-setup.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "用 conda 或 pip 搭建 pyml-book 环境",
+            "运行 python_environment_check.py 验证依赖",
+            "知道如何用 Makefile 一键创建 environment.yml 描述的环境"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "conda/pip 环境管理",
+            "environment.yml 依赖清单",
+            "版本检查脚本"
+          ],
+          "order": 2,
+          "practice_task": "按照 ch01/README.md 创建名为 pyml-book 的虚拟环境，安装指定版本依赖，然后运行 python python_environment_check.py，把输出的各包版本记录下来（没有 GPU 时可以先不装 PyTorch）。",
+          "source_files": [
+            "ch01/README.md",
+            "environment.yml",
+            "Makefile",
+            "python_environment_check.py"
+          ],
+          "title": "搭建 Python 环境并验证可运行性",
+          "topic": "讲解如何用 conda/pip/Makefile 搭建本书运行环境，并用 python_environment_check.py 脚本验证 numpy、scikit-learn、pandas 等包的版本，以及在没有本地 GPU 时用 Google Colab 运行的方案。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-notebook-script-workflow.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "学会同时使用 .ipynb 和 .py 两种形式的学习方式",
+            "理解仓库中 notebook 到脚本的自动转换脚本的作用",
+            "第一次跑通加载数据并可视化的完整流程"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Jupyter notebook 使用",
+            "pandas read_csv 与 tail/head",
+            "matplotlib/ seaborn 快速可视化"
+          ],
+          "order": 3,
+          "practice_task": "用 pandas 读取 ch02/iris.data（注意无表头、逗号分隔），打印前 5 行和后 5 行，抽取前 100 个样本的萼片长度与花瓣长度两列以及品种标签，并画出两类样本的散点图。",
+          "source_files": [
+            "ch02/ch02.ipynb",
+            "ch02/ch02.py",
+            "ch02/iris.data",
+            "ch01/.convert_notebook_to_script.py",
+            "update_python_from_notebook.sh"
+          ],
+          "title": "Notebook 与脚本双轨工作流",
+          "topic": "说明仓库中 .ipynb 与 .py 是同一份代码的两种形式，介绍如何打开 notebook 运行 ch02 开头的鸢尾花数据加载与可视化代码，并了解 .convert_notebook_to_script.py 等脚本如何维护两者同步。"
+        }
+      ],
+      "order": 1,
+      "title": "起步：认识项目与环境搭建"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u2-l1-perceptron-from-scratch.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "读懂 fit/predict/net_input/update_weights 的实现",
+            "理解线性净输入与阈值函数的作用",
+            "会调用 plot_decision_regions 绘制决策边界"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "net_input 线性加权求和",
+            "predict 阈值激活函数",
+            "errors 误分类样本数记录",
+            "plot_decision_regions 决策区域绘制"
+          ],
+          "order": 1,
+          "practice_task": "把 Perceptron 的 eta 从 0.1 改为 0.0001 和 10，分别训练并绘制每轮误分类样本数曲线，观察学习率对收敛的影响并解释原因。",
+          "source_files": [
+            "ch02/ch02.py",
+            "ch02/iris.data"
+          ],
+          "title": "感知机从零实现",
+          "topic": "逐行阅读 ch02.py 中的 Perceptron 类，理解净输入、阈值激活函数、权重更新规则以及用 matplotlib 可视化决策区域的方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-adaline-gd.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "区分激活函数与连续代价函数的角色",
+            "读懂 _activate、activation 和 cost 方法的实现",
+            "通过对比实验理解特征缩放对梯度下降的必要性"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SSE 代价函数 cost",
+            "整批梯度计算与权重更新",
+            "两个学习率下的代价曲线对比"
+          ],
+          "order": 2,
+          "practice_task": "复现书中实验：分别用 eta=0.1 和 eta=0.0001 在未标准化数据上训练 AdalineGD，绘制两幅 epoch-代价图，再自己选一个合适的学习率得到收敛曲线。",
+          "source_files": [
+            "ch02/ch02.py"
+          ],
+          "title": "AdalineGD 与梯度下降",
+          "topic": "阅读 AdalineGD 类，理解连续线性激活函数、平方误差和(SSE)代价函数、整批梯度下降，以及为什么不同学习率会导致发散或收敛。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-adaline-sgd-standardization.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "实现标准化并用它改善梯度下降",
+            "理解 shuffle 与 partial_fit 的在线学习设计",
+            "对比整批 GD 与 SGD 的收敛行为"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "StandardScaler fit_transform/transform",
+            "shuffle 与权重初始化",
+            "partial_fit 单批更新",
+            "fit 中按批迭代的循环结构"
+          ],
+          "order": 3,
+          "practice_task": "先用 StandardScaler 标准化特征再训练 AdalineGD，然后训练 AdalineSGD，把两者的 epoch-代价曲线画在同一张图上比较收敛速度与稳定性。",
+          "source_files": [
+            "ch02/ch02.py"
+          ],
+          "title": "特征标准化与 AdalineSGD 随机梯度下降",
+          "topic": "阅读 AdalineSGD 类，理解先用 StandardScaler 标准化特征为何能让梯度下降快速收敛，以及逐样本随机梯度下降与 partial_fit 在线更新机制。"
+        }
+      ],
+      "order": 2,
+      "title": "机器学习第一步：感知机与自适应线性神经元（第 2 章）"
+    },
+    {
+      "id": "u3",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-logistic-regression.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "掌握 fit/predict/score 的通用流程",
+            "读懂 LogisticRegressionGD 的 sigmoid 与梯度更新",
+            "理解 L1/L2 正则化系数 C 与过拟合的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "train_test_split 划分",
+            "StandardScaler 预处理",
+            "LogisticRegressionGD 从零实现",
+            "正则化强度 C 的调参实验"
+          ],
+          "order": 1,
+          "practice_task": "用 sklearn 的 LogisticRegression 在标准化后的鸢尾花两类数据上训练，再跑一遍 ch03.py 中手写的 LogisticRegressionGD，绘制两者决策区域并对比；随后固定其他参数，尝试 C=[100, 10, 1.0, 0.1] 观察正则化的影响。",
+          "source_files": [
+            "ch03/ch03.py"
+          ],
+          "title": "scikit-learn 初体验：训练范式与逻辑回归",
+          "topic": "学习 scikit-learn 的 fit/predict 范式与 train_test_split 的用法，阅读手写版 LogisticRegressionGD 理解 sigmoid 激活与对数似然代价，并实验 L2 正则化强度 C 对决策边界的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-svm-kernel-trick.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 margin 与软间隔参数 C 的作用",
+            "区分 gamma 与 C 各自控制什么",
+            "用 plot_decision_regions 观察核函数对边界形状的影响"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SVC kernel/gamma/C 参数",
+            "核技巧基本直觉",
+            "plot_decision_regions test_idx 参数"
+          ],
+          "order": 2,
+          "practice_task": "对 gamma 和 C 各取 4 个不同值组成网格，训练 16 个 RBF 核 SVC，把它们的决策区域画成 2x2 或 4x4 子图，总结两个参数对过拟合/欠拟合的影响。",
+          "source_files": [
+            "ch03/ch03.py"
+          ],
+          "title": "最大间隔分类：SVM 与核技巧",
+          "topic": "阅读 ch03.py 中 SVC 的使用示例，理解最大间隔、软间隔惩罚参数 C、gamma 与决策边界形状的关系，以及线性核与 RBF 核的区别。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-decision-tree-knn.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解熵、基尼系数与分类误差三种不纯度度量",
+            "明白 max_depth 剪枝与三维决策边界的成因",
+            "理解 KNN 的 k、距离度量与维数灾难"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "entropy/gini/error 三个函数",
+            "DecisionTreeClassifier max_depth",
+            "KNeighborsClassifier k 与 p 参数",
+            "export_graphviz 树可视化"
+          ],
+          "order": 3,
+          "practice_task": "复现 entropy/gini/error 三条不纯度曲线的对比图；然后用 max_depth=[1,2,3,4,5] 训练决策树、k=[1,5,10,25] 训练 KNN，分别绘制决策区域并说明观察到的现象。",
+          "source_files": [
+            "ch03/ch03.py"
+          ],
+          "title": "决策树、KNN 与不纯度指标",
+          "topic": "阅读 entropy/gini/error 三个手写函数理解决策树的不纯度指标，学习 DecisionTreeClassifier 的信息增益与最大深度剪枝，以及 KNeighborsClassifier 的惰性学习方式。"
+        }
+      ],
+      "order": 3,
+      "title": "scikit-learn 分类器漫游（第 3 章）"
+    },
+    {
+      "id": "u4",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u4-l1-data-cleaning-encoding.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "熟练使用 dropna/fillna/replace 处理缺失与非法值",
+            "理解 map 字典编码与 get_dummies 独热编码的差别",
+            "掌握 train_test_split 划分与 LabelEncoder 恢复标签"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pandas isnull/sum 探查",
+            "SimpleImputer 填充",
+            "get_dummies 与 map",
+            "train_test_split + LabelEncoder"
+          ],
+          "order": 1,
+          "practice_task": "对 wine 数据集完成：删除含 NaN 的行、用中位数填补另一列、把 Alcohol 列映射为自定义类别、对两个标称列独热编码，最后用分层抽样划出 30% 测试集，并打印每一步后的形状。",
+          "source_files": [
+            "ch04/ch04.py"
+          ],
+          "title": "数据清洗与类别特征编码",
+          "topic": "学习用 pandas 读入 CSV、isnull 探查缺失值、dropna/fillna/SimpleImputer 处理缺失，用 map 做标签编码、get_dummies 做 one-hot 编码，并用 train_test_split 划分 wine 数据集。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-feature-selection.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 SBS 贪心删除特征的算法流程",
+            "读懂 _calc_score 与 _accuracy_score 的封装方式",
+            "对比随机森林重要性与 SBS 的一致与冲突之处"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "SBS fit 的两层循环",
+            "子集与分数记录",
+            "KNN 配合 SBS 评估",
+            "RandomForest feature_importances_"
+          ],
+          "order": 2,
+          "practice_task": "把 SBS 内部的评估器从 KNN 换成 LogisticRegression，重新跑出 k-特征数 vs 验证准确率曲线，比较选出的特征子集是否与 KNN 版本一致，并解释差异。",
+          "source_files": [
+            "ch04/ch04.py"
+          ],
+          "title": "序列特征选择 SBS 与特征重要性",
+          "topic": "阅读手写 SBS 类的贪心序列后向删除算法，结合 KNN 画出特征数量与验证准确率曲线，再用 RandomForest 的 feature_importances_ 对比另一种特征排序依据。"
+        }
+      ],
+      "order": 4,
+      "title": "数据预处理与特征选择（第 4 章）"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u5-l1-pca.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "读懂 PCA 五步的每一步对应的 numpy/sklearn 代码",
+            "区分 explained_variance_ 与 explained_variance_ratio_",
+            "理解 PCA 在训练集拟合、测试集只变换的原则"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "StandardScaler 协方差前提",
+            "np.linalg.eigh 特征分解",
+            "argsort 取前 k 个主成分",
+            "transform 投影与 scatter 可视化"
+          ],
+          "order": 1,
+          "practice_task": "不用 sklearn，只用 numpy 按五步法对标准化后的 wine 训练集降到 2 维，与 sklearn PCA 的结果做数值对比（应一致，最多方向相反），并打印各自的总方差解释率。",
+          "source_files": [
+            "ch05/ch05.py"
+          ],
+          "title": "PCA 主成分分析五步流程",
+          "topic": "对照 ch05.py 中手写 PCA 五步法（标准化、协方差矩阵、特征分解、排序取前 k、投影）与 sklearn PCA 的用法，理解 explained_variance_ratio_ 与累计方差图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-lda-kernel-pca.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 LDA 用类间散布/类内散布找投影方向的思想",
+            "掌握 KernelPCA 的 kernel 与 gamma 选择流程",
+            "理解为什么核 PCA 的核参数必须用监督指标来选"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LinearDiscriminantAnalysis(n_components=1)",
+            "KernelPCA kernel/gamma/coef0",
+            "GridSearchCV 包裹 KernelPCA+逻辑回归",
+            "半月亮数据的非线性投影可视化"
+          ],
+          "order": 2,
+          "practice_task": "复现核 PCA + 逻辑回归 + GridSearchCV 搜索 gamma 与 coef0 的流程，记录最优参数；再换 'sigmoid' 核重跑一遍网格搜索，比较两种核在同一个月牙形数据上的最优准确率。",
+          "source_files": [
+            "ch05/ch05.py"
+          ],
+          "title": "监督降维 LDA 与非线性核 PCA",
+          "topic": "学习 sklearn LinearDiscriminantAnalysis 的监督降维用法与它和 PCA 的本质区别，再阅读 KernelPCA 在月牙形数据上的核函数与 gamma 选择实验（用网格搜索配合逻辑回归评估）。"
+        }
+      ],
+      "order": 5,
+      "title": "降维：PCA、LDA 与核 PCA（第 5 章）"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u6-l1-pipeline-crossval.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 Pipeline 把预处理和模型绑定的意义（防止测试集信息泄漏）",
+            "掌握 StratifiedKFold 分层交叉验证的用法",
+            "能通过曲线形状判断模型是高偏差还是高方差"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Pipeline([('sc', ...), ('clf', ...)])",
+            "cross_val_score n_jobs 参数",
+            "learning_curve 绘制",
+            "validation_curve 单参数扫描"
+          ],
+          "order": 1,
+          "practice_task": "对乳腺癌数据集建一条 StandardScaler+LogisticRegression 管线，用 cross_val_score 做 10 折分层交叉验证输出均值与标准差；再画 C 参数的 validation_curve，指出最优 C 附近训练/验证曲线的形态。",
+          "source_files": [
+            "ch06/ch06.py"
+          ],
+          "title": "Pipeline、交叉验证与学习/验证曲线",
+          "topic": "阅读 ch06.py 的 Pipeline 构建与 cross_val_score 交叉验证，理解分层 K 折；用 learning_curve 和 validation_curve 诊断偏差-方差问题，并结合乳腺癌数据集的曲线解读。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-grid-random-search.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "掌握 GridSearchCV、RandomizedSearchCV 的参数分布写法",
+            "理解 nested CV 的内层选模型、外层评估的分工",
+            "会通过 cv_results_ 和 best_estimator_ 检查搜索结果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "参数网格 param_grid 双列表",
+            "HalvingGridSearchCV 资源递增思想",
+            "gs.best_score_/best_params_",
+            "外层 cross_val_score(gs, ...) 的嵌套写法"
+          ],
+          "order": 2,
+          "practice_task": "复现嵌套 CV：对 SVC 用 2x5 折嵌套交叉验证输出均值和标准差，再把 RandomizedSearchCV 的采样数 n_iter 从 20 改到 100，观察最优参数与嵌套分数是否变化并解释。",
+          "source_files": [
+            "ch06/ch06.py"
+          ],
+          "title": "网格/随机/减半搜索与嵌套交叉验证",
+          "topic": "学习 GridSearchCV 的参数网格、best_score_/best_params_ 的解读，RandomizedSearchCV 与 HalvingGridSearchCV 的资源高效搜索，以及嵌套交叉验证如何无偏地比较 SVM 与决策树。"
+        }
+      ],
+      "order": 6,
+      "title": "模型评估与超参数优化（第 6 章）"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-metrics-roc-imbalanced.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解为什么准确率在不平衡数据上会误导",
+            "掌握查全权错权与 precision_score 的调用方式",
+            "理解 ROC 曲线的生成方式与 AUC 的含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "confusion_matrix 与热图",
+            "precision_score('micro')/('macro')/('weighted')",
+            "roc_curve 三步与 AUC 图例绘制",
+            "对少数类标签时的指标反转检查"
+          ],
+          "order": 3,
+          "practice_task": "对乳腺癌数据集网格搜索出最优管线后：打印混淆矩阵、micro/macro/weighted 三种 F1，注意书中「把正类设为 0 时 F1 为 0」的坑并修正；最后绘制 ROC 曲线并标出 AUC=1 的图例。",
+          "source_files": [
+            "ch06/ch06.py"
+          ],
+          "title": "混淆矩阵、指标体系与 ROC 曲线",
+          "topic": "阅读 confusion_matrix 可视化、precision/recall/F1（micro/macro/weighted）、以及 ROC 曲线与 AUC 的计算代码，并理解书中把少数类标为正类的实践建议。"
+        }
+      ],
+      "order": 6,
+      "title": "模型评估与超参数优化（第 6 章）"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u7-l1-majority-vote-ensemble.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解组合器基类聚合 fit/predict 的实现技巧",
+            "理解 predict_proba 与 predict 的一致性检查",
+            "掌握 AUC 验证曲线对比模型与集成的实验方法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ensemble_error 二项分布推导",
+            "多数投票器 predict_proba/predict/fit",
+            "cross_val_score 对比基线与集成"
+          ],
+          "order": 1,
+          "practice_task": "在 MajorityVoteClassifier 中加入第四个模型 KNeighborsClassifier(p=2, n_neighbors=1)，重画书中的 10 折交叉验证对比条形图，并解释集成分数是否提升。",
+          "source_files": [
+            "ch07/ch07.py"
+          ],
+          "title": "多数投票集成从零实现",
+          "topic": "推导 ensemble_error 概率公式理解「集成优于单分类器」的条件，再阅读 MajorityVoteClassifier 的组合(composite)实现：聚合 predict_proba、argmax 投票、BaseEstimator/ClassifierMixin/TransformerMixin 混入。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-bagging-boosting.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 BaggingClassifier 的 bootstrap 参数与 OOB 分数",
+            "理解 SAMME.R 提升权重机制与 base_estimator",
+            "明白 XGBoost 与 sklearn GradientBoosting 的接口差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "BaggingClassifier bootstrap/oob_score",
+            "AdaBoostClassifier algorithm 参数",
+            "GradientBoostingClassifier 与 XGBClassifier"
+          ],
+          "order": 2,
+          "practice_task": "复现 bagging 误分类样本的突出显示图；再用 AdaBoost 把基学习器换成 DecisionTreeClassifier(max_depth=1, n_estimators=500)，绘制训练/测试准确率随迭代次数的曲线，观察提升过程。",
+          "source_files": [
+            "ch07/ch07.py"
+          ],
+          "title": "Bagging 与 Boosting 家族",
+          "topic": "学习 BaggingClassifier 的 bootstrap 采样、袋外(oob)评估、特征重要性；阅读 AdaBoost 的 SAMME 算法实现思路，最后对比 gradient boosting 与 XGBoost 在乳腺癌数据集上的表现。"
+        }
+      ],
+      "order": 7,
+      "title": "集成学习（第 7 章）"
+    },
+    {
+      "id": "u8",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l1-bag-of-words-tfidf.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 CountVectorizer 的 fit_transform 到稠密数组的过程",
+            "理解 TF-IDF 中文档频率的加权思想",
+            "理解 stopwords、ngram_range 等关键参数的作用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "CountVectorizer 文档-词矩阵",
+            "ngram_range 与 min_df",
+            "porter 词干提取",
+            "GridSearchCV 调逻辑回归 C 与正则化"
+          ],
+          "order": 1,
+          "practice_task": "对电影评论子集构建 1-gram 词袋、应用 TF-IDF、用 5 折交叉验证网格搜索逻辑回归的 C 和 penalty，报告 5 折平均准确率，并打印最优参数组合。",
+          "source_files": [
+            "ch08/ch08.py"
+          ],
+          "title": "词袋模型、TF-IDF 与文本清洗",
+          "topic": "阅读 CountVectorizer 构建「文档-词」矩阵、TfidfTransformer 的重加权、NLTK 的停用词与 porter 词干还原，并用 5 折交叉验证训练逻辑回归情感分类器。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-out-of-core-learning.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解生成器逐批产出数据的惰性计算模式",
+            "掌握 HashingVectorizer 的固定维度哈希技巧",
+            "理解 partial_fit + classes 参数的在线更新流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "生成器 yield 惰性读取",
+            "get_minibatch 切批",
+            "HashingVectorizer 固定 n_features",
+            "SGDClassifier.partial_fit 在线训练"
+          ],
+          "order": 2,
+          "practice_task": "修改 stream_docs 让它同时剥离每条评论的评分前缀（复用书中的正则），然后统计 45 个 batch 各自的准确率并画出准确率随已见样本数变化的曲线。",
+          "source_files": [
+            "ch08/ch08.py"
+          ],
+          "title": "out-of-core 流式学习",
+          "topic": "阅读 reporthook 下载代码、stream_docs 生成器逐条解析评论、get_minibatch 切批，配合 HashingVectorizer 与 SGDClassifier.partial_fit 实现内存友好的在线学习。"
+        }
+      ],
+      "order": 8,
+      "title": "情感分析与文本特征（第 8 章）"
+    },
+    {
+      "id": "u9",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u9-l1-linear-regression.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "读懂 LinearRegressionGD 与 sklearn LinearRegression 的对应关系",
+            "理解残差图与 MSE/R² 的诊断含义",
+            "明白 RANSAC 对离群点的鲁棒性来源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LinearRegressionGD.fit 梯度下降",
+            "residual_plot 残差可视化",
+            "LinearRegression coef_/intercept_",
+            "RANSACRegressor 离群掩码"
+          ],
+          "order": 1,
+          "practice_task": "对 Ames 住房数据：分别拟合普通 LinearRegression 与 RANSACRegressor，绘制两者的残差图对比，并把 RANSAC 的 inlier_mask_ 数量占总样本的比例统计出来。",
+          "source_files": [
+            "ch09/ch09.py"
+          ],
+          "title": "线性回归与 RANSAC",
+          "topic": "阅读手写 LinearRegressionGD 理解回归版梯度下降，学习残差图诊断、线性回归系数解读，以及用 RANSACRegressor 抑制离群点的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-regularized-tree-regression.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "理解岭回归对权重范数的收缩与 Lasso 对 alpha 的敏感性",
+            "读懂 ElasticNetCV 的 5 折验证曲线",
+            "理解树回归与随机森林的非线性边界"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Ridge/Lasso/ElasticNet alpha 网格实验",
+            "train_test_split 划分 Ames 数据",
+            "RandomForestRegressor n_estimators",
+            "XGBRegressor eta/列采样"
+          ],
+          "order": 2,
+          "practice_task": "对标准化后的住房特征，让 alpha 在对数网格上变化，拟合 Ridge 与 Lasso 各自的系数轨迹图（复现书中曲线），标出 ElasticNetCV 选中的最优 alpha；再用 XGBRegressor 与 RandomForestRegressor 比较测试集 R²。",
+          "source_files": [
+            "ch09/ch09.py"
+          ],
+          "title": "正则化回归与树模型回归",
+          "topic": "对比 Ridge、Lasso、ElasticNet 的正则化项与系数轨迹实验（含 ElasticNetCV 自动选 alpha），再学习 RandomForestRegressor 与 XGBRegressor 的非线性回归及其 R² 评估。"
+        }
+      ],
+      "order": 9,
+      "title": "回归分析（第 9 章）"
+    },
+    {
+      "id": "u10",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u10-l1-kmeans.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "理解 KMeans 的初始化敏感性与 k-means++ 的改进",
+            "读懂 cluster_centers_/labels_/inertia_ 的含义",
+            "掌握肘部法与轮廓系数两种 k 选择工具"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "make_blobs 合成数据",
+            "km.cluster_centers_ 与 labels_",
+            "silhouette_samples/plot 可视化",
+            "inertia_ 肘部曲线"
+          ],
+          "order": 1,
+          "practice_task": "用 make_blobs 生成 3 团数据（把其中一个 center 拉远制造不均匀），分别取 k=1..10 画肘部图，再对 k=2..4 画 silhouette 图，说明你最终选哪个 k 及理由。",
+          "source_files": [
+            "ch10/ch10.py"
+          ],
+          "title": "KMeans、肘部法与轮廓系数",
+          "topic": "阅读 KMeans 的 fit_predict 用法、k-means++ 初始化、质心与簇标签，并学习用肘部法(SSE)与轮廓图选择簇数 k，以及 silhouette_samples 的半圆可视化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l1"
+          ],
+          "filename": "u10-l2-hierarchical-dbscan.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "能看懂 linkage 输出的合并记录",
+            "掌握距离矩阵行列标注的绘图技巧",
+            "理解 DBSCAN 的密度可达与 eps/min_samples 含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "pdist/squareform 距离矩阵",
+            "linkage + dendrogram",
+            "AgglomerativeClustering linkage/affinity",
+            "DBSCAN eps/min_samples"
+          ],
+          "order": 2,
+          "practice_task": "生成月牙形+圆环混合数据，分别用 KMeans(n=2)、AgglomerativeClustering(n=2) 和 DBSCAN 聚类，画出三张着色结果图，并解释为什么只有 DBSCAN 能同时分离月牙和圆环。",
+          "source_files": [
+            "ch10/ch10.py"
+          ],
+          "title": "层次聚类与 DBSCAN",
+          "topic": "学习 scipy 的 pdist/squareform/linkage/dendrogram 树状图流程、complete vs single 连接方式，以及 DBSCAN 的 eps/min_samples 与「噪声点」概念及其对月牙形数据的优势。"
+        }
+      ],
+      "order": 10,
+      "title": "聚类分析（第 10 章）"
+    },
+    {
+      "id": "u11",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u11-l1-mlp-forward.md",
+          "id": "u11-l1",
+          "learning_goals": [
+            "读懂权重矩阵形状 (num_hidden, num_features) 的设计原因",
+            "理解 sigmoid 激活与 one-hot 标签编码",
+            "掌握 numpy 版前向传播的维度变换"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "int_to_onehot 标签编码",
+            "weight_h/weight_out 形状与转置",
+            "sigmoid 激活函数",
+            "forward 返回 a_h 与 a_out"
+          ],
+          "order": 1,
+          "practice_task": "手动构造 shape=(5,3) 的输入与 shape=(5,) 的标签 y，实例化 NeuralNetMLP(num_features=3, num_hidden=50, num_classes=10)，调用 forward 检查 a_h、a_out 的形状，并验证 a_out 每行和接近 1。",
+          "source_files": [
+            "ch11/neuralnet.py",
+            "ch11/ch11.py"
+          ],
+          "title": "NeuralNetMLP 前向传播",
+          "topic": "阅读 ch11/neuralnet.py 的 NeuralNetMLP 类，理解隐藏层与输出层的权重矩阵形状、sigmoid 激活以及 forward 的两步矩阵运算，并了解 int_to_onehot 标签编码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l1"
+          ],
+          "filename": "u11-l2-mlp-backprop-training.md",
+          "id": "u11-l2",
+          "learning_goals": [
+            "读懂 backward 中 d_loss__d_a_out 到最终权重梯度的每一步矩阵运算",
+            "理解 minibatch_generator 的 shuffle+yield 流程",
+            "能复现训练过程中 train/valid epoch MSE 与准确率曲线"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "minibatch_generator shuffle/切批",
+            "mse_loss 与 accuracy",
+            "compute_mse_and_acc",
+            "backward 四组梯度 numpy 推导"
+          ],
+          "order": 2,
+          "practice_task": "把隐藏层单元数从 50 改为 [10, 50, 100] 分别训练 50 epoch，绘制各自训练/验证准确率曲线，并测量每轮训练耗时，总结隐藏层宽度与精度的关系。",
+          "source_files": [
+            "ch11/ch11.py",
+            "ch11/neuralnet.py"
+          ],
+          "title": "反向传播与 minibatch 训练循环",
+          "topic": "读懂 backward 方法中链式法则的四组梯度推导（输出层权重/偏置与隐藏层权重/偏置），再结合 minibatch_generator、mse_loss、accuracy、compute_mse_and_acc 与 train 函数完成 MNIST 小批量训练。"
+        }
+      ],
+      "order": 11,
+      "title": "从零实现多层神经网络（第 11 章）"
+    },
+    {
+      "id": "u12",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u11-l2"
+          ],
+          "filename": "u12-l1-tensor-basics.md",
+          "id": "u12-l1",
+          "learning_goals": [
+            "理解 to(dtype)/to(device) 的链式调用",
+            "掌握张量 shape 变换与广播运算",
+            "理解 to(device).type() 在 CPU/GPU 之间的差异",
+            "理解「PyTorch 张量是 ndarray 的 GPU 加速版」的定位"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "torch.tensor 创建与属性",
+            "reshape/transpose/squeeze",
+            "逐元素与统计运算",
+            "split/stack/cat 组合"
+          ],
+          "order": 1,
+          "practice_task": "创建两个形状不同的张量，分别演示数学广播、转置、reshape、stack 与 concatenate 的结果形状；再用显式循环和 tolist 两种方式做逐元素乘法，验证结果一致并比较写法差异。",
+          "source_files": [
+            "ch12/ch12_part1.py"
+          ],
+          "title": "PyTorch 张量基础",
+          "topic": "学习张量的创建、dtype 与 shape 变换、数学运算、split/stack/concatenate，以及张量与 numpy 数组互转、GPU 上的复制语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l1"
+          ],
+          "filename": "u12-l2-dataset-dataloader.md",
+          "id": "u12-l2",
+          "learning_goals": [
+            "掌握自定义 Dataset 的 __len__/__getitem__ 契约",
+            "理解 DataLoader 的 batch_size/shuffle/drop_last 组合",
+            "理解 CelebA 级目录结构的 ImageFolder 组织方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TensorDataset/DataLoader 快速封装",
+            "JointDataset __getitem__ 返回元组",
+            "ImageFolder 目录式数据集",
+            "DataLoader shuffle/batch/drop_last"
+          ],
+          "order": 2,
+          "practice_task": "仿照 ImageDataset（不做去重）实现一个自己的 Dataset 类读取 cat_dog_images 下的猫狗图片并返回 (image, label)，用 batch_size=2 的 DataLoader 遍历一轮，打印每个 batch 的形状。",
+          "source_files": [
+            "ch12/ch12_part1.py"
+          ],
+          "title": "Dataset 与 DataLoader 输入管线",
+          "topic": "阅读从张量建 DataLoader、JointDataset/MyDataset 组合两个张量、shuffle/batch/repeat 机制，以及用 ImageDataset 从 cat_dog_images 目录逐个读图的自定义数据集。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l2"
+          ],
+          "filename": "u12-l3-nn-autograd-xor.md",
+          "id": "u12-l3",
+          "learning_goals": [
+            "理解 forward 定义计算图、loss.backward() 填充 .grad 的机制",
+            "理解 zero_grad 防止梯度累积的原因",
+            "理解多分类用 softmax 而 sigmoid 会产生的概率不可归一问题",
+            "掌握 torch.save/load 的两种方式与 device 转移"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "nn.Linear/Sequential 搭建",
+            "zero_grad/backward/step 训练三步",
+            "logistic/softmax/tanh 激活对比",
+            "torch.save/load 权重"
+          ],
+          "order": 3,
+          "practice_task": "把书中 Model 的隐藏单元从 4 改为 [1, 2, 4, 8]，分别训练 XOR 并记录最终训练准确率，画出隐藏层大小 vs 准确率的柱状图，验证 XOR 至少需要 2 个隐藏单元。",
+          "source_files": [
+            "ch12/ch12_part2.py"
+          ],
+          "title": "nn.Module、autograd 与 XOR 训练",
+          "topic": "阅读手写 logistic_activation 到 softmax 的对比、用 nn.Sequential 搭建 XOR 二分类网络、loss_fn+model(xb)、训练循环中的 zero_grad/backward/step，以及 torch.save/torch.load 的模型保存。"
+        }
+      ],
+      "order": 12,
+      "title": "PyTorch 入门（第 12 章）"
+    },
+    {
+      "id": "u13",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u12-l3"
+          ],
+          "filename": "u13-l1-dynamic-graph-custom-layers.md",
+          "id": "u13-l1",
+          "learning_goals": [
+            "理解 requires_grad 与自动微分的关系",
+            "掌握自定义层 forward + 参数注册的套路",
+            "理解 forward 里写条件分支带来的动态图优势",
+            "理解张量在 CPU/GPU 间的 to(device) 转移"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "张量 requires_grad 与 .grad_fn",
+            "NoisyLinear reset_parameters/forward",
+            "MyModule 自定义模型",
+            "forward 条件分支动态行为"
+          ],
+          "order": 1,
+          "practice_task": "仿照 NoisyLinear 实现一个 NoisyReLU 层（前向加入随机噪声后做 ReLU），用随机输入验证 train 和 eval 模式下输出是否不同，再把它嵌入一个 MyNoisyModule 类似的模型跑一次前向。",
+          "source_files": [
+            "ch13/ch13_part1.py"
+          ],
+          "title": "动态计算图与自定义层",
+          "topic": "通过 compute_z 理解 autograd 的 requires_grad 与求导，阅读 MyModule/NoisyLinear 自定义层（含 training/eval 模式行为差异）与 forward 中写 if 分支的动态图特性。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l1"
+          ],
+          "filename": "u13-l2-project-structure-checkpoint.md",
+          "id": "u13-l2",
+          "learning_goals": [
+            "掌握 model.state_dict()/load_state_dict() 与整个模型保存的差别",
+            "理解「CPU 训练、GPU 推理」的 map_location 用法",
+            "能组织一个 .py 模块 + notebook 调用的训练工程",
+            "理解 utils.load_data/input_to_tensor 等工具函数划分"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "文件/模块化拆分动机",
+            "torch.save 两类保存对象",
+            "map_location 加载",
+            "utils 工具函数封装"
+          ],
+          "order": 2,
+          "practice_task": "把 ch13_part1 中的模型训练若干 epoch 后分别用「整个模型」和「state_dict」两种方式保存到磁盘，再在 CPU 上加载两者并对同一输入推理，验证输出一致，并说明两种方式对代码结构的不同要求。",
+          "source_files": [
+            "ch13/ch13_part2.py",
+            "ch13/ch13_part1.py"
+          ],
+          "title": "项目结构、模型保存与加载",
+          "topic": "了解把训练代码组织成 Python 模块的方式（model construction utilities、data loading utilities、训练循环），学习 state_dict 与整个模型的两种保存/加载，以及 map_location 跨设备加载。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l2"
+          ],
+          "filename": "u13-l3-lightning-ignite.md",
+          "id": "u13-l3",
+          "learning_goals": [
+            "理解 LightningModule 把训练/验证/优化器逻辑收进类的设计",
+            "理解 DataModule 统一数据准备的优势",
+            "理解 Ignite 用 Engine + 事件回调拼装训练循环的思路",
+            "能对比原始 PyTorch 循环与两个框架的代码量差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LightningModule train/validation_step",
+            "LightningDataModule setup",
+            "Trainer.fit/gpus/max_epochs",
+            "Ignite Engine/Events 回调"
+          ],
+          "order": 3,
+          "practice_task": "把 ch13_part3 的 Lightning 模型 epoch 从 200 降到 50 并重跑，记录验证准确率；再运行 ch13_part4 的 Ignite 脚本，对比两者与原始 PyTorch 训练循环（ch13_part1）在代码行数与结构上的差异，写一段总结。",
+          "source_files": [
+            "ch13/ch13_part3_lightning.py",
+            "ch13/ch13_part4_ignite.py"
+          ],
+          "title": "高层训练接口：PyTorch Lightning 与 Ignite",
+          "topic": "阅读 MultiLayerPerceptron(pl.LightningModule) 与 MnistDataModule(pl.LightningDataModule) 的训练/验证步骤抽象，以及 Ignite 用 create_supervised_trainer/evaluator 加 Events 事件的回调式训练。"
+        }
+      ],
+      "order": 13,
+      "title": "PyTorch 核心机制（第 13 章）"
+    },
+    {
+      "id": "u14",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l2"
+          ],
+          "filename": "u14-l1-conv-from-scratch.md",
+          "id": "u14-l1",
+          "learning_goals": [
+            "读懂单通道/多通道卷积的 numpy 实现中的循环结构",
+            "理解 0 填充与步幅对输出尺寸的影响",
+            "掌握 nn.Conv2d(F.relu(nn.Conv2d)) 结构写法",
+            "理解卷积如何稀疏连接、参数共享"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "conv1d 滑窗内积",
+            "conv2d 填充/步幅/通道循环",
+            "nn.Conv2d/MaxPool2d/Dropout2d",
+            "感受野与特征图尺寸计算"
+          ],
+          "order": 1,
+          "practice_task": "用 numpy 实现 valid 模式的 2D 卷积并断言与 scipy.signal.correlate2d(X, W, mode='valid') 相等；再对比同一个权重 W 用 nn.Conv2d 前向的结果，解释为什么二者一致或相差一个转置。",
+          "source_files": [
+            "ch14/ch14_part1.py"
+          ],
+          "title": "卷积运算从零实现",
+          "topic": "阅读手写 conv1d/conv2d 理解填充与步幅对输出尺寸的影响，再学习 nn.Conv2d/nn.MaxPool2d/Dropout2d 及构建 CNN 时 output 尺寸的计算方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l1"
+          ],
+          "filename": "u14-l2-cnn-cifar-resnet.md",
+          "id": "u14-l2",
+          "learning_goals": [
+            "掌握 torchvision.datasets + DataLoader 的标准流程",
+            "理解 train/valid 双 DataLoader 的评估循环",
+            "理解残差连接缓解梯度消失的动机",
+            "能解读 Top-1/Top-5 错误率",
+            "理解 batchnorm/dropout 在训练/评估模式的行为差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "torchvision transforms 标准化",
+            "自定义 CNN 模块结构",
+            "train/valid 双阶段循环",
+            "resnet18(pretrained=True) 微调"
+          ],
+          "order": 2,
+          "practice_task": "把书中 CNN 的 epoch 从 10 降到 2 先跑通全流程，记录训练/验证准确率；然后把 num_features（第一个全连接输入维度）按卷积输出尺寸公式手动计算一遍，验证与网络实际输出一致。",
+          "source_files": [
+            "ch14/ch14_part1.py",
+            "ch14/ch14_part2.py"
+          ],
+          "title": "手写 CNN 训练 CIFAR-10 与 ResNet",
+          "topic": "阅读基于 torchvision 的 CIFAR-10 数据加载（标准化 transform、DataLoader）、CNN 结构（卷积块+全连接）、train 函数训练/验证双循环，以及 torchvision.models.resnet18 的预训练用法与指标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "filename": "u14-l3-transfer-learning.md",
+          "id": "u14-l3",
+          "learning_goals": [
+            "掌握 freeze、replace 最后全连接层的两步改造法",
+            "理解 DataLoader(pretrained) 评估微调收益的实验设计",
+            "理解 ResNet18 特征维度 512→类别数的改造",
+            "理解小数据集下迁移学习的价值"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "param.requires_grad=False 冻结",
+            "替换 fc 层",
+            "训练循环复用",
+            "Top-1/Top-5 对比评估"
+          ],
+          "order": 3,
+          "practice_task": "仿照书中的两步改造，把 COVID X-ray 的 ResNet18 改成「冻结所有卷积层，只训练新 fc 层」，再改成「解冻最后一个卷积块微调」，分别记录测试 Top-1 准确率并对比。",
+          "source_files": [
+            "ch14/ch14_part2.py"
+          ],
+          "title": "迁移学习实战：COVID 胸片分类",
+          "topic": "阅读冻结基础层、替换输出层、逐阶段解冻微调的 ResNet18 迁移学习代码，理解为什么小数据集上预训练+微调优于从零训练。"
+        }
+      ],
+      "order": 14,
+      "title": "卷积神经网络（第 14 章）"
+    },
+    {
+      "id": "u15",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u13-l2"
+          ],
+          "filename": "u15-l1-rnn-basics.md",
+          "id": "u15-l1",
+          "learning_goals": [
+            "手算一遍 RNN 隐状态递推，理解 h 的记忆作用",
+            "理解 tanh 隐藏层与全连接输出层的作用",
+            "区分一对一、一对多、多对多等五种序列架构",
+            "理解输入维度 [batch, seq_len, feature] 的约定"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "W_xh/W_hh/b_h 手算",
+            "torch.tanh 非线性",
+            "五种序列架构图示"
+          ],
+          "order": 1,
+          "practice_task": "不使用 nn.RNN，用基本 torch 张量乘法手写两步时间步的 RNN 前向计算（给定 W_xh、W_hh、x1、x2），并把结果与 nn.RNN(batch_first=True) 的输出对齐验证。",
+          "source_files": [
+            "ch15/ch15_part1.py"
+          ],
+          "title": "RNN 原理：从手算示例到序列架构",
+          "topic": "通过 ch15_part1 的数值例子理解 RNN 隐状态递推 h_t = tanh(W_xh·x_t + W_hh·h_(t-1) + b_h)，以及一对一/一对多/多对一/多对多/同步多对多五种架构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "filename": "u15-l2-lstm-sentiment.md",
+          "id": "u15-l2",
+          "learning_goals": [
+            "掌握 collate_batch 中 pad+截断+偏移三件套的实现",
+            "理解 Embedding Bag 对变长序列的处理",
+            "理解 torch.no_grad 下的评估循环写法",
+            "理解 LSTM 与朴素 RNN 的门控差别"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "tokenizer+vocab 构建与 look_up_token",
+            "collate_batch 偏移拼接",
+            "nn.EmbeddingBag 前向",
+            "train/evaluate 二元交叉熵循环"
+          ],
+          "order": 2,
+          "practice_task": "把 LSTM 的 hidden_dim 在 [8, 16, 64] 之间调整（epoch 可减为 2~3），比较 IMDb 验证/测试准确率；再统计 collate_batch 处理一个 batch 后 text_list 与 label_list 的实际长度。",
+          "source_files": [
+            "ch15/ch15_part2.py"
+          ],
+          "title": "LSTM 情感分类：IMDb 数据管线与训练",
+          "topic": "阅读 tokenizer+vocab 构建、TextTensor/collate_batch 的 pad/截断/offset 处理、Embedding+LSTM(nn.EmbeddingBag) 三种模型变体，以及 train/evaluate 的训练评估循环。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l2"
+          ],
+          "filename": "u15-l3-lstm-language-model.md",
+          "id": "u15-l3",
+          "learning_goals": [
+            "掌握 (x, y) 错位一步构造语言模型样本的方法",
+            "理解温度/长度对生成文本质量的影响",
+            "读懂 sample 中「拼接上下文→截断→继续预测」的循环",
+            "理解隐藏状态长序列截断的实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TextDataset chunking + step 参数",
+            "LSTM 训练循环与 checkpoint 保存",
+            "sample 贪心/隐藏状态采样",
+            "上下文窗口与模型结果评估"
+          ],
+          "order": 3,
+          "practice_task": "加载书中的预训练语言模型权重后，用不同 generated_text_len 与 temperature 因子调用 sample()（或隐藏状态版）生成文本，对比生成质量，并解释温度/长度参数如何影响生成的多样性与连贯性。",
+          "source_files": [
+            "ch15/ch15_part3.py"
+          ],
+          "title": "LSTM 语言模型与文本采样生成",
+          "topic": "阅读 TextDataset 的定长分块(step=1 构造样本)、RNN(LSTM) 训练循环与 checkpoint 保存、以及 sample() 从起始文本自回归生成新文本的两种方式（拼接上下文 vs 隐状态传递）。"
+        }
+      ],
+      "order": 15,
+      "title": "循环神经网络（第 15 章）"
+    },
+    {
+      "id": "u16",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u15-l1"
+          ],
+          "filename": "u16-l1-self-attention.md",
+          "id": "u16-l1",
+          "learning_goals": [
+            "理解查询-键-值类比与 attn_weights 的归一化",
+            "理解 dk 缩放对 softmax 梯度稳定的作用",
+            "理解多头注意力在表示子空间上的并行性",
+            "理解因果掩码防止泄露未来信息的原因",
+            "理解位置编码的必要性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "单词嵌入表构建",
+            "attn_scores/weights 与上下文向量计算",
+            "缩放点积注意力参数化",
+            "多头注意力模块拼接"
+          ],
+          "order": 1,
+          "practice_task": "不借助封装：给定 6 个词的嵌入 (d=16)，手写注意力权重计算（含 softmax 归一化），打印 6x6 权重矩阵与归一化验证；再实现 attn_scores 的 dk 缩放版本，比较缩放前后权重的分布差异。",
+          "source_files": [
+            "ch16/ch16-part1-self-attention.py"
+          ],
+          "title": "自注意力与多头注意力从零实现",
+          "topic": "阅读未参数化的注意力权重计算、缩放点积(scaled dot-product)注意力、多头注意力堆叠、以及因果掩码+位置编码等实现细节。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u16-l1"
+          ],
+          "filename": "u16-l2-gpt2-finetune.md",
+          "id": "u16-l2",
+          "learning_goals": [
+            "理解 AutoModelForSequenceClassification 分类头随机初始化的做法",
+            "理解 frozen vs trainable 参数量对比",
+            "理解 AdamW 线性衰减 scheduler 的设计",
+            "能解读训练/验证准确率随 epoch 变化"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "下载预训练权重并改分类头",
+            "param.requires_grad 逐层冻结策略",
+            "compute_accuracy/dataset 采样",
+            "AdamW 线性衰减调度"
+          ],
+          "order": 2,
+          "practice_task": "统计冻结前后的可训练参数量并打印对比；在已下载的数据子集上训练 1 个 epoch，绘制 train/valid 准确率曲线，并观察最后一个 epoch 的验证准确率。",
+          "source_files": [
+            "ch16/ch16-part2-gpt2.py"
+          ],
+          "title": "GPT-2 微调做情感分类",
+          "topic": "阅读加载预训练 GPT-2、冻结基础层、替换分类头、构建 DataLoader、用 AdamW 与线性衰减学习率微调 IMDb 分类任务的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u16-l2"
+          ],
+          "filename": "u16-l3-bert-finetune.md",
+          "id": "u16-l3",
+          "learning_goals": [
+            "理解 AutoTokenizer 指定预训练词表的做法",
+            "掌握 Trainer/TrainingArguments 的训练封装方式",
+            "理解 compute_metrics 中 logits→argmax 的解码过程",
+            "能解读 HuggingFace 下载脚本的使用方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "下载/划分 IMDb 数据",
+            "IMDbDataset 编码",
+            "Trainer/TrainingArguments",
+            "compute_metrics 准确率回调"
+          ],
+          "order": 3,
+          "practice_task": "复现 Trainer 训练流程：把 per_device_train_batch_size 与 num_train_epochs 各调小一档跑通微调，然后对比 compute_metrics 输出的准确率与 compute_accuracy 在测试 DataLoader 上的结果。",
+          "source_files": [
+            "ch16/ch16-part3-bert.py"
+          ],
+          "title": "BERT 微调与 HuggingFace 生态",
+          "topic": "阅读下载/划分数据、DistilBERT 分词器、IMDbDataset(Dataset) 编码、compute_accuracy，以及用 HuggingFace Trainer + TrainingArguments 训练并 compute_metrics 评估的完整流程。"
+        }
+      ],
+      "order": 16,
+      "title": "Transformers 与注意力机制（第 16 章）"
+    },
+    {
+      "id": "u17",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "filename": "u17-l1-first-gan.md",
+          "id": "u17-l1",
+          "learning_goals": [
+            "理解生成器/判别器的对抗训练目标",
+            "理解 BCELoss 与真实/伪造标签交替训练的写法",
+            "理解 mode_z='uniform' vs 'normal' 的输入分布差异",
+            "理解 MMD 评估生成质量的用途"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "生成器/判别器网络",
+            "create_noise 两种输入模式",
+            "d_train/g_train 交替训练",
+            "MMD 距离与分数评估"
+          ],
+          "order": 1,
+          "practice_task": "把判别器隐藏层单元从 256 减到 32（生成器不变），重新训练 100 个 epoch，用书中的 MMD 分数对比弱判别器与原配置下生成样本的质量，并解释对抗训练为什么依赖两者强度的平衡。",
+          "source_files": [
+            "ch17/ch17_part1.py"
+          ],
+          "title": "第一个 GAN：MNIST 生成对抗训练",
+          "topic": "阅读 make_generator_network/make_discriminator_network 的架构设计、create_noise 的均匀/正态两种潜在向量、d_train/g_train 的交替训练循环，以及 MMD/kernel 距离评估生成质量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u17-l1"
+          ],
+          "filename": "u17-l2-dcgan-wgan.md",
+          "id": "u17-l2",
+          "learning_goals": [
+            "理解 ConvTranspose2d 与卷积判别器的镜像结构",
+            "理解 mode_z='upsample' 的空间噪声设计",
+            "理解 gradient_penalty 实现 1-Lipschitz 约束的原理",
+            "能对比 BCE GAN 与 WGAN-GP 的训练稳定性"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "判别器 strides 模型设计",
+            "生成器 ConvTranspose2d 反卷积",
+            "判别器权重截断(-0.01,0.01)",
+            "WGAN-GP 梯度惩罚训练循环"
+          ],
+          "order": 2,
+          "practice_task": "在相同 epoch 数下分别训练 DCGAN 与 WGAN-GP，各生成一批样本并保存对比图；再把 gradient_penalty 的 lambda 系数从默认值改为 1 和 100，观察训练损失曲线的变化并解释梯度惩罚系数的作用。",
+          "source_files": [
+            "ch17/ch17_part2.py"
+          ],
+          "title": "DCGAN 与 WGAN-GP 进阶",
+          "topic": "阅读 DCGAN 的 strided 卷积判别器与 ConvTranspose2d 生成器、以及 WGAN-GP 的 gradient_penalty 实现与 d_train_wgan/g_train_wgan 训练循环的差别。"
+        }
+      ],
+      "order": 17,
+      "title": "生成对抗网络（第 17 章）"
+    },
+    {
+      "id": "u18",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "filename": "u18-l1-gnn-from-scratch.md",
+          "id": "u18-l1",
+          "learning_goals": [
+            "理解图由节点特征矩阵与邻接矩阵共同表示的方式",
+            "读懂邻接矩阵与权重矩阵相乘聚合邻居特征的实现",
+            "理解不规则图的批处理需要自定义 collate_fn 的原因",
+            "掌握自定义 Dataset 的图数据封装"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "networkx 图构建与邻接矩阵",
+            "BasicGraphConvolutionLayer forward",
+            "global_sum_pool",
+            "collate_graphs 与 ExampleDataset"
+          ],
+          "order": 1,
+          "practice_task": "构造两个 3~4 节点的小图（自选节点特征维度），实例化 BasicGraphConvolutionLayer 并打印前向输出形状，再仿照 NodeNetwork 构建一个前向传播（含 ReLU 与全连接），验证 global_sum_pool 之后每张图得到一个固定维向量。",
+          "source_files": [
+            "ch18/ch18_part1.py"
+          ],
+          "title": "图卷积层从零实现",
+          "topic": "阅读 build_graph_color_label_representation 构图、BasicGraphConvolutionLayer 用邻接矩阵乘权重聚合邻居特征、NodeNetwork、global_sum_pool 与 collate_graphs 的图批处理。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u18-l1"
+          ],
+          "filename": "u18-l2-pytorch-geometric.md",
+          "id": "u18-l2",
+          "learning_goals": [
+            "掌握 torch_geometric 的 DataLoader 用法",
+            "理解 GCNConv 聚合邻居特征的过程",
+            "理解 edge_index 稀疏边表示",
+            "理解图级分类的输出与损失计算"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MoleculeNet 加载",
+            "ExampleNet(GCNConv) 结构",
+            "图级 DataLoader 迭代",
+            "训练循环与验证集评估"
+          ],
+          "order": 2,
+          "practice_task": "把 ExampleNet 中两个 GCNConv 的输出维度改成 [32, 16]（并调整全连接输入维度），重新训练若干 epoch，对比原网络在 ToxMoon 分子图分类任务上的验证准确率变化。",
+          "source_files": [
+            "ch18/ch18_part2.py"
+          ],
+          "title": "PyTorch Geometric 图分类实战",
+          "topic": "阅读 ExampleNet(GCNConv) 模型、MoleculeNet 分子图数据集（ToxMoon）、torch_geometric 的 DataLoader 以及训练/验证循环，理解 GCNConv 与手写层的对应关系。"
+        }
+      ],
+      "order": 18,
+      "title": "图神经网络（第 18 章）"
+    },
+    {
+      "id": "u19",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u14-l2"
+          ],
+          "filename": "u19-l1-q-learning-gridworld.md",
+          "id": "u19-l1",
+          "learning_goals": [
+            "理解 gym.DiscreteEnv 的转移表结构",
+            "理解 epsilon-greedy 的探索-利用权衡",
+            "读懂 argmax_a 的最优动作更新规则",
+            "理解折扣因子 gamma 对回报的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GridWorldEnv 构建",
+            "Agent.__call__ epsilon-greedy",
+            "run_qlearning 训练循环",
+            "plot_learning_history 学习曲线"
+          ],
+          "order": 1,
+          "practice_task": "把 run_qlearning 的 num_episodes 与 Agent 的 epsilon、gamma 各改一次（例如 epsilon 从 40% 降到 10%），用 plot_learning_history 对比学习曲线，说明探索率与折扣因子对收敛速度和最终回报的影响。",
+          "source_files": [
+            "ch19/gridworld/gridworld_env.py",
+            "ch19/gridworld/agent.py",
+            "ch19/gridworld/qlearning.py",
+            "ch19/ch19.ipynb"
+          ],
+          "title": "GridWorld 环境与表格型 Q-learning",
+          "topic": "阅读 GridWorldEnv 如何用转移表定义环境动力学、Agent 的 epsilon-greedy 行为策略，以及 run_qlearning 中 Q 表的更新规则与学习曲线绘制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u19-l1"
+          ],
+          "filename": "u19-l2-dqn-cartpole.md",
+          "id": "u19-l2",
+          "learning_goals": [
+            "理解用神经网络近似 Q(s,a) 与「Q-learning 离策略目标」的关系",
+            "理解目标网络 target_model 拷贝周期的作用",
+            "理解 batch 训练（32 个转移）与逐样本更新的差别",
+            "理解按步计算回报的监控方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "两层 MLP 的 Q 网络",
+            "sample 与 fit 批量更新",
+            "target_model 周期同步",
+            "episode 回合与环境交互"
+          ],
+          "order": 2,
+          "practice_task": "把 replay buffer 的 batch_size 从 32 改为 8 和 128，各训练相同轮数并绘制 return_history 曲线，解释批量大小对训练稳定性与样本效率的影响。",
+          "source_files": [
+            "ch19/cartpole/main.py",
+            "ch19/ch19.ipynb"
+          ],
+          "title": "Deep Q-Network：CartPole 平衡实验",
+          "topic": "阅读 DQNAgent 的两层全连接 Q 网络、replay buffer 采样、Adam+MSE 拟合 Q 目标的 fit 方法，以及周期性同步 target model、逐 episode 交互与回报曲线。"
+        }
+      ],
+      "order": 19,
+      "title": "强化学习（第 19 章）"
+    }
+  ],
+  "head": "63bee951ca45420ac33ccf803ceb337afc3c0a91",
+  "project": "machine-learning-book",
+  "rationale": "本仓库是《Machine Learning with PyTorch and Scikit-Learn》一书的官方配套代码，代码按 ch01 到 ch19 组织，从经典机器学习一路延伸到前沿深度学习，因此学习路径按「先建立直觉、再掌握工程实践、最后深入前沿架构」三层设计。单元 1 帮读者从零搭建环境并理解仓库的 notebook/脚本双轨组织；单元 2 到单元 4 是入门层，通过从零实现感知机、Adaline、逻辑回归与 scikit-learn 分类器、数据预处理，让读者在不依赖框架的情况下理解算法本质；单元 5 到单元 10 是进阶层的经典机器学习主线，覆盖降维、模型评估与调参、集成学习、文本特征、回归与聚类，与书中的调用链和数据集一一对应；单元 11 到单元 13 是从 numpy 手写 MLP 到 PyTorch 生态的关键过渡，先实现反向传播，再掌握张量、Dataset/DataLoader、动态图、自定义层与 Lightning/Ignite 高层接口；单元 14 到单元 19 是专家层，按 CNN、RNN、Transformer、GAN、GNN、强化学习的顺序深入六大前沿架构，每篇都锚定仓库中真实存在的手写实现（如 conv2d、self-attention、BasicGraphConvolutionLayer、Q-learning）。讲义依赖关系严格按阅读顺序递进，深层架构均以前向/反向传播与 PyTorch 机制为前置；由于章节之间主题相对独立，部分单元（如回归、聚类、文本）只要求模型评估基础，避免不必要的串行阻塞。"
+}
