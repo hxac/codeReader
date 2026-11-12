@@ -1,4 +1,7 @@
 {
+  "head": "84679e9d3a2582bffc53a5259d13cfc7278c9772",
+  "project": "DeepSpeed",
+  "rationale": "增量更新（b9100c5 -> 84679e9d，版本维持 0.19.10，共 4 个提交）：九单元主线结构与讲义顺序不变。本周期变化集中在两条线：一是 affine 分片迁移栈的演进——#9010 把 affine/affine_transfer/autoep_affine 中各自重复实现两三份的几何原语（product/row_major_strides/coordinate/dot/strided_address/row_major_range_boxes/LogicalBox）收敛为纯函数模块 affine_geometry.py（行为不变的纯搬迁，为后续把 O(n²) 逐对校验换成基于这些原语的扫描铺路）；#8936 新增 planner 侧批量重副本选择：plan_transfers 一次同步规划全部参数，把按固定顺序（参数、目标 location、origin）排列的全部 ReplicaRequest 一次性交给可插拔 replica_policy，答案（一个已验证 holder，或沿 axis 0 精确平铺的 ReplicaPart）经统一校验（一请求一答、仅限已验证 holder、min_split_bytes 下限、PlanBudget.max_pair_checks 预算且超限在展开前按长度拒绝），违例一律抛 InvalidReplicaPolicyError；新模块 affine_replica_policy.py 内置 first_holder/local_first_least_loaded/per_request 三策略，配套 test_affine_replica_policy.py（65 个 CPU 测试）与 affine-transfer.rst 新文档章节——u8-l7（尚未生成，维持 new）把 affine_geometry 纳入源码范围，批量策略协议自成一层（是 #8252 成本感知策略与 #8966 链路标定的落点），拆为新讲义 u8-l9，避免 u8-l7 过载。二是 KLXPU 图捕获解禁（#9042）：删除子类对 is_graph_capture_supported 的显式 default-deny 覆写、恢复继承 CUDA 的 opt-in，这落在两个既有教学点上——u3-l1 的 opt-in 设计（update：增补 accelerator/klxpu_accelerator.py 源文件与「显式拒绝→验证后继承」示例）和 u7-l4 的 rollout 图捕获回退机制（update：补一句后端支持面演进的说明）。#8867 仅把 test_klxpu_accelerator.py 移入 tests/unit/v1/accelerator/，不改变任何讲义所教内容；其余讲义全部 keep：上周期 update 且已生成的 u2-l3/u4-l3/u5-l1/u5-l3/u5-l4/u5-l5 本周期无相关代码变化转为 keep，u9-l1（nvcc C++20 规则）同理转 keep，u6-l7/u8-l8/u9-l5 仍未生成、维持 new。",
   "units": [
     {
       "id": "u1",
@@ -183,7 +186,7 @@
           "topic": "解析 DeepSpeedConfig 如何校验并展开 JSON 配置的 batch size、优化器、调度器、并行度等字段，新增的 deterministic_mode 顶层开关如何在配置构造期被解析，以及 DeepSpeedConfigWriter 的反向生成能力。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -256,7 +259,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u1-l2"
           ],
@@ -266,8 +269,7 @@
             "列举 AbstractAccelerator 定义的 20+ 设备无关接口",
             "解释 real_accelerator.py 的按环境变量/库探测加载机制",
             "以 XPU 后端为例，说明一个 accelerator 如何绕过 torch、用 ctypes 直接驱动 Level Zero ext_memmap 扩展注册 pinned host memory",
-            "解释 is_graph_capture_supported 显式 opt-in 设计：默认 False（只暴露图 API 的后端留在 eager 路径），CUDA 返回 True 且要求先实现 is_current_stream_capturing（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）",
-            "理解 AGENTS 规则『禁止直接 import torch.distributed』背后的设计原因"
+            "解释 is_graph_capture_supported 显式 opt-in 设计：默认 False（只暴露图 API 的后端留在 eager 路径），CUDA 返回 True 且要求先实现 is_current_stream_capturing（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）；KLXPU 这类继承 CUDA 的后端可以在子类显式 default-deny（图捕获未验证），#9042 完成验证后删除覆写即恢复继承 CUDA 的 opt-in——支持与否始终是后端自己的显式决定而非隐式继承"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -278,16 +280,17 @@
             "XPU 的 Level Zero pinned memory 注册"
           ],
           "order": 1,
-          "practice_task": "阅读 abstract_accelerator.py 中的方法签名，挑 5 个关键方法（如 available_memory、communication_backend_name、is_graph_capture_supported）对比 cuda_accelerator.py 与 cpu_accelerator.py 的实现差异并列表总结；再对照 accelerator/xpu_accelerator.py 中新增的 _l0_loader 与 pinned memory 注册路径，总结「torch 通道不可用时后端自力更生」的实现模式。",
+          "practice_task": "阅读 abstract_accelerator.py 中的方法签名，挑 5 个关键方法（如 available_memory、communication_backend_name、is_graph_capture_supported）对比 cuda_accelerator.py 与 cpu_accelerator.py 的实现差异并列表总结；再对照 accelerator/xpu_accelerator.py 中新增的 _l0_loader 与 pinned memory 注册路径，总结「torch 通道不可用时后端自力更生」的实现模式；最后阅读 accelerator/klxpu_accelerator.py，结合 #9042 删除的显式 default-deny 覆写，说明一个后端如何从「拒绝图捕获」演进到「继承 CUDA 的 opt-in」。",
           "source_files": [
             "deepspeed/accelerator/abstract_accelerator.py",
             "deepspeed/accelerator/real_accelerator.py",
             "deepspeed/accelerator/cuda_accelerator.py",
             "deepspeed/accelerator/cpu_accelerator.py",
-            "accelerator/xpu_accelerator.py"
+            "accelerator/xpu_accelerator.py",
+            "accelerator/klxpu_accelerator.py"
           ],
           "title": "加速器抽象层：一套代码支持多种硬件",
-          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端；以 XPU 通过 Level Zero ZE_extension_external_memmap_sysmem 注册页锁定主机内存、以及图捕获能力改为按后端显式 opt-in（is_graph_capture_supported）为例展示后端深度适配。"
+          "topic": "解读 AbstractAccelerator 接口与 real_accelerator 的运行时探测加载，DeepSpeed 如何用这层抽象同时支持 CUDA、CPU、HPU、XPU、NPU 等十余种后端；以 XPU 通过 Level Zero ZE_extension_external_memmap_sysmem 注册页锁定主机内存、以及图捕获能力按后端显式 opt-in（is_graph_capture_supported，KLXPU 从显式拒绝到验证后继承 CUDA opt-in，#9042）为例展示后端深度适配。"
         },
         {
           "action": "keep",
@@ -443,7 +446,7 @@
           "topic": "对比 unfused_optimizer 与 fused_optimizer：如何维护 fp32 主权重、如何调用 FusedAdam 与 CPU 端变体、zero_grad/step 的包装逻辑，以及 initialize_optimizer_states 中 Adagrad 构造期初始化的设备修复。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -511,7 +514,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l2"
           ],
@@ -569,7 +572,7 @@
           "topic": "精读 partition_parameters.py：模型构建期如何在线实例化即切分参数、padding/对齐策略、NoGather 优化以及 external parameter 注册。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -609,7 +612,7 @@
           "topic": "精读 stage_1_and_2.py 的 DeepSpeedZeroOptimizer：独立并行梯度（IPG）bucket、overlap 通信、梯度 reduce-scatter 与扁平化缓冲区管理，Adagrad 用 param_groups 重建、折叠专家的梯度范数归约，以及本周期 CPU 卸载梯度累积的重构——按分区组的主机累计器、紧凑分区在请求边界发布到 host 并按 dtype 可恢复性决定是否释放 GPU 分区、溢出按 host dtype 检查、空闲参数梯度清零（#9018/#9044/#8991）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l3",
             "u3-l1"
@@ -644,7 +647,7 @@
           "topic": "解读 ZeRO-Offload 的实现：优化器状态与 fp32 梯度卸载到 CPU pinned memory、cpu_adam 内核的调用方式、单一/双重 offload 的区别、DeepSpeedCPUOptimizer 公共基类的精度修复，以及本周期按分区组的 pinned 主机累计器与空闲梯度清零（#9018/#8991）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l2"
           ],
@@ -1121,7 +1124,7 @@
           "learning_goals": [
             "描述训练权重与推理 kernel 之间的双向转换流程",
             "解释 continuous batching 的调度循环",
-            "理解图捕获的加速器显式 opt-in：validate_graph_capture_support 与 rollout 两条生成路径都改查 is_graph_capture_supported()，未 opt-in 的后端 warning_once 后回退 eager 而非报错",
+            "理解图捕获的加速器显式 opt-in：validate_graph_capture_support 与 rollout 两条生成路径都改查 is_graph_capture_supported()，未 opt-in 的后端 warning_once 后回退 eager 而非报错（后端支持面是演进的：KLXPU 在 #9042 完成验证后删除子类的 default-deny 覆写、随 CUDA 一起进入图捕获路径）",
             "解读静态图 decode 前向传预构建 4-D 加性掩码（static_causal_attn）的原因：Transformers 从 2-D mask 构建 SDPA 掩码时的 host 端检查会同步 stream、破坏 CUDA graph 捕获；DeepSpeedStaticCache 新增 get_query_offset 以支持 Transformers 5.20 的 cache query offsets",
             "解读非贪婪采样快路径：_token_selector(sampling) 统一 graph decode、continuous batching 与 continuous batching+graph 三条路径的 token 选择——temperature<=0 走 argmax，否则按 generate() 的顺序在 float32 logits 上应用 Temperature/TopK/TopP warper 后 torch.multinomial；采样发生在 host 端、图之外，因此图捕获不再要求 greedy；continuous batching 移除 temperature>0 的拒绝，repetition penalty 调整到 warper 之前（generate() 的顺序），_hf_sampling_kwargs 统一主 generate() 调用与无 cache-class prefill 的采样参数",
             "解读本周期 ZeRO-3 rollout 的 EOS 早停同步（#8390）：GlobalWorkRemaining 在 optimizer.dp_process_group（参数 gather 实际使用的组）上 all_reduce(MAX) 汇聚局部工作标志，_GlobalEosStoppingCriteria 让全组一致停在最晚出现的 rank 本地 EOS、每个序列保留首个 EOS 之后的 pad；ZeRO-3 路径显式传 synced_gpus=False（Transformers 依默认 world size 开启它会对未分组的世界做 all-reduce，把进入 rollout 的 DP 子组与未进入的 rank 相互卡死）；CUDA/HIP 图捕获 rollout 绕过 generate() 不受此改影响",
@@ -1150,7 +1153,7 @@
             "docs/code-docs/source/inference-engine.rst"
           ],
           "title": "Hybrid Engine：训练与推理一体化",
-          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；图捕获按加速器显式 opt-in、静态图 decode 用预构建 4-D 加性掩码、非贪婪采样经 _token_selector 统一进入快路径，以及本周期 ZeRO-3 rollout 的 EOS 早停按参数 gather 组同步（关闭 synced_gpus 的世界级 all-reduce，#8390）与 AutoTP 下 KV cache 从本 rank prefill 张量惰性定尺寸（#9008）。"
+          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；图捕获按加速器显式 opt-in（KLXPU 已于 #9042 验证并继承 CUDA 的 opt-in）、静态图 decode 用预构建 4-D 加性掩码、非贪婪采样经 _token_selector 统一进入快路径，以及本周期 ZeRO-3 rollout 的 EOS 早停按参数 gather 组同步（关闭 synced_gpus 的世界级 all-reduce，#8390）与 AutoTP 下 KV cache 从本 rank prefill 张量惰性定尺寸（#9008）。"
         }
       ],
       "level": "advanced",
@@ -1354,6 +1357,7 @@
           "id": "u8-l7",
           "learning_goals": [
             "解释 affine.py 如何用仿射映射（affine map）统一描述 ZeRO/AutoTP/AutoEP 产生的参数分片布局",
+            "解读本周期新增的 affine_geometry.py（#9010）：product/row_major_strides/coordinate/dot/strided_address/row_major_range_boxes 与 LogicalBox 此前在 affine/affine_transfer/autoep_affine 各自重复实现两三份，现收敛为一个对 piece/rank/tensor 一无所知的纯几何模块，各处以旧私有名导入、行为不变，为后续把 O(n²) 逐对校验换成基于这些原语的扫描铺路",
             "追踪 plan_transfer 如何为「从一种切分搬到另一种切分」生成按轮次组织的搬运计划",
             "解读 affine_transfer_executor：先对计划摘要（plan_digest）达成共识，再按「先挂接收后发发送」的轮次协议执行，用 StagingBudget 约定每 peer 的在途字节上限",
             "理解 TransferEndpoints 为何把源 rank 与目标 rank 分成两个独立映射（两个 rank 命名空间不是同一个 world_size）",
@@ -1362,15 +1366,17 @@
           "level": "advanced",
           "minimal_modules": [
             "affine 分片描述",
+            "affine_geometry 共享几何原语",
             "TransferPlan 计划生成",
             "execute_transfer 轮次执行与 staging 预算",
             "计划摘要共识与错误拒止",
             "rebuild/extract 的覆盖与重叠校验"
           ],
           "order": 7,
-          "practice_task": "参考 tests/unit/checkpoint/test_affine_transfer_executor.py 与 tests/unit/checkpoint/test_affine_shard_map.py 的写法，用 plan_transfer + execute_transfer 在两个进程组之间完成一次小型参数重分片，验证目标分片内容与「先 gather 完整张量再 re-scatter」的朴素做法逐元素一致，再调小 StagingBudget(bytes_per_peer) 观察轮次数变化；最后故意构造一个自重叠或漏覆盖的分片映射，验证 rebuild 会抛出 ValueError。",
+          "practice_task": "参考 tests/unit/checkpoint/test_affine_transfer_executor.py 与 tests/unit/checkpoint/test_affine_shard_map.py 的写法，用 plan_transfer + execute_transfer 在两个进程组之间完成一次小型参数重分片，验证目标分片内容与「先 gather 完整张量再 re-scatter」的朴素做法逐元素一致，再调小 StagingBudget(bytes_per_peer) 观察轮次数变化；阅读 affine_geometry.py 中 row_major_range_boxes 的分箱逻辑，用几个 (shape, low, high) 手算 boxes 并与函数输出对照；最后故意构造一个自重叠或漏覆盖的分片映射，验证 rebuild 会抛出 ValueError。",
           "source_files": [
             "deepspeed/checkpoint/affine.py",
+            "deepspeed/checkpoint/affine_geometry.py",
             "deepspeed/checkpoint/affine_transfer.py",
             "deepspeed/checkpoint/affine_transfer_executor.py",
             "tests/unit/checkpoint/test_affine_shard_map.py",
@@ -1378,11 +1384,12 @@
             "docs/code-docs/source/affine-transfer.rst"
           ],
           "title": "Affine 分片迁移：跨切分方式的参数直搬",
-          "topic": "affine.py/affine_transfer.py/affine_transfer_executor.py 三件套：用仿射映射描述任意并行方式产生的分片、规划两种分片间的搬运、并以有界 peer staging 直接在分片缓冲区间执行计划而不重建完整逻辑张量；affine 映射转换带「每个元素恰好写一次」的完整校验（自重叠视图、分片内地址复用、全量覆盖与副本一致性），这是 Universal Checkpoint 之外另一条跨并行度迁移参数的底层通道。"
+          "topic": "affine.py/affine_geometry.py/affine_transfer.py/affine_transfer_executor.py 四件套：用仿射映射描述任意并行方式产生的分片（几何原语已收敛为纯函数模块 affine_geometry，#9010）、规划两种分片间的搬运、并以有界 peer staging 直接在分片缓冲区间执行计划而不重建完整逻辑张量；affine 映射转换带「每个元素恰好写一次」的完整校验（自重叠视图、分片内地址复用、全量覆盖与副本一致性），这是 Universal Checkpoint 之外另一条跨并行度迁移参数的底层通道（一次同步的批量规划与重副本策略见下一讲）。"
         },
         {
           "action": "new",
           "depends_on": [
+            "u8-l3",
             "u2-l2",
             "u2-l3"
           ],
@@ -1414,6 +1421,39 @@
           ],
           "title": "确定性执行：deterministic_mode 从配置到内核",
           "topic": "opt-in 确定性执行策略：determinism.py 负责解析与应用（引擎构造早期），配套 triton group_gemm/swiglu 内核增加 IEEE 精度路径、transformer 内核拒绝 stochastic_mode 组合，并辅以专门教程与测试，讲清它能保证什么、不能保证什么。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l7"
+          ],
+          "filename": "u8-l9-batch-replica-policy.md",
+          "id": "u8-l9",
+          "learning_goals": [
+            "解释 plan_transfers 与 plan_transfer 的分工：单参数规划 vs 一次同步全参数批量规划，二者共享 _prepare/_emit 的校验与发射步骤、plan_transfer 行为完全不变",
+            "解读 ReplicaRequest/ReplicaPart/ReplicaAnswer 协议：请求按固定顺序（参数、目标 location、origin）排列，携带参数名、目标 location、逻辑区域、目标 offset/strides 与全部已验证 holder；source_processes/target_processes 把 plan location 映射到进程（区分本地拷贝与跨进程传输），element_size 填充 bytes；单 holder 区域也入列，让策略看到不可搬动的负载",
+            "说明答案校验与 InvalidReplicaPolicyError：一请求一答、只能选已验证 holder、ReplicaPart 必须沿 axis 0 精确平铺整个区域（gap/重叠/越界/非迭代坐标均拒绝）、min_split_bytes 给切分设下限、每参数 parts 总数受 PlanBudget.max_pair_checks 约束（超限在展开 parts 前按答案长度先拒绝）",
+            "对比三个内置策略：first_holder（plan_transfer 的默认，取最小 holder location）、local_first_least_loaded（plan_transfers 的默认：目标本进程持有则本地读，否则选本批次已分配字节最少的发送进程，单 holder 负载计入、本地拷贝不计、ties 取最小 location、从不切分）、per_request(selector)（把逐请求 replica_selector 包装成批量策略，单 holder 请求不经选择器）",
+            "理解「任意一致的计划都是精确的」：策略只决定数据从哪里读、不决定送达什么，副本一致时任何被接受的答案送达的数据相同；以及所有 rank 必须返回相同答案（每个 rank 各自发射同一调度的一半，executor 的 schedule digest 会拒绝不一致），成本输入必须来自全员共享的数据（如 #8966 的链路标定 fit_links）而非 rank 本地测量——这是 #8252 成本感知策略的接入点"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "plan_transfers 批量编排与 _prepare/_emit 复用",
+            "ReplicaRequest/ReplicaPart 请求-答案协议",
+            "affine_replica_policy 三策略",
+            "答案校验、min_split_bytes 与 pair budget",
+            "跨 rank 一致性与共享成本输入"
+          ],
+          "order": 9,
+          "practice_task": "参考 tests/unit/checkpoint/test_affine_replica_policy.py：先用 first_holder 与 per_request(默认选择器) 验证其计划与 plan_transfer 逐 segment 一致；再写一个随机策略（含沿 axis 0 的随机切分与随机 holder 选择）跑多个随机种子，验证每个计划对目标逐元素恰写一次且与 extract 的结果一致（「任意一致的计划都是精确的」）；接着实现一个自定义负载均衡策略，配合 source_processes/target_processes 验证「本进程拷贝优先」与跨进程负载均衡行为；最后故意返回非候选 holder、沿 axis 1 切分、gap/重叠的 parts、小于 min_split_bytes 的 part 与超出 max_pair_checks 的 part 数，确认 InvalidReplicaPolicyError 的各类报错与拒绝时机。",
+          "source_files": [
+            "deepspeed/checkpoint/affine_transfer.py",
+            "deepspeed/checkpoint/affine_replica_policy.py",
+            "tests/unit/checkpoint/test_affine_replica_policy.py",
+            "docs/code-docs/source/affine-transfer.rst"
+          ],
+          "title": "批量重副本策略：plan_transfers 与可插拔 replica policy",
+          "topic": "解读 #8936 引入的批量规划层：plan_transfers 把一次同步的全部参数的 ReplicaRequest 按固定顺序一次性交给可插拔 replica_policy（新模块 affine_replica_policy.py 提供 first_holder/local_first_least_loaded/per_request 三策略），答案协议（合法 holder 或沿 axis 0 切分的 ReplicaPart）带发射前的完整校验（InvalidReplicaPolicyError、min_split_bytes、PlanBudget.max_pair_checks）；策略只决定从哪读、不决定送达什么，且所有 rank 必须给出相同答案——这一层是 #8252 成本感知策略与 #8966 链路标定的落点。"
         }
       ],
       "level": "advanced",
@@ -1424,7 +1464,7 @@
       "id": "u9",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -1532,7 +1572,7 @@
             "用 pytest 参数化组合跑一个最小测试子集",
             "描述 DeepSpeed 的 pre-commit、yapf/flake8 与 DCO 门槛",
             "定位新功能/新算子应配套的测试类型（单测/集成/多硬件）",
-            "了解 PR CI 运行 v1 多 rank CPU 套件（cpu-torch-latest-v1-multirank.yml，含空选择与全被过滤的绿色跳过处理），legacy NV 系列 workflow 已裁撤"
+            "了解 PR CI 运行 v1 多 rank CPU 套件（cpu-torch-latest-v1-multirank.yml，含空选择与全被过滤的绿色跳过处理），legacy NV 系列 workflow 已裁撤，accelerator 相关测试正迁入 tests/unit/v1/accelerator/（test_klxpu_accelerator.py 于 #8867 迁入）"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1541,7 +1581,7 @@
             "贡献流程与 CI"
           ],
           "order": 4,
-          "practice_task": "挑选 tests/unit 中的一个测试文件（如 tests/unit/runtime/test_runtime_utils.py、tests/unit/v1/zero/test_zero.py、tests/unit/utils/test_static_cache.py 或 tests/unit/v1/zero/test_zero3_nvme_param_prefetch.py），在本地用不同参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
+          "practice_task": "挑选 tests/unit 中的一个测试文件（如 tests/unit/runtime/test_runtime_utils.py、tests/unit/v1/zero/test_zero.py、tests/unit/utils/test_static_cache.py、tests/unit/v1/accelerator/test_klxpu_accelerator.py 或 tests/unit/v1/zero/test_zero3_nvme_param_prefetch.py），在本地用不同参数组合跑通，然后仿照它为某个配置项写一个新测试并让 pytest 通过。",
           "source_files": [
             "tests/unit/simple_model.py",
             "tests/unit/common.py",
@@ -1551,7 +1591,7 @@
             "AGENTS.md"
           ],
           "title": "测试体系与贡献流程",
-          "topic": "了解 tests/unit 的组织方式（simple_model 基建、参数化 fixture、多后端标记、v1 多 rank CPU 套件进入 PR CI）与 AGENTS.md/CONTRIBUTING.md 定义的贡献纪律，为二次开发落地做准备。"
+          "topic": "了解 tests/unit 的组织方式（simple_model 基建、参数化 fixture、多后端标记、v1 多 rank CPU 套件进入 PR CI、accelerator 测试向 v1 目录迁移）与 AGENTS.md/CONTRIBUTING.md 定义的贡献纪律，为二次开发落地做准备。"
         },
         {
           "action": "new",
@@ -1594,8 +1634,5 @@
       "order": 9,
       "title": "内核工程、前沿方向与二次开发"
     }
-  ],
-  "head": "b9100c541ac1b8e25148bc8000d1ad45c4c095db",
-  "project": "DeepSpeed",
-  "rationale": "增量更新（02f7978 -> b9100c5，版本维持 0.19.10，共 12 个提交）：九单元主线结构不变，仍按「入门 -> 核心用法 -> 运行时基础设施 -> 混合精度 -> ZeRO 核心 -> 多维并行 -> 推理引擎 -> 高级机制 -> 内核工程」推进。本周期代码变化集中在五条线：一是 ZeRO-1/2 CPU 卸载梯度累积的两连修（#9018、#9044）：主机累计器从按参数惰性 dict 改为按分区组的 bit16 pinned 缓冲（首个非边界累积才分配、destroy 统一 unpin）、reset_cpu_buffers 清零 FP32 分区梯度修复空闲参数复用旧梯度的泄漏（#8991）、紧凑分区在每个请求边界发布到 host 梯度并按「host dtype 能否逐位恢复」决定是否在请求间释放 GPU 分区、溢出检查改为对 cast 到 host dtype 的值、新增 zero_optimization.retain_gpu_grad_partition_until_step 配置——u5-l3、u5-l4 update，u5-l1 因新 JSON 字段 update。二是引擎与优化器销毁链的内存泄漏修复（#9034，修 #7204）：destroy() 摘除 forward hooks、__del__ 以 _destroyed 防二次拆除新引擎、FWD_MODULE_STACK 弹栈、__params_to_release 的 lru_cache 改为每实例、p._z3_optimizer/lp._zero_optimizer/lp._hp_grad 反向引用清理——u2-l3 update（升格为构造+销毁生命周期主线）、u5-l5 update、u4-l3 小幅 update。三是 Hybrid Engine rollout 两项：ZeRO-3 EOS 早停在 optimizer.dp_process_group 上同步并显式关闭 synced_gpus（#8390，避免 ungrouped 世界级 all-reduce 卡死未进 rollout 的 rank）；AutoTP 下 KV cache 改为本 rank prefill 张量惰性定尺寸（#9008，lazy_initialization 可选 max_batch_size=slot 数、memory_bytes()、continuous graph 捕获前先在当前 stream 跑一次 decode）——u7-l4 update。四是 ZeRO-3 HybridMegatron QKV 布局持久化（#8392）：修改收集态参数必须给 GatheredParameters 传 modifier_rank，train/inference 双向变换先广播再重分区——并入 u5-l5 update。五是新增机制讲义与构建修复：VocabTP 广义 JSD（#8958）作为新增重要功能催生新讲义 u6-l7（词表并行 logprobs/entropy/KL/JSD 族 + Triton 两遍内核，此前该族完全未被覆盖）；nvcc_args 的 C++20 规则补齐（#9041，torch 2.12+ 从 CUDA 12.0 起、ROCm 分支同步）u9-l1 update。其余提交（#9036 注释与死代码清理、#9043 NPU 专有 builder 的 LAMB no_grad 与 int4/int8 反量化修复、#9053 modal-torch-latest CI 的 exit-5 空选择处理、#9050 COMMITTERS 措辞）不改变任何讲义所教内容，全部 keep；u8-l7、u8-l8、u9-l5 上周期新增讲义尚未生成，维持 new。"
+  ]
 }

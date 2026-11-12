@@ -4,370 +4,464 @@
 
 学完本讲，你应该能够：
 
-1. 根据自己环境里 torch 的 **minor 版本**和 torch 所链接的 **CUDA 大版本**，从 36 个发布 wheel 中选出唯一正确的那一个（或判断「没有对应的 wheel，需要源码构建」）。
-2. 用 `FAST_ULYSSES_CUDA_ARCH=<架构>` 加 `pip install -e . --no-build-isolation` 完成一次快速源码构建，并能解释 `--no-build-isolation` 为什么不是可选项。
-3. 用 `torchrun --nproc_per_node=<N>` 跑通 README 的 quickstart 脚本和 `examples/dit_attention.py`，读懂它们各自打印的自检输出；没有多卡时知道 `--nproc_per_node=1` 下哪些行为仍然成立。
-4. 运行 `fast-ulysses doctor` 并逐段解读它的输出（构建信息、设备列表、NVLink 矩阵），知道它证明什么、不证明什么。
+1. 看一眼当前环境（torch 版本、CUDA 版本、Python 版本、GPU 架构），就知道该装哪个 wheel——或者为什么必须源码构建。
+2. 用 `FAST_ULYSSES_CUDA_ARCH=<本机架构> pip install -e . --no-build-isolation` 完成一次快速源码构建，并能解释 `--no-build-isolation` 为什么是必需的而不是习惯。
+3. 用 `torchrun` 跑通 README 的 quickstart 脚本和 `examples/dit_attention.py`，包括只有一张卡（或零张卡）时如何降级运行、哪些行为在 `world_size=1` 时仍然成立。
+4. 读懂 `fast-ulysses doctor` 的三段输出（构建信息、设备列表、NVLink 矩阵），并据此判断这台机器能不能跑这个算子。
+
+本讲是纯「工程上手」讲：不改任何算法代码，只解决「让它在你机器上跑起来」这件事。
 
 ## 2. 前置知识
 
-- **wheel 与 ABI**：Python 的 wheel 就是打包好的安装文件（`.whl`）。纯 Python 代码的 wheel 到处能跑；但包含 C++/CUDA 编译产物（`.so`）的 wheel 只能在「编译时所依赖的二进制接口（ABI）」匹配的环境里运行。fast-ulysses 的 `.so` 深度嵌入 torch 的 C++ 内部（后面 4.1 会展开），所以 torch 换一个 minor 版本它就失效——这是本讲一切安装规则的根源。
-- **PEP 440 与本地版本（local version）**：Python 包版本规范允许 `1.0+label` 这种「本地版本」写法。pip 在比较版本时会把 `+` 后面的标签纳入排序，而**不带标签的版本说明符（如 `==0.2.0`）会忽略标签**，于是 `0.2.0` 能匹配 `0.2.0+任何标签` 的所有文件并选最高的——这是本项目安装文档反复警告的「静默选错 wheel」陷阱。
-- **torchrun 与 SPMD**：`torchrun` 是 PyTorch 自带的启动器，帮你以相同脚本拉起 N 个进程（rank 0..N-1），并注入 `RANK`、`WORLD_SIZE`、`LOCAL_RANK` 等环境变量。所有 rank 执行同一份代码（SPMD，单程序多数据），集合通信要求每个 rank 发出相同的调用序列——u1-l2 已经建立了这个契约。
-- **CUDA 计算能力（arch / sm_XX）**：NVIDIA GPU 按架构命名，如 A100 是 sm_80、H100 是 sm_90、B200 是 sm_100、RTX 50 系是 sm_120。CUDA 扩展编译时必须指定要生成哪些架构的机器码；给不支持的架构装上 `.so`，会在第一次启动 kernel 时报 `no kernel image is available`。
-- **build isolation**：pip 默认在一个隔离的临时环境里执行构建，只安装 `pyproject.toml` 的 `[build-system]` 声明的构建依赖。这对纯 Python 包很干净，但对「必须用用户环境里那份 torch 来编译」的扩展是致命的——本讲 4.2 会看到项目如何处理这一点。
+- **wheel 与 ABI**：Python 的 wheel 是预编译的二进制包。包含 C++/CUDA 扩展的 wheel 不是「一个 Linux 包到处能跑」——它编译时链接的头文件、符号和数据结构布局，必须与运行时的环境一致。这种一致性约束统称 ABI（Application Binary Interface）。
+- **torch 的版本坐标**：一个 torch 安装由两个数字定位——`torch.__version__`（如 `2.11.0`）和 `torch.version.cuda`（如 `12.8`）。前者的 **minor**（`2.11` 中的 `11`）决定 C++ ABI，后者的 **major**（`12`）决定链接哪份 `libcudart`。fast-ulysses 的 wheel 就是按「torch minor × CUDA major」这两个轴发布的。
+- **GPU 架构（compute capability）**：NVIDIA GPU 按架构编号，如 H100 是 `sm_90`、A100 是 `sm_80`、B200 是 `sm_100`。CUDA 扩展编译时要显式列出为哪些架构生成代码；列得越多编译越慢。用 `torch.cuda.get_device_properties(0)` 可以读出本机卡的 `major`/`minor`。
+- **torchrun**：PyTorch 自带的分布式启动器。`torchrun --nproc_per_node=N script.py` 会启动 N 个进程，每个进程拿到不同的 `RANK` / `LOCAL_RANK` 环境变量，你需要在脚本里 `torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))` 把每个进程绑到自己的卡。
+- **PEP 440 local version**：Python 包版本可以带「本地标签」，写成 `0.2.0+torch210cu128` 这种 `版本+标签` 的形式。pip 在比较版本时会**给这些标签排序**——这正是本讲会反复踩到的一个坑的根源（见 4.1.3）。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [README.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md) | 安装一节的速览（[L123-L152](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L123-L152)）：匹配规则、四条安装命令、PEP 440 陷阱提示；quick start 脚本（[L48-L74](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L48-L74)） |
-| [docs/install.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md) | 安装的完整论证：36 行 wheel 的匹配表、三种安装途径、版本必须写全的原因、构建变量表、导入失败与建组失败的排查 |
-| [setup.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py) | 源码构建的全部逻辑：torch 必须可导入的强制检查、CMake 调用、`FAST_ULYSSES_CUDA_ARCH` 的传递、构建元数据 `_build_meta.py` 的生成 |
-| [pyproject.toml](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml) | 构建系统声明（注意：**没有** torch）、`fast-ulysses` 命令行入口、pytest 的 `multigpu` 标记 |
+| [README.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md) | 项目门面：Quick start 脚本、Install 一节的四条命令、Testing 命令 |
+| [docs/install.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md) | 安装的权威文档：wheel 行表、索引选择、PEP 440 陷阱、构建变量表、导入失败排查 |
+| [setup.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py) | 源码构建入口：调用 CMake、生成 `_build_meta.py`、按内存限制并行度 |
+| [pyproject.toml](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml) | 包元数据：`fast-ulysses` 命令行入口、包目录布局、pytest 配置 |
 | [python/fast_ulysses/cli.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py) | `doctor` 与 `wheel-url` 两个子命令的实现 |
-| [python/fast_ulysses/__init__.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/__init__.py) | 包导入顺序：先 torch 后 `_C`，失败时转交 `_diagnose.explain` 生成诊断报告 |
-| [examples/dit_attention.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py) | 第一次运行的完整示例：序列并行注意力块，前向 + 反向 + 与单卡参照对拍 + 5 个优化器步 |
-| [CMakeLists.txt](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/CMakeLists.txt) | 构建的 C++ 侧：架构列表的快照时序、Blackwell 需要 CUDA 12.8 的守卫（辅助阅读） |
+| [python/fast_ulysses/__init__.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/__init__.py) | 包导入：先加载 torch 再 dlopen `_C`，失败时转成诊断报告 |
+| [examples/dit_attention.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py) | 第一个「真实」示例：序列并行注意力块，前向 + 反向 + 自校验 |
+| [src/barrier.cu](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu) | 标志位屏障实现；本讲只看它 `world_size == 1` 时直接返回这一个事实 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 wheel 选择：torch minor × CUDA major 的匹配规则
+### 4.1 wheel 选择：按「torch minor × CUDA major」对号入座
 
 #### 4.1.1 概念说明
 
-fast-ulysses 不是纯 Python 包：它编译出一个 `_C.so`，里面注册了 torch 算子（`TORCH_LIBRARY`）、一个 pybind11 模块，还嵌入了 `c10d::Work` 的 vtable。这些东西都依赖 torch 的 **C++ ABI**——torch 每升一个 minor 版本，这些内部符号就可能变化，`.so` 就加载不起来。同时它只从 CUDA 工具链链接 `libcudart.so.<大版本>`，所以 CUDA 大版本也必须一致。
+fast-ulysses 的核心是一个名为 `_C` 的 C++/CUDA 扩展（`.so` 文件）。这个扩展里嵌入了 torch 内部的 C++ 成分——`c10d::Work` 虚表、pybind11 模块、`TORCH_LIBRARY` 算子注册。torch 每升一个 minor（2.10 → 2.11），这些内部结构就可能变化，扩展立刻无法加载。CUDA major（12 → 13）则决定扩展链接的是 `libcudart.so.12` 还是 `libcudart.so.13`。所以 wheel 必须精确匹配 **torch 的 minor** 和 **CUDA 的 major**，这两条合起来就是发布矩阵的「行」。
 
-结论：**一次发布 = 8 个 (torch minor, CUDA major) 组合 × 4 个 CPython 版本 = 36 个 wheel**，外加 PyPI 上 4 个不带标签的。你要做的就是确定自己属于哪一行。
+一个发布是 36 个 wheel：8 个（torch minor × CUDA major）行 × 4 个 CPython 版本，再加 4 个去掉本地标签、发到 PyPI 的 wheel。
 
 #### 4.1.2 核心流程
 
-确定自己所在行的流程：
+确定自己该装哪个 wheel 的流程：
 
-1. 先装好你想用的 torch（顺序不能反，见下面的「解析」机制）。
-2. 打印三个事实：torch 版本、torch 的 CUDA 版本、Python 版本：
-
-   ```bash
-   python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"
-   ```
-
-3. 用 torch 的 **minor**（如 2.11.3 → 2.11）× torch 的 CUDA **大版本**（如 13.2 → 13）查表定行。
-4. 选择安装途径，按优先级：
-   - **按 CUDA 大版本选索引**（推荐）：`--index-url .../whl/cu13/` 或 `.../whl/cu12/`；
-   - **按整行选索引**：`--index-url .../whl/torch211cu128/`（一行四轮，旁边还要装别的 PyPI 包时用这个）；
-   - **PyPI**：只有 `torch213cu130` 一行去了那里；
-   - **`fast-ulysses wheel-url`**：打印当前环境对应的完整安装命令。
-
-**为什么索引机制能防止选错**：`whl/cu13` 索引里只有 fast-ulysses 一个项目、没有 torch，pip 无法靠装一个新 torch 来满足依赖，只能从候选里回溯，直到某个 wheel 的 `Requires-Dist: torch==2.11.*` 被你已装的 torch 满足——行就这么被「解析」出来，而不是被你手工挑出来。这也解释了两条纪律：
-
-- **先装 torch**。没有 torch 时任何候选都不满足，pip 以 `ResolutionImpossible` 结束并列出它试过的每一行——这是设计好的失败，修复就是先 `pip install torch`。
-- **不要加 `--extra-index-url https://pypi.org/simple`**。那等于给了 pip 一个可装的 torch，第一个候选（最高标签 `torch213cu130`）就能解析成功——代价是把你的 torch 换成 2.13。
-
-**PEP 440 陷阱（必须理解）**：同一版本号下，本地标签有全序：
-
-```
-0.2.0 < +torch210cu128 < +torch210cu130 < +torch211cu128 < +torch211cu130
-      < +torch212cu129 < +torch212cu130 < +torch213cu129 < +torch213cu130
-```
-
-于是在任何同时暴露多行的文件集（`--find-links`、`--extra-index-url`、本地 wheelhouse 目录）上，不带标签的 `pip install fast-ulysses` 乃至 `==0.2.0` 都会**静默**选中 `+torch213cu130`。所以用 `--find-links` 时必须把标签写全：`"fast-ulysses==0.2.0+torch210cu128"`。
+1. 查询环境三元组：torch 版本、torch 的 CUDA 版本、Python 版本。
+2. 在行表里找到（torch minor, CUDA major）对应的标签，如 `torch211cu128`。
+3. 按下面的优先级选安装方式：
+   - 想让 pip 自动解析 → 用 `whl/cu12` 或 `whl/cu13` 总索引；
+   - 同一条命令里还要从 PyPI 装别的东西 → 用 `whl/<tag>` 单行索引；
+   - 想要文件本身 → `fast-ulysses wheel-url` 打印的 `--find-links` 命令（版本必须写全）；
+   - 你的 torch 不在表里 → 源码构建（4.2）。
 
 #### 4.1.3 源码精读
 
-匹配规则的「为什么」在安装文档开篇，[docs/install.md:L15-L24](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L15-L24) 说明 36 个 wheel 的构成，并给出确定自己所在行的那条命令——这段同时点出了 `.so` 嵌入的三样东西（`c10d::Work` vtable、pybind11 模块、`TORCH_LIBRARY` 注册）「都活不过一次 minor 升级」，这就是 ABI 钉死的全部理由。
+**第一步：查环境。** 文档给出的这条命令一次打全三个坐标：
 
-[docs/install.md:L26-L38](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L26-L38) 是行表：torch minor（2.10–2.13）× torch 的 CUDA（12.x / 13.x）→ 标签。注意 12.x 那列的 CUDA 小版本随 torch 走（2.10/2.11 是 cu128，2.12/2.13 是 cu129），但**匹配只看大版本**。
+```bash
+python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"
+```
 
-[docs/install.md:L40-L69](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L40-L69) 解释索引安装与回溯解析，末尾的 `ResolutionImpossible` 示例输出就是「没装 torch」时你会看到的东西。[docs/install.md:L71-L84](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L71-L84) 给出禁用 `--extra-index-url` 的理由和按行的索引。
+出处：[docs/install.md:L22-L24](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L22-L24)——用当前 torch 的实际输出去查下面这张表。
 
-[docs/install.md:L127-L145](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L127-L145) 是 PEP 440 排序与「版本必须写全」的论证，包含上面那个全序链和三条对照命令。[docs/install.md:L114-L124](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L114-L124) 说明 PyPI 只有一行且「在任何其他 torch 上这条命令不会失败」——pip 会直接把 torch 升到 2.13 来满足 pin。
+**第二步：查行表。** 8 个行标签覆盖 torch 2.10–2.13 × CUDA 12/13：
 
-README 的速览版在 [README.md:L125-L138](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L125-L138)（要求与按 CUDA 大版本选索引），四条命令在 [README.md:L140-L144](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L140-L144)，PyPI 警告在 [README.md:L146-L152](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L146-L152)。
+> | your torch | torch's CUDA | wheel tag |
+> |---|---|---|
+> | 2.10.x | 12.x | `torch210cu128` |
+> | … | … | … |
+> | 2.13.x | 13.x | `torch213cu130` |
 
-匹配逻辑的代码形态是 `wheel-url` 子命令里的 `_match()`（[python/fast_ulysses/cli.py:L130-L184](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L130-L184)）：按 machine → python → torch minor → CUDA major 的顺序逐轴检查，任何一轴没有 wheel 就返回一段指明该轴与出路的文字。本讲只需会用它，逐行精读留给 u8-l3。
+出处：[docs/install.md:L26-L35](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L26-L35)。表中行标签就是 wheel 的 PEP 440 本地版本（`fast_ulysses-0.2.0+torch210cu128-cp312-…`）。
 
-最后，「装错了会发生什么」的闭环在 [python/fast_ulysses/__init__.py:L3-L10](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/__init__.py#L3-L10)：导入时先 `import torch`（让 libtorch 先加载），再导入 `_C`；失败则把加载错误转交 `_diagnose.explain`，生成「编译时 vs 现装」的对照报告再抛出。torch minor 不匹配的典型症状是 `undefined symbol: _ZN3c10...`，CUDA 大版本不匹配是 `libcudart.so.12: cannot open shared object file`（[docs/install.md:L187-L207](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L187-L207)），两者的修复是同一个：卸载、按索引重装。
+**第三步：选索引。** README 的 Install 一节给出首选命令：
+
+```bash
+pip install fast-ulysses --index-url https://triple-mu.github.io/fast-ulysses/whl/cu13/   # or cu12
+```
+
+出处：[README.md:L131-L138](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L131-L138)。关键机制在 [docs/install.md:L51-L54](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L51-L54)：这个索引**只有 fast-ulysses 没有别的包**，所以 pip 无法靠安装一个新 torch 来满足最高候选者，只能一路回退到「`Requires-Dist: torch==2.11.*` 恰好被你已装的 torch 满足」的那一行。torch minor 不靠你选，靠这个回退解析。CUDA major 靠 URL 选（`cu12` / `cu13`），因为 wheel 元数据里不记录 CUDA 版本——这与 `download.pytorch.org/whl/cu128` 的目录组织是同一个道理（[docs/install.md:L46-L49](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L46-L49)）。
+
+**两个必须知道的坑：**
+
+- **PyPI 坑**：PyPI 不接受带本地标签的版本，所以 PyPI 上只有 `torch213cu130` 一行（钉死 `torch==2.13.*`）。在任何其他 torch 上，裸的 `pip install fast-ulysses` **不会报错**——pip 会直接把你的 torch 升级到 2.13（一份和你所选不同的 CUDA 构建），并且把它报告成一次普通的依赖解析。见 [docs/install.md:L114-L124](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L114-L124) 与 [README.md:L146-L147](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L146-L147)。同理，不要 `--extra-index-url https://pypi.org/simple`——这等于亲手把 torch 交还给 pip（[docs/install.md:L71-L73](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L71-L73)）。
+- **PEP 440 排序坑**：本地标签按段比较，而不带标签的 `==0.2.0` 会**完全忽略**标签。于是在任何持有多个行的文件集合（`--find-links`、wheelhouse 目录）上，不带标签的要求永远解析到最高的 `+torch213cu130`，与你装了什么 torch 无关、且无任何警告（[docs/install.md:L127-L145](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L127-L145)）。所以用 `--find-links` 时版本必须写全：`pip install "fast-ulysses==0.2.0+torch210cu128" --find-links …`。
+
+**让工具替你查：`wheel-url` 子命令。** 它读取当前环境的 torch/CUDA/Python/机器架构，按 machine → python → torch minor → CUDA major 的顺序匹配，打印出写全版本的安装命令：
+
+出处：[python/fast_ulysses/cli.py:L187-L241](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L187-L241)。匹配顺序（machine → python → torch → CUDA）的实现和每一步失败时的提示语在 [cli.py:L130-L184](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L130-L184)；注意它是**故意只匹配 CUDA major** 的，因为扩展只从 toolkit 链接 `libcudart.so.<major>`（[cli.py:L133-L137](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L133-L137) 的 docstring）。没有任何 wheel 匹配时，每条提示语最后都落在同一条出路——源码构建（[cli.py:L113-L115](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L113-L115)）。
 
 #### 4.1.4 代码实践
 
-1. **实践目标**：确定当前环境对应的 wheel 行，并用工具交叉验证。
+1. **实践目标**：确定当前环境对应的 wheel 行。
 2. **操作步骤**：
-   - 运行 `python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"`；
-   - 手工查 docs/install.md 的行表，写出你的标签（如 `torch211cu130`）；
-   - 若已装本库：运行 `fast-ulysses wheel-url`，看它打印的 `row:` 行是否与你查的一致；
-   - 若本库导入失败：直接读导入时抛出的报告——它已经把「编译时用的」和「现在装的」两边都写出来了。
-3. **需要观察的现象**：`wheel-url` 第一行 `running: torch x.y.z, cuda a.b, cpXY, x86_64`；随后是 `row:` 行或一段「no wheel for …」的说明。
-4. **预期结果**：手工查表与 `wheel-url` 结论一致。（本讲写作环境无法替你运行，`待本地验证`。）
+   ```bash
+   python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"
+   ```
+   把输出的 (torch minor, CUDA major) 对到 docs/install.md 的行表上；如果包已装好，再运行 `fast-ulysses wheel-url` 对照它的 `row:` 一行。
+3. **需要观察的现象**：`wheel-url` 第一行打印 `running: torch X.Y, cuda A.B, cpNN, x86_64`，随后给出 `row: torch X.Y, CUDA A.B, …` 和一条写全 `+torchXXXcuYYY` 标签的安装命令；命令末尾附一段解释「为什么版本必须写全」的警告文字（[cli.py:L228-L240](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L228-L240)）。
+4. **预期结果**：行表查出的标签与 `wheel-url` 报告的标签一致。若你的 torch 不在 2.10–2.13 内，`wheel-url` 会明确说出「published for torch …」并列出源码构建命令——这也算正确结果。
+5. 本讲写作环境无可用 torch/CPU 环境，以上输出为「待本地验证」。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `pip install fast-ulysses --index-url .../whl/cu13/` 不需要写版本标签，而 `--find-links` 必须？
+**练习 1**：同事在 torch 2.11 + CUDA 12.8 的环境里执行了 `pip install fast-ulysses --find-links ./wheelhouse`（wheelhouse 里有全部 36 个 wheel），结果 `import fast_ulysses` 报 `undefined symbol: _ZN3c10...`。为什么？
 
-答案：索引里只有 fast-ulysses 一个项目，pip 装不了别的 torch，只能回溯到 `Requires-Dist` 被当前 torch 满足的那一行，行是被解析出来的；`--find-links` 暴露全部 36 个 wheel，PEP 440 对不带标签的说明符按「忽略标签、取最高」处理，于是永远选中 `+torch213cu130`，与你的 torch 无关且无任何警告。
+**答案**：不带标签的要求在 PEP 440 下忽略本地版本并取最高者，于是装上了 `+torch213cu130`，而它嵌的是 torch 2.13 的 C++ ABI，与已装的 torch 2.11 不匹配，dlopen 时出现 undefined symbol。修复：`pip uninstall -y fast-ulysses` 后用写全标签的 `pip install "fast-ulysses==0.2.1+torch211cu128" --find-links ./wheelhouse`（排查流程见 [docs/install.md:L187-L213](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L187-L213)）。
 
-**练习 2**：环境里是 torch 2.12.4 + CUDA 13.1。装完发现 `import fast_ulysses` 报 `undefined symbol: _ZN3c10...`。最可能发生了什么？如何修复？
+**练习 2**：为什么 `whl/cu13` 索引不需要你在版本里写 `+torchXXXcu130` 标签，而 `--find-links` 需要？
 
-答案：装的 wheel 行与 torch minor 不符（比如被 PyPI/`--find-links` 静默换成了 `torch213cu130`），或事后 torch 被挪动过。修复顺序：先 `python -c "import torch; ..."` 确认 torch 还是你选的那个（不是就先重装 torch），`pip uninstall -y fast-ulysses`（不可省，否则 pip 报 `Requirement already satisfied` 留着坏轮），再按 `whl/cu13` 索引重装。
+**答案**：索引里只有 fast-ulysses 一个项目，pip 装不了新 torch，只能回退到 `Requires-Dist: torch==<你的minor>.*` 被现有 torch 满足的那一行——torch minor 由依赖解析决定。而 `--find-links`/多索引场景下 pip 会对所有候选取最高版本，最高标签永远是 `torch213cu130`，必须写全标签才能钉住行（[docs/install.md:L51-L54](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L51-L54) 与 [L147-L152](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L147-L152)）。
 
-**练习 3**：为什么匹配只看 CUDA 大版本，不看小版本？
+**练习 3**：一个全新环境（没装 torch）执行 `pip install fast-ulysses --index-url https://triple-mu.github.io/fast-ulysses/whl/cu13/` 会发生什么？这是 bug 吗？
 
-答案：扩展从 CUDA 工具链只链接 `libcudart.so.<大版本>`，其余什么都没用（`_match` 的 docstring 在 [python/fast_ulysses/cli.py:L130-L137](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L130-L137) 明说了这是刻意为之，且 `check_wheel.py` 断言的恰好就是这么多）。小版本不影响这条链接关系，所以 12.8/12.9 共用 `cu12`。
+**答案**：没有任何候选者的 torch 钉能被满足，pip 以 `ResolutionImpossible` 结束并列出它试过的每一行。这是**有意的失败**——这套索引的设计原则就是「不替你解析 torch」（[docs/install.md:L56-L69](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L56-L69)）；先 `pip install torch` 即可。
 
-### 4.2 源码构建：FAST_ULYSSES_CUDA_ARCH 与 --no-build-isolation
+### 4.2 源码构建：`--no-build-isolation` 与 `FAST_ULYSSES_CUDA_ARCH`
 
 #### 4.2.1 概念说明
 
-当你的 torch 不在 36 行表里（比如刚发布的 torch minor），或者你改了源码，就走源码构建。它有两条铁律：
+当你的 torch 不在 8 个发布行里、或者你要改 C++/CUDA 源码做开发，就需要源码构建。它不是「备胎」：本学习手册后面每一讲带你改代码观察行为，用的都是 `pip install -e .`（可编辑安装）这条路。
 
-1. **`--no-build-isolation` 是必须的**。构建过程中 CMake 要通过「已安装的 torch」找到 libtorch 的头文件与库，`setup.py` 还要读出该 torch 的版本来生成运行时依赖 pin——所以构建用的 torch 必须就是你将来运行用的那一份。pip 的构建隔离会另装一份 torch 进临时环境，扩展就会链接那一份而不是你的。
-2. **默认编译四个架构（80;90;100;120）很慢**，用 `FAST_ULYSSES_CUDA_ARCH` 只编你机器的架构能快几倍。
+源码构建有两个本项目特有的关键点：
+
+- **`--no-build-isolation` 是硬性要求**。pip 默认在隔离的临时环境里跑构建，那个环境没有你的 torch；而 fast-ulysses 的构建**必须 import 你将要链接的那份 torch**（读它的版本、让 CMake 定位 libtorch）。这不是惯例，是设计约束——违反时构建直接失败并打印修复指引，而不是抛 traceback。
+- **默认编译 4 个架构（`80;90;100;120`），很慢；用 `FAST_ULYSSES_CUDA_ARCH` 只编本机架构可以快几倍**。每个架构一次独立的设备端编译过程，nvcc 还会让它们并行跑，内存消耗也按架构数放大。
 
 #### 4.2.2 核心流程
 
 `pip install -e . --no-build-isolation` 触发的链条：
 
-```
-pip（不做隔离，直接用当前环境的 torch）
-  └─ setup.py 的 CMakeBuild.build_extension()
-       ├─ 1. _requires()：import torch，读 minor，生成 install_requires=["torch==2.11.*"]
-       │      （import 失败 → RuntimeError，打印「先装 torch + --no-build-isolation」的指引）
-       ├─ 2. 确定 build 目录（默认 ./build，持久保留 → 增量编译）
-       ├─ 3. 读 FAST_ULYSSES_CUDA_ARCH（默认 "80;90;100;120"），
-       │      转成 torch 的点分形式写入 TORCH_CUDA_ARCH_LIST（90 → 9.0）
-       ├─ 4. cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=<arch> ...
-       │      （CMake 侧：project() 前快照 arch 请求；若含 Blackwell 而 nvcc < 12.8 → FATAL_ERROR）
-       ├─ 5. cmake --build build -j<jobs>
-       │      jobs = min(CPU 数, MemAvailable / (3 GiB × 架构数))   ← 受内存约束，不是核数
-       └─ 6. 生成 _build_meta.py：记录版本、torch、CUDA、arch 列表等构建事实
+```text
+pip（不隔离，用当前环境）
+  └─ setup.py: CMakeBuild.build_extension
+       ├─ 读取 FAST_ULYSSES_CUDA_ARCH（默认 "80;90;100;120"）
+       ├─ 转写成 torch 的点分形式 → TORCH_CUDA_ARCH_LIST（90 → "9.0"）
+       ├─ cmake -S . -B build -DCMAKE_CUDA_ARCHITECTURES=…  （configure）
+       ├─ cmake --build build -jN                           （N 由内存预算决定）
+       └─ 生成 fast_ulysses/_build_meta.py（构建事实快照）
 ```
 
-关于并行度：每个编译任务 fork 一个 nvcc，而 nvcc 的 `-t0` 会让它对**每个架构**各跑一个 device 编译 pass，所以峰值并发 = 任务数 × 架构数，峰值内存随之增长。按每个并发 pass 约 3 GiB 预算：
+并行作业数 \(N\) 不跟随 CPU 核数，而是按内存预算：每个 nvcc 作业对每个架构各跑一个设备端 pass，峰值并发是「作业数 × 架构数」，按每个 pass 约 3 GiB 预算：
 
-\[ \text{jobs} = \max\!\left(1,\ \min\!\left(\text{cpus},\ \left\lfloor \frac{\text{MemAvailable (GiB)}}{3.0 \times n_{\text{arch}}} \right\rfloor\right)\right) \]
+\[
+N \;=\; \max\!\Big(1,\ \min\big(\text{cpus},\ \big\lfloor \mathrm{MemAvail}_{\mathrm{GiB}} \,/\, (3.0 \cdot n_{\mathrm{arch}}) \big\rfloor\big)\Big)
+\]
 
-这就是为什么小内存 CI 机器上四架构构建会被 OOM 杀掉——也为什么单架构构建快得多（不只少编三份，还允许更高并行度）。`CMAKE_BUILD_PARALLEL_LEVEL` 环境变量可越过这个推导。
+`CMAKE_BUILD_PARALLEL_LEVEL` 环境变量可以越过这个推导。
 
 #### 4.2.3 源码精读
 
-**为什么构建不能隔离**，最清楚的表述是 `_requires()` 的 docstring：[setup.py:L59-L83](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L59-L83)。它解释了三层：pin 必须精确到 minor（ABI）；读 pin 需要导入将链接的 torch（所以不能隔离）；也不能把 torch 声明成构建依赖（pip 会在隔离环境里装自己的 torch，扩展就链接那一份）。`try: import torch / except ImportError: raise RuntimeError(...)` 把裸的 `ModuleNotFoundError` 变成了带三条命令的指引——你在隔离模式下忘记 `--no-build-isolation` 时看到的就是这段话。
+**pyproject.toml 的构建声明与命令行入口：**
 
-对应地，[pyproject.toml:L1-L3](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L1-L3) 的 `[build-system]` 只有 setuptools，**没有 torch**——这是上面第二条禁令的落地。
+```toml
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+...
+[project.scripts]
+fast-ulysses = "fast_ulysses.cli:main"
+```
 
-**构建主流程**在 [setup.py:L91-L141](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L91-L141)：
+出处：[pyproject.toml:L1-L3](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L1-L3) 与 [pyproject.toml:L20-L21](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L20-L21)。注意 `version` 和 `dependencies` 是 `dynamic` 的（[pyproject.toml:L12](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L12)）——都由 setup.py 在构建时从真实 torch 推导。第二行就是 `fast-ulysses doctor` / `fast-ulysses wheel-url` 这两个命令的来源。包本体在 `python/` 下（[pyproject.toml:L29-L34](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L29-L34)），`wheel_matrix.json` 作为包数据一起安装。
 
-- [setup.py:L100-L101](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L100-L101)：持久 build 目录（默认 `./build`，`FAST_ULYSSES_BUILD_DIR` 可改），让重构建走增量；CMake 在 `-D` 参数变化时自动重新 configure，不用手工清。
-- [setup.py:L103-L108](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L103-L108)：读 `FAST_ULYSSES_CUDA_ARCH`（默认 `80;90;100;120`），并做 `90 → 9.0`、`100 → 10.0` 的点分转换写进 `TORCH_CUDA_ARCH_LIST`——torch 的 CMake 模块吃点分形式，而 CMake 与本库约定吃整数形式。
-- [setup.py:L112-L131](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L112-L131)：cmake configure 命令本身，`-DCMAKE_CUDA_ARCHITECTURES=<arch>` 就在这里传下去；configure 输出被捕获而非直接流式打印，是为了从里面解析 `c10d::register_work available: ON` 这个探针状态行（[setup.py:L137-L141](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L137-L141)），它决定异步路径的运行时行为（u7-l3 展开）。
-- [setup.py:L135-L136](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L135-L136)：jobs 取 `CMAKE_BUILD_PARALLEL_LEVEL` 或 `_build_jobs(arch)` 的推导，公式来自 [setup.py:L31-L51](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L31-L51) 的 `/proc/meminfo` 读取（每并发 pass 3 GiB 预算，读不到 MemAvailable 时退回 CPU 数）。
+**`--no-build-isolation` 的强制与解释**——`_requires()` 里的这段注释是全项目对这个问题最完整的论证：
 
-**CMake 侧的两个细节**（本讲了解即可，u8-l2 精读）：[CMakeLists.txt:L7-L27](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/CMakeLists.txt#L7-L27) 解释了为什么架构请求要在 `project()` **之前**快照（`project(LANGUAGES CUDA)` 总会把它定义成编译器默认值 52，之后再测就分不清「没要求」和「要求了 52」），以及为什么要在 `find_package(Torch)` **之后**再快照一次（Torch 会把它设成 `OFF` 改用自己的 `TORCH_CUDA_ARCH_LIST` 驱动）。[CMakeLists.txt:L40-L70](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/CMakeLists.txt#L40-L70) 是 Blackwell 守卫：请求 sm_100/sm_120 而 nvcc 低于 12.8 时直接 `FATAL_ERROR`，报错里给出了退路（`FAST_ULYSSES_CUDA_ARCH="80;90"`）——否则你会得到一个能加载但第一个 kernel 就报 `no kernel image` 的 `.so`。
+```python
+def _requires() -> list[str]:
+    """... Reading it needs the torch this will link against, so the build cannot run under pip's
+    build isolation -- and torch cannot be declared a build requirement either, because pip
+    would then install its own copy into the isolated environment and the extension would link
+    that one instead of the user's. Turn the bare ModuleNotFoundError into the instruction."""
+    try:
+        import torch
+    except ImportError:
+        raise RuntimeError(
+            "fast-ulysses builds against the torch already installed in the target environment, "
+            "so it cannot be built under pip's build isolation.\n"
+            ...
+```
 
-最后，[setup.py:L149-L171](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L149-L171) 把构建事实（版本、torch ABI、CUDA 版本、arch 列表、是否有 work registry）写成 `_build_meta.py` 放在扩展旁边——因为当 `.so` 本身 dlopen 失败时，`build_info()` 无法回答，而这个纯 Python 文件还能读。`doctor` 的第一段输出就来自它（4.4）。
+出处：[setup.py:L59-L83](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L59-L83)。要点有三：运行时依赖钉死为当前 torch 的 minor（`torch=={major}.{minor}.*`）；把 torch 声明为 build requirement 也不行——pip 会在隔离环境里装自己的 torch，扩展就链接到那一份去了；构建时 import 不到 torch 就抛出带修复命令的 `RuntimeError`。文档侧的对应说明在 [docs/install.md:L169-L177](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L169-L177)。
 
-构建变量速查（完整表在 [docs/install.md:L179-L185](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L179-L185)）：
+**架构变量的消费**——`build_extension` 把 `;` 分隔的架构串同时喂给 CMake 和 torch：
 
-| 变量 | 含义 | 默认 |
-| --- | --- | --- |
-| `FAST_ULYSSES_CUDA_ARCH` | 目标架构，`;` 分隔 | `80;90;100;120` |
-| `CUDACXX` | CUDA 编译器 | `/usr/local/cuda/bin/nvcc` |
-| `FAST_ULYSSES_BUILD_DIR` | CMake 构建树 | `./build`（保留，增量） |
-| `FAST_ULYSSES_CMAKE_ARGS` | 透传给 CMake 的额外 flag | 空 |
-| `CMAKE_BUILD_PARALLEL_LEVEL` | 覆盖任务数推导 | 按内存预算 |
+```python
+arch = env.get("FAST_ULYSSES_CUDA_ARCH", "80;90;100;120")
+env["TORCH_CUDA_ARCH_LIST"] = " ".join(
+    f"{tok[:-1]}.{tok[-1]}" for tok in arch.split(";") if tok
+)
+```
+
+出处：[setup.py:L100-L108](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L100-L108)。torch 要点分形式（`90` → `9.0`、`100` → `10.0`），所以插入小数点的位置是「最后一个数字之前」。同一函数里还有：持久化构建目录 `build/`（默认值可被 `FAST_ULYSSES_BUILD_DIR` 覆盖），让重复构建增量进行（[setup.py:L95-L101](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L95-L101)）；configure 输出被捕获而非直接流式打印，因为 `c10d::register_work` 探测的答案只出现在这里（[setup.py:L109-L141](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L109-L141)）。
+
+**内存预算的作业数推导**（即 4.2.2 的公式）在 `_build_jobs`：
+
+出处：[setup.py:L31-L51](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L31-L51)。docstring 记录了动机：小内存 CI 机器如果 `-j` 只跟核数，会在四个架构的构建中途被 OOM killer 杀掉。
+
+**构建事实快照 `_build_meta.py`**——`_write_build_meta` 把 VERSION、TORCH_VERSION、TORCH_ABI、CUDA_VERSION、PYTHON_ABI、CUDA_ARCH_LIST、HAS_WORK_REGISTRY 写成一个小 Python 模块放在扩展旁边：
+
+出处：[setup.py:L149-L171](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L149-L171)。注释说明了为什么必须落成文件：当 dlopen 本身失败时（恰恰是最需要这些信息的时刻），运行时函数答不出来。下一节你会看到 `doctor` 打印的就是它。
+
+完整的构建变量表（`FAST_ULYSSES_CUDA_ARCH` / `CUDACXX` / `FAST_ULYSSES_BUILD_DIR` / `FAST_ULYSSES_CMAKE_ARGS` / `CMAKE_BUILD_PARALLEL_LEVEL`）在 [docs/install.md:L179-L185](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L179-L185)。
 
 #### 4.2.4 代码实践
 
-1. **实践目标**：完成一次单架构源码构建，并观察 arch 变量如何一路传到 CMake。
+1. **实践目标**：用单架构构建把源码安装时间压缩到最短，并读懂构建输出的关键字段。
 2. **操作步骤**：
-   - 先确认 `nvcc` 可用且 `python -c "import torch"` 正常（torch 版本就是你打算运行用的）；
-   - 用 `nvidia-smi --query-gpu=compute_cap --format=csv` 或 `torch.cuda.get_device_properties(0)` 得到本机架构（如 H100 → `90`）；
-   - 执行 `FAST_ULYSSES_CUDA_ARCH=90 pip install -e . --no-build-isolation`；
-   - 对照观察：configure 输出中的 arch 列表、`c10d::register_work available: ...` 状态行；构建结束后 `python -c "import fast_ulysses; print(fast_ulysses.__version__)"`（当前仓库 VERSION 为 `0.2.1`，见 [setup.py:L22-L28](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L22-L28) 对唯一版本字面量的说明）；
-   - 再删掉 `build/` 后不带环境变量重构建一次，对比耗时差异（四架构 vs 单架构）。
-3. **需要观察的现象**：单架构构建的 nvcc 调用次数明显更少、总耗时显著下降；两次构建后 import 均成功。
-4. **预期结果**：`fast_ulysses.__version__` 打印 `0.2.1`（可编辑安装不带本地标签）。`待本地验证`（本讲环境无 nvcc/GPU，无法代跑）。
-5. **故意触发一次错误**（可选，加深印象）：临时在一个隔离环境里 `pip install .`（不带 `--no-build-isolation`）——你应该看到 `_requires()` 抛出的那段指引文字而不是裸 traceback（[setup.py:L74-L80](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L74-L80)）。
+   ```bash
+   # 0) 前置：torch 已装（版本随意，2.10+），且有 nvcc 和 cmake ≥ 3.18
+   python -c "import torch; p = torch.cuda.get_device_properties(0); print(f'{p.major}{p.minor}')"   # 本机架构，如 90
+   # 1) 单架构可编辑安装（把 90 换成上一步的输出）
+   FAST_ULYSSES_CUDA_ARCH=90 pip install -e . --no-build-isolation
+   # 2) 构建完成后验证导入
+   python -c "import fast_ulysses; print(fast_ulysses.__version__)"
+   ```
+3. **需要观察的现象**：
+   - configure 输出里的 CUDA 架构列表只有 `90` 一项（对比不加变量时的 `80;90;100;120`）；
+   - 末尾出现的 `c10d::register_work available: ON/OFF` 探测行；
+   - `build/` 目录被创建，且**第二次**运行同一命令明显更快（增量构建）；
+   - 生成 `python/fast_ulysses/_build_meta.py`（`copy_extensions_to_source` 把它随扩展拷回源码树，[setup.py:L143-L147](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L143-L147)）。
+4. **预期结果**：`import fast_ulysses` 打印 `0.2.1`（当前 VERSION 文件内容）。故意去掉 `--no-build-isolation` 再跑一次，应看到 setup.py 抛出的那段带修复指引的 `RuntimeError`，而不是裸的 ModuleNotFoundError——这正是 [setup.py:L71-L80](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L71-L80) 的效果。
+5. 本讲写作环境无 GPU、无 nvcc，以上均为「待本地验证」。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么不能把 `torch` 写进 `pyproject.toml` 的 `[build-system] requires` 来解决「构建时 torch 必须在场」？
+**练习 1**：为什么把 `torch` 写进 `[build-system] requires` 不能解决隔离构建的问题，反而更糟？
 
-答案：那会让 pip 在隔离环境里安装**它自己解析的** torch，扩展链接的就是那份而不是用户环境的 torch——恰好制造了本要避免的 ABI 错配。正确做法是禁用隔离、强制使用用户环境，并把忘记时的失败变成一条可执行的指引。
+**答案**：pip 会在隔离环境里安装**它自己的**一份 torch，扩展将链接那份 torch 而不是用户环境的 torch——装出来的 wheel 对用户环境来说 ABI 依然是错的。正确做法就是 `--no-build-isolation`，让构建直接看见目标环境的 torch（[setup.py:L60-L70](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L60-L70) 的 docstring）。
 
-**练习 2**：一台 8 核、MemAvailable 约 12 GiB 的机器上做四架构构建，jobs 是多少？单架构又是多少？
+**练习 2**：32 核、`MemAvailable` 约 24 GiB 的机器上，默认四架构构建的 `-j` 是多少？单架构又是多少？
 
-答案：四架构：\(\lfloor 12/(3 \times 4) \rfloor = 1\)；单架构：\(\lfloor 12/(3 \times 1) \rfloor = 4\)，再与 cpus=8 取 min。四架构时每个 nvcc 内部还有 4 个并发 device pass，这正是小机器被 OOM 杀死的原因，也是单架构「快得多」的第二重来源（公式见 [setup.py:L31-L51](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L31-L51)）。
+**答案**：按公式 \(N=\max(1,\min(32,\lfloor 24/(3\cdot n)\rfloor))\)：四架构 \(n=4\) 得 \(N=2\)；单架构 \(n=1\) 得 \(N=8\)。这正是「单架构不仅少编 4 份代码、还能提高并行度」的量化体现（[setup.py:L31-L51](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L31-L51)）。
 
-**练习 3**：`FAST_ULYSSES_CUDA_ARCH=100` 在 CUDA 12.4 的机器上构建，会发生什么？为什么不在运行时报错？
+**练习 3**：构建报 `CMakeCache.txt directory ... is different than ...`，怎么回事？
 
-答案：CMake 的 Blackwell 守卫直接 `FATAL_ERROR`，消息指明需要 CUDA 12.8+ 并给出 `FAST_ULYSSES_CUDA_ARCH="80;90"` 的退路。提前失败是因为 nvcc 根本编不出 sm_100；若放任产出一个不含该架构的 `.so`，加载能成功、直到第一个 kernel 启动才报 `no kernel image is available`——那种延迟爆炸正是守卫要避免的。
+**答案**：持久化的 `build/` 目录是从另一个路径 configure 出来的（比如仓库被移动过）。CMake 缓存里记着源码绝对路径。`rm -rf build` 后重建即可（[docs/install.md:L232-L233](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L232-L233)）。
 
-### 4.3 torchrun 启动：跑通 quickstart 与 examples
+### 4.3 torchrun 启动：跑通 quickstart 与 DiT 示例
 
 #### 4.3.1 概念说明
 
-`torchrun`（PyTorch 内置的启动器）把一份脚本复制成 N 个 rank，设置好 rendezvous 与环境变量（`RANK`、`WORLD_SIZE`、`LOCAL_RANK`）。fast-ulysses 是 SPMD 库：每个 rank 跑同样的代码、持有序列的一个分片、发出相同的调用序列（u1-l2 的契约）。
+fast-ulysses 是一个**集合通信算子**：一个调用必须由进程组里的所有 rank 同时发出（SPMD 契约，u1-l2 已建立）。`torchrun` 就是把一个脚本复制成 N 个 rank 的启动器。本模块把 README 的 quickstart 和 examples 各跑一遍，并特别关注**只有一张卡时怎么跑、哪些行为仍然成立**——这决定了你能不能在一台单卡机器上做本手册后面的大部分练习。
 
-第一次运行有两层意义：
-
-1. **验证安装链路**——NCCL 进程组、对称内存分配、扩展加载全部走通；
-2. **验证语义**——`examples/dit_attention.py` 自带双保险：与「不做序列并行的同块」对拍输出**和**输入梯度，再跑 5 个真实的优化器步。
+关于 `world_size=1` 有一个可以直接从源码确认的事实：**屏障被整体跳过**。传输前后各有一次标志位屏障用来同步所有 rank；`ws=1` 时没有任何 peer 可等，`fast_barrier` 直接返回。构造函数也允许 `world_size` 为 1（合法区间是 [1, 8]）。
 
 #### 4.3.2 核心流程
 
-README quickstart 脚本（`example.py`）的骨架：
+quickstart 脚本每个 rank 的执行序列：
 
+```text
+torchrun 启动 N 个进程，注入 RANK / LOCAL_RANK / WORLD_SIZE
+  ├─ dist.init_process_group("nccl")          # 建立 NCCL 进程组
+  ├─ torch.cuda.set_device(LOCAL_RANK)        # 每个进程绑自己的卡
+  ├─ UlyssesGroup()                           # 集合操作：对称内存注册（下一单元细讲）
+  ├─ x = randn(b, s_local, heads*ws, d)       # 每 rank 持有序列分片×全部头
+  ├─ y = group.all_to_all_4d(x, mode=0)       # → (b, s_local*ws, heads, d)
+  ├─ z = group.all_to_all_4d(y, mode=1)       # → 回到 x 的形状，数值还原
+  └─ group.destroy(); dist.destroy_process_group()
 ```
-dist.init_process_group("nccl")              # NCCL 后端（窗口能力来自 torch 的对称内存）
-torch.cuda.set_device(LOCAL_RANK)            # 每个 rank 绑定自己可见范围内的那张卡
-group = UlyssesGroup()                       # 集合操作：对称内存窗口的 bootstrap 注册
-x = randn(b, s_local, heads*ws, d)           # 本 rank 的序列分片 × 全部头
-y = group.all_to_all_4d(x, mode=0)           # → (b, s_local*ws, heads, d)：全序列 × 头分片
-z = group.all_to_all_4d(y, mode=1)           # → 回到 x 的形状；数值上 z == x（位置精确重排）
-group.destroy(); dist.destroy_process_group()  # 两个都是集合操作，所有 rank 都要到
-```
-
-`examples/dit_attention.py` 的 `main()` 则多四步（见源码精读）：构造模块 → 前向+反向 → `all_gather` 汇总与单卡参照比误差 → AdamW 走 5 步。
-
-**没有 8 张卡怎么办**：`torchrun --nproc_per_node=1` 也能跑（`world_size` 在 `[1, 8]` 内都受支持，README 的 Limits 一节，[README.md:L104-L106](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L104-L106)）。此时确实有一些环节退化/跳过——最明确的一个：屏障在 `ws == 1` 时直接返回（见下）。但形状契约、mode 0/1 的往返、自动微分这些**单 rank 内可观察**的行为全部照旧，所以它仍是有效的冒烟测试。
 
 #### 4.3.3 源码精读
 
-quickstart 脚本本体在 [README.md:L48-L72](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L48-L72)，启动命令在标题下一行（`torchrun --nproc_per_node=8 example.py`）；[README.md:L74](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L74) 是那句契约提醒：每个 rank 必须发出相同的形状序列（新形状的首次调用会触发集合性的窗口分配）。README 中 DiT 示例的启动命令在 [README.md:L79-L81](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L79-L81)。
+**README 的 quickstart**（保存为 `example.py`，`torchrun --nproc_per_node=8 example.py` 运行）：
 
-示例本体 [examples/dit_attention.py:L77-L86](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L77-L86)：初始化进程组、按 `LOCAL_RANK` 设备、`torch.manual_seed(0)`（**所有 rank 同种子**，权重才能一致）、构造 `UlyssesAttention`。注意示例里传的是 `require_nvlink=False`（[examples/dit_attention.py:L85](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L85)）——为了在没有完整 NVLink 互连的机器上也能演示；生产构造默认 `require_nvlink=True`。
+```python
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+group = UlyssesGroup()
 
-校验的核心在 [examples/dit_attention.py:L99-L116](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L99-L116)：把分片的结果与梯度用 `dist.all_gather` 拼回全局，与单 rank 参照（`reference()`，L66-L74）比最大误差，容差 `5e-2`——注释点明用 `allclose` 而非相等，因为两条路径的浮点归约顺序不同。rank 0 打印两行 `output / d/dinput max |diff| = ... OK/FAIL`，这就是你运行后要看的输出。
+b, s_local, heads, d = 1, 4096, 8, 128
+ws = dist.get_world_size()
+x = torch.randn(b, s_local, heads * ws, d, dtype=torch.bfloat16, device="cuda")
 
-训练真实性的部分在 [examples/dit_attention.py:L118-L129](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L118-L129)：AdamW 五步，每步打印 rank 0 的 loss；注释说明各 rank 的 loss 本就不必一致。收尾 [examples/dit_attention.py:L131-L132](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L131-L132)：`group.destroy()` 与 `dist.destroy_process_group()`——前者也是集合操作，漏掉它的某个 rank 会让别的 rank 挂在等待里。
+y = group.all_to_all_4d(x, mode=0)        # (b, s_local * ws, heads, d)
+z = group.all_to_all_4d(y, mode=1)        # back to x's shape
+```
 
-`world_size=1` 跳过屏障的证据在 [src/barrier.cu:L53-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L53-L57)：`fast_barrier` 一进来就 `if (ws == 1) return;`——没有 peer 可等，发布/等待阶段整个不发射。这正是单卡运行时「仍然成立的行为」清单里最有意思的一条：调用链照常走完，屏障阶段为空操作。（屏障内核本身的逐行精读在 u5-l3。）
+出处：[README.md:L48-L72](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L48-L72)。注意两个细节：头的总数写成 `heads * ws`（每 rank 只持有 `heads` 个头对应的份额语义在 u1-l2 讲过）；脚本以 `group.destroy()` 结束，它也是集合操作。紧随其后的警告「Every rank must issue the same sequence of shapes」（[README.md:L74](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L74)）是全手册最重要的一句话——新形状的首次调用触发集合性的窗口分配，rank 间分歧的后果是挂起而非报错。
+
+**DiT 注意力示例的启动方式与自校验结构**：
+
+出处：[README.md:L76-L84](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L76-L84) 给出命令 `torchrun --nproc_per_node=8 examples/dit_attention.py`。脚本自身的 docstring 说明了它的双重自检：与「完全不序列并行」的单卡参照比较输出**和输入梯度**，再打印几个优化器步的 loss（[examples/dit_attention.py:L1-L17](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L1-L17)）。模块主体就是 u1-l2 讲过的三明治：qkv 打包 → mode 0 → SDPA → mode 1 → proj（[examples/dit_attention.py:L45-L63](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L45-L63)）。逐段精读留给 u2-l4，本讲只负责跑通它。
+
+**`world_size=1` 跳过屏障的证据**：
+
+```cpp
+void fast_barrier(cudaStream_t stream, const std::vector<uint64_t>& flag_ptrs, int rank)
+{
+    const int ws = static_cast<int>(flag_ptrs.size());
+    if (ws == 1)
+        return;
+```
+
+出处：[src/barrier.cu:L53-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L53-L57)。没有 peer 就没有发布/等待，屏障内核根本不发射。而构造函数一侧对 world_size 的合法域检查：
+
+```cpp
+TORCH_CHECK(world_size_ >= 1 && world_size_ <= 8, "world_size must be in [1, 8] ...")
+```
+
+出处：[src/group.cc:L151-L153](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/group.cc#L151-L153)——1 是一等公民，不是边界特例。
+
+**无 GPU 环境的边界**：测试体系里 host-only 的布局测试不需要 GPU（`pytest -m "not multigpu"`，[README.md:L156-L159](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L156-L159)），但 quickstart 与 examples 都要真实 CUDA 设备（`device="cuda"` 且走 NCCL）。
 
 #### 4.3.4 代码实践
 
-1. **实践目标**：跑通两个入口，并对照源码读懂每一行输出。
+1. **实践目标**：在可用的 GPU 数量 N（可为 1）下跑通两个脚本，并记录 `ws=1` 时哪些行为仍然成立。
 2. **操作步骤**：
-   - 把 [README.md:L52-L71](https://github.com/triple-mu/fast-urysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L52-L71) 的脚本存为 `example.py`（以仓库内 README 为准），运行 `torchrun --nproc_per_node=<N> example.py`（N = 你的 GPU 数，最少 1）；
-   - 运行 `torchrun --nproc_per_node=<N> examples/dit_attention.py`；
-   - 单卡用户额外做：确认脚本无改动地跑完，并记录哪些行为仍成立。
+   ```bash
+   # 把 README quickstart 存成 example.py 后：
+   torchrun --nproc_per_node=<N> example.py           # N = 你的卡数；单卡就写 1
+   torchrun --nproc_per_node=<N> examples/dit_attention.py
+   # 单卡运行后，再做一次观测：
+   python -c "
+   import torch
+   print(torch.cuda.device_count())                    # 确认确实只有 1 张卡"
+   ```
+   在 `example.py` 末尾临时加一行（不改库源码，只改你自己的脚本）：
+   ```python
+   print(rank_ok := torch.equal(x, z), flush=True)     # ws=1 时往返是否位精确还原
+   ```
 3. **需要观察的现象**：
-   - `example.py`：无输出即成功（脚本没写 print）；可自行加一行 `print((z - x).abs().max().item())` 观察 mode 0→1 往返是否还原（预期 0，重排是位置精确的）；
-   - `dit_attention.py`：rank 0 打印 `ws=... s_global=... n_global=...`、两行 `max |diff| = ... OK`、五行 `step k loss ...`（loss 通常下降）。
-4. **预期结果**：两行 diff 都是 `OK`；5 步 loss 有下降趋势。`待本地验证`。
-5. **单卡记录表**（`--nproc_per_node=1` 时填写）：
-   - 集合构造 `UlyssesGroup()` 是否成功？（预期：是，`world_size` 下界是 1）
-   - mode 0 输出形状是否仍是 `(b, s_local*1, heads, d)`？（预期：是，变换在 ws=1 下降维为恒等重排）
-   - 屏障阶段被跳过（依据 [src/barrier.cu:L56-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L56-L57)，从外部只能通过「运行成功且无 peer 通信」间接确认）
-   - 反向传播与优化器步是否照常？（预期：是）
+   - `ws=1` 时 `x` 形状 `(1, 4096, 8, 128)`（`heads*ws=8`），`y` 为 `(1, 4096, 8, 128)`，`z` 还原；
+   - 两个脚本都正常退出、无挂起；
+   - `dit_attention.py` 打印与单卡参照的输出/梯度比对结果和若干步 loss。
+4. **预期结果**：
+   - `ws=1`：一切正常退出。可以从源码断言的部分：屏障被 `fast_barrier` 直接跳过（[src/barrier.cu:L56-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L56-L57)）；`world_size=1` 在构造函数的合法域内（[src/group.cc:L151-L153](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/group.cc#L151-L153)）；mode 0 + mode 1 往返位精确（u1-l2 的结论，`ws=1` 同样成立）。**不能**从源码断言、需实测的部分：传输路径是否仍有窗口分配与拷贝（应仍有——这属于待本地验证的观测点）。
+   - 多卡时 `torchrun --nproc_per_node=8`：`x` 为 `(1, 4096, 64, 128)`，`y` 为 `(1, 32768, 8, 128)`。
+5. 本讲写作环境无 GPU：以上运行为「待本地验证」。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：`example.py` 里为什么必须有 `torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))`？不写会怎样？
+**练习 1**：quickstart 里为什么必须 `torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))`，而单进程脚本通常不用？
 
-答案：torchrun 起的每个 rank 都能看到全部 N 张卡，`cuda` 设备的默认选择是 0 号——不绑定 `LOCAL_RANK` 的话所有 rank 都在 0 号卡上工作，对称内存注册与数据分片全部错乱。绑定后每个 rank 的「当前设备」唯一，后续 `device="cuda"` 的分配才落在自己的卡上。
+**答案**：torchrun 起 N 个进程共用同一台机器，默认都操作 0 号卡会互相踩踏。`LOCAL_RANK` 是「本进程在本节点内的编号」，set_device 把每个进程的默认 CUDA 上下文绑到自己的卡。单进程只有一个上下文，通常不需要。
 
-**练习 2**：示例用 `torch.manual_seed(0)` 让所有 rank 同种子，但输入 `x_global` 又是随机张量——为什么不至于让不同 rank 拿到不同的数据？
+**练习 2**：把 quickstart 里 `heads` 从 8 改成 3，让**偶数 rank 用 3、奇数 rank 用 4**，会发生什么？
 
-答案：种子相同 + 确定性的生成调用（`torch.randn` 以相同形状与顺序调用）⇒ 所有 rank 生成出**同一个全局张量**，再各自切出自己的分片（[examples/dit_attention.py:L88-L94](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L88-L94) 注释说明这正是为了让参照对拍落在完全相同的数据上）。权重同理：`nn.Linear` 在同种子下初始化一致。
+**答案**：各 rank 发出的形状序列不同，而新形状的首次调用触发集合性的窗口分配——某个 rank 在分配点等其他人，表现为**挂起而非报错**（[README.md:L74](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L74)、[docs/quickstart.md:L90-L94](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/quickstart.md#L90-L94)）。这是 u1-l2 所讲 SPMD 契约的运行期体现。
 
-**练习 3**：脚本结尾漏掉 `group.destroy()` 会发生什么？
+**练习 3**：`ws=1` 时 `group.all_to_all_4d(x, mode=0)` 返回的张量与 `x` 是什么关系？
 
-答案：`destroy()` 是集合操作（释放对称内存窗口，README API 表 [README.md:L94](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L94)）。多数情况下进程直接退出时资源随进程回收、看不出问题；但在同一进程里接着用同一个 group 再做事、或与其它集合操作交叠时，早退/缺席的 rank 会让其余 rank 阻塞在等待上。养成对称调用的习惯（init 与 destroy 成对）即可。
+**答案**：形状上，`(b, s, n, d)` → `(b, s, n, d)`（`s_local*ws = s_local`、`heads = heads*ws/ws`）；数值上仍是同一个重排语义（序列分片×全部头 ⇄ 全序列×头分片在 ws=1 时退化为恒等重排）。屏障环节被整体跳过，但调用本身照常执行（不抛错、不挂起）。
 
-### 4.4 doctor 自检：build_info、设备与 NVLink 矩阵
+### 4.4 doctor 自检：读懂三段输出
 
 #### 4.4.1 概念说明
 
-`fast-ulysses doctor` 回答一个问题：**这台机器能不能跑这个算子**。它把判断拆成三段可独立观察的事实：
+`fast-ulysses doctor` 回答一个问题：**这台机器能不能跑这个算子**。它不做任何集合通信，只是把「不拉起进程组就能确定的事实」打出来：扩展加载情况、构建事实、设备与架构、以及两两 NVLink 连接矩阵。文档明确它的定位：绿色矩阵只是**必要条件**，不替代 `UlyssesGroup` 构造函数在实际进程组上做的检查。
 
-1. 扩展是否加载成功，加载的是哪份 `.so`、按什么配置编的；
-2. 有哪些 GPU，每张的架构是否在这个构建的 arch 列表里；
-3. 这些 GPU 两两之间是否被 NVLink 连接（矩阵）。
-
-注意它的定位（cli 模块 docstring 明说）：绿矩阵是**必要条件**，不替代 `UlyssesGroup` 构造函数在实际进程组上做的检查——doctor 不建进程组。
+之所以把 NVLink 当作门槛，是因为这个传输方式直接写 peer 的显存地址——没有 NVLink（比如走 PCIe）时带步长拷贝性能急剧劣化，`torch.distributed` 反而更快，所以构造函数会拒绝这样的组。
 
 #### 4.4.2 核心流程
 
-`_doctor()` 的四个阶段，任一阶段失败都带着结构化的返回码（0 成功 / 1 有问题）：
+`doctor` 的输出分四段：
 
+```text
+extension: /path/to/_C.so          # ① 扩展加载成功与否
+  version / torch_abi / cuda_version / python_abi / cuda_arch_list / has_work_registry ...
+devices: N                         # ② 可见卡数与每张卡的架构、显存
+  [0] NVIDIA H100  sm_90  79 GiB   #    不在本次构建架构里的卡会被标出
+nvlink, row=from col=to:           # ③ 两两 NVLink 矩阵（. 对角 / y 有 / N 无）
+     0   1   2 ...
+NOT NVLink-joined: ...             # ④ 结论：全部互连 / 有缺失对 / NVML 答不了
 ```
-1. 加载扩展     失败 → 打印 "extension: FAILED TO LOAD" + 原始异常，返回 1
-2. build_meta   打印 _build_meta.py 里的构建事实（VERSION/TORCH_ABI/CUDA_VERSION/CUDA_ARCH_LIST/HAS_WORK_REGISTRY…）
-3. 设备列表     torch.cuda.is_available() 为假 → "devices: none visible"，返回 1
-   否则逐卡打印名字、sm_XX、显存；设备架构不在构建 arch 列表 → 标 "<-- NOT IN THIS BUILD"
-4. NVLink 矩阵  _C.nvlink_matrix(设备号列表)
-   返回 None（NVML 答不了）→ 打印 "无法报告拓扑"，但返回 0（不拒绝、不声称）
-   有缺失对 → 列出缺失对并返回 1；全连通 → "all N devices are mutually NVLink-joined"
-   只有一张卡 → "one visible device: no pair to check"
-```
+
+退出码：正常（全互连或单卡）为 0；扩展加载失败、无可见设备、存在非 NVLink 对为 1；NVML 无法回答拓扑时仍为 0（不拒绝、不背书——fail-open）。
 
 #### 4.4.3 源码精读
 
-命令行入口的注册在 [pyproject.toml:L20-L21](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/pyproject.toml#L20-L21)：`fast-ulysses = "fast_ulysses.cli:main"`。
+**docstring 里的定位声明**——必要条件而非替代：
 
-**阶段 1-2**，[python/fast_ulysses/cli.py:L38-L49](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L38-L49)：`_load()` 尝试导入包；成功则打印 `_C.__file__`（哪份 `.so`），然后逐行打印 `_build_meta` 的键值。注释里有个重要细节：以控制台脚本方式运行时，包导入失败会在 `main` 之前就被 `__init__.py` 的诊断路径抛出（4.1.3 已读），`_load` 捕获到的是「以文件方式直接运行 cli.py」这条路径。构建事实来自 `_build_meta.py`，由 [setup.py:L158-L167](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/setup.py#L158-L167) 在构建时写入——`HAS_WORK_REGISTRY` 就是 4.2 里从 configure 输出解析出的那个探针。
+> "This reports what can be established without a process group -- the build, the devices, the NVLink matrix -- so a green matrix is a necessary condition, not a substitute for the check UlyssesGroup's constructor makes over the actual group."
 
-**阶段 3**，[python/fast_ulysses/cli.py:L51-L70](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L51-L70)：CUDA 不可见直接返回 1；否则对每张卡取 `major``minor` 拼成 `sm_XX`，与构建时的 `cuda_arch_list` 比对——`built` 集合只取前导数字（[python/fast_ulysses/cli.py:L59-L64](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L59-L64) 的注释解释了为什么：`90a` 和 `120-real` 与 `90`、`120` 命名同一批 GPU，CMakeLists 用同样的规则归一）。不在集合里就标 ` <-- NOT IN THIS BUILD`——这正是你用 `FAST_ULYSSES_CUDA_ARCH=90` 只编一个架构后，在别的架构机器上会看到的标记。
+出处：[python/fast_ulysses/cli.py:L1-L13](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L1-L13)。
 
-**阶段 4**，[python/fast_ulysses/cli.py:L72-L103](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L72-L103)：调用 `_C.nvlink_matrix(...)` 拿到 `(i, j) → bool` 的矩阵（NVML 探测的实现在 `src/nvlink.cc`，u8-l1 精读）。三种结局：
-- `None`（NVML 无法报告拓扑）→ 打印说明并**返回 0**：既不拒绝也不声称，构造函数照样会建组（fail-open，[docs/install.md:L220-L222](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L220-L222)）；
-- 有缺失对 → 打印 `N` 的位置与示例缺失对，建议那些组用 `torch.distributed`，返回 1；
-- 单卡（`n < 2`，[python/fast_ulysses/cli.py:L97-L101](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L97-L101)）→ 「没有对可查，也没有超过 world_size 1 的东西可跑」，返回 0。
+**① 构建段**：扩展路径与 `_build_meta` 的逐项打印：
 
-矩阵的打印格式是 `row=from col=to` 的字符矩阵：对角线 `.`、连通 `y`、缺失 `N`。
+```python
+print(f"extension: {pkg._C.__file__}")
+from fast_ulysses._diagnose import build_meta
+for key, value in sorted(build_meta().items()):
+    print(f"  {key.lower()}: {value}")
+```
+
+出处：[cli.py:L38-L49](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L38-L49)。`build_meta` 读的正是 4.2.3 里 setup.py 生成的 `_build_meta.py`——即使 dlopen 失败它也在磁盘上。若扩展本身加载失败，这里打印 `extension: FAILED TO LOAD` 并返回 1。注意 `doctor` 依赖一次成功的加载（`fast-ulysses` 脚本先 import 包再进 main，而包的 `__init__` 在 `_C` 加载失败时会把 loader 错误转成诊断报告后 re-raise，[python/fast_ulysses/__init__.py:L3-L10](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/__init__.py#L3-L10)）。
+
+**② 设备段**：每张卡的架构与「是否在本次构建里」的标记：
+
+```python
+arch = f"{p.major}{p.minor}"
+mark = "" if arch in built else "  <-- NOT IN THIS BUILD"
+print(f"  [{i}] {p.name}  sm_{arch}  {p.total_memory >> 30} GiB{mark}")
+```
+
+出处：[cli.py:L57-L70](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L57-L70)。`built` 从扩展的 `build_info()` 读架构列表、只取前导数字（`90a` 与 `90` 视作同一张卡，[cli.py:L60-L64](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L60-L64)）。这个标记直接衔接 4.2 的实践：如果你用 `FAST_ULYSSES_CUDA_ARCH=90` 只编了 sm_90，机器上的 sm_89 卡会在这里被点出来。
+
+**③④ 矩阵段与三种结论**：
+
+出处：[cli.py:L72-L103](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L72-L103)。矩阵来自 `pkg._C.nvlink_matrix(list(range(n)))`；`None` 表示 NVML 答不了（打印「UlyssesGroup will build anyway; nothing here can say whether it should」并返回 0）；有缺失对时列出前 4 个并建议该处用 `torch.distributed`（返回 1）；单卡时专门打印「one visible device: no pair to check, and nothing above world_size 1 to run」；全互连则宣告「all N devices are mutually NVLink-joined」。NVLink 探测的实现细节在 u8-l1 展开，本讲只消费它的输出。
 
 #### 4.4.4 代码实践
 
-1. **实践目标**：运行 doctor 并把每段输出与上面的阶段对应起来。
+1. **实践目标**：用 `doctor` 判定当前机器，并把每段输出与上面 ①—④ 对上。
 2. **操作步骤**：
-   - `fast-ulysses doctor`；
-   - 若扩展加载失败：直接读抛出的报告（它已包含两侧信息），按 4.1 的修复路径处理后再来；
-   - 把输出粘贴出来，逐段标注「阶段 1/2/3/4」。
-3. **需要观察的现象**：`extension: /path/to/_C.so`；若干 `key: value` 的构建事实行；`devices: N` 加 N 行设备描述；一个字符矩阵和一句总结。
+   ```bash
+   fast-ulysses doctor
+   nvidia-smi topo -m          # 交叉验证 NVLink 矩阵（GPU 间应显示 NV# 而非 PIX/PHB/SYS）
+   echo $?                     # 看 doctor 的退出码
+   ```
+3. **需要观察的现象**：
+   - `extension:` 指向你 4.2 实践装出来的 `_C.so`；`cuda_arch_list` 是否只含你指定的架构；
+   - 每张卡的 `sm_XX` 是否带 `NOT IN THIS BUILD` 标记；
+   - 矩阵对角线为 `.`、其余为 `y` 或 `N`；与 `nvidia-smi topo -m` 一致；
+   - 退出码与结论四选一：全互连 / 有缺失对 / 单卡 / NVML 答不了。
 4. **预期结果**：
-   - 你按 4.2 用 `FAST_ULYSSES_CUDA_ARCH=90` 构建并在 H100 上运行 → `cuda_arch_list: 90`，设备行无 `NOT IN THIS BUILD` 标记；
-   - 同一份安装在 A100（sm_80）上跑 doctor → `[0] ... sm_80 ... <-- NOT IN THIS BUILD`；
-   - 多卡 NVLink 全互连机器 → `all N devices are mutually NVLink-joined`。`待本地验证`。
-5. **交叉验证**（有 GPU 时）：把 doctor 的矩阵与 `nvidia-smi topo -m` 对照，`NV#` 链路应对应 `y`，`PIX/PXB/PHY` 应对应 `N`。
+   - 单卡机器：打印「one visible device …」，退出码 0——能跑 `world_size=1`，没有更高可跑；
+   - 无 GPU 机器：`devices: none visible to CUDA`，退出码 1——只能做 host-only 测试（`pytest -m "not multigpu"`）；
+   - 多卡全 NVLink：`all N devices are mutually NVLink-joined`，退出码 0。
+5. 本讲写作环境无 GPU：以上为「待本地验证」。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：doctor 打印 `NVLink: NVML could not report the link topology` 却返回 0（退出码成功）。矛盾吗？
+**练习 1**：`doctor` 显示全绿矩阵，但 `UlyssesGroup()` 仍可能拒绝这个组。举一种情形。
 
-答案：不矛盾。探测不到 ≠ 不连通，检查的语义是 fail-open：答不了就不拒绝，把决定留给 `UlyssesGroup` 构造函数在真实进程组上的检查（或者你用 `require_nvlink=False` 显式接管）。返回 0 表示「doctor 没有发现障碍」，不是「确认可以跑」。
+**答案**：`doctor` 看的是「这台机器所有卡」两两之间的 NVLink；`UlyssesGroup` 检查的是「这个进程组实际选中的设备」集合（例如 `CUDA_VISIBLE_DEVICES` 或子组选出的子集落在不同拓实体上）。docstring 明说绿色矩阵是必要条件、不替代构造函数在实际组上的检查（[cli.py:L1-L13](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L1-L13)）。另一种情形：两个 rank 共享同一张卡时构造函数会走不同的检查路径（u2-l1 细讲）。
 
-**练习 2**：为什么阶段 3 的 `built` 集合要 `re.match(r"[0-9]+", a.strip())` 只取前导数字，而不是精确字符串比较？
+**练习 2**：`doctor` 打出 `NVML could not report the link topology` 却返回 0（绿色退出码）。这是 bug 吗？
 
-答案：arch 列表携带的是「当时请求了什么」，可能有 `90a`、`120-real` 这类带后缀的写法，它们与 `90`、`120` 指同一批 GPU；精确比较会把合法安装误标为 `NOT IN THIS BUILD`。CMake 侧用同样的正则做归一（注释见 [python/fast_ulysses/cli.py:L58-L60](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L58-L60)）。
+**答案**：不是。这是 fail-open 语义：探测无法回答时既不背书也不拒绝，`UlyssesGroup` 照常构造，判断权留给用户（[cli.py:L72-L76](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L72-L76)，另见 [docs/install.md:L219-L221](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L219-L221)）。返回 0 表示「没有可报告的坏消息」，不等于「确认可用」。
 
-**练习 3**：`fast-ulysses wheel-url` 在扩展坏掉时还能用吗？`doctor` 呢？
+**练习 3**：`doctor` 的设备段某张卡后面出现 `<-- NOT IN THIS BUILD`，运行时会怎样？怎么修？
 
-答案：都不能完整工作——两者都是 `fast-ulysses` 脚本的子命令，脚本先 import 包、包再 import `_C`（[python/fast_ulysses/__init__.py:L3-L10](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/__init__.py#L3-L10)），`_C` 坏则脚本以同一份诊断报告退出。但报告本身已把「编译时的 torch/CUDA」与「现装的」并列印出，修复它不需要这两个子命令（[docs/install.md:L110-L112](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md#L110-L112)）。
+**答案**：扩展里没有该架构的设备码，在这张卡上触发算子时会失败。修复就是重装：源码构建时把该卡的架构加进 `FAST_ULYSSES_CUDA_ARCH`（或直接用默认的 `80;90;100;120`；wheel 则本来按平台发布）。标记的判定逻辑在 [cli.py:L66-L70](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L66-L70)。
 
 ## 5. 综合实践
 
-**任务：从零走完「构建 → 运行 → 自检」全链路，并留下一份环境记录。**
+**任务：从零到第一次成功运行的全链路记录。** 在一台你能拿到的机器上（单卡即可），完成下面 6 步，并把每步的**实际输出**记进一个 `setup-log.md`（放在你自己的目录，不要写进仓库）：
 
-1. **环境确认**：记录 `python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"`、GPU 型号与架构、`nvcc --version`。
-2. **构建**：`FAST_ULYSSES_CUDA_ARCH=<本机架构> pip install -e . --no-build-isolation`。构建中记录两件事：configure 输出里的 arch 行与 `c10d::register_work available:` 状态行（后者写进了 `_build_meta.py` 的 `HAS_WORK_REGISTRY`）。
-3. **自检**：`fast-ulysses doctor`，按 4.4 的四阶段标注输出；确认设备行没有 `NOT IN THIS BUILD`。
-4. **运行 quickstart**：把 README quick start 存为 `example.py`，`torchrun --nproc_per_node=<N> example.py`。多卡用户加打一行往返误差（见 4.3.4）；单卡用户填写 4.3.4 的「单卡记录表」——重点确认：构造成功、mode 0/1 形状往返正确、`ws==1` 时屏障被跳过这一事实与 [src/barrier.cu:L56-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L56-L57) 的代码一致（外部表现：运行正常结束、没有跨卡通信）。
-5. **运行示例**：`torchrun --nproc_per_node=<N> examples/dit_attention.py`，抄下 rank 0 的全部输出，对照 [examples/dit_attention.py:L110-L129](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L110-L129) 给每行写一句「它证明了什么」。
-6. **（无 GPU 环境）替代路径**：完成 4.1.4 与 `pytest -m "not multigpu"`（host-only 布局测试，[README.md:L157-L159](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/README.md#L157-L159)），并把 4.2/4.3/4.4 的运行步骤改写成「纸面推演 + 预期输出」。
+1. **环境定位**：`python -c "import sys,torch; print(torch.__version__, torch.version.cuda, sys.version_info[:2])"`，在行表里查出你的行标签。
+2. **选择安装路径**并执行其一：
+   - wheel：`pip install fast-ulysses --index-url https://triple-mu.github.io/fast-ulysses/whl/cu13/`（或 `cu12`）；
+   - 源码：先 `python -c "import torch; p=torch.cuda.get_device_properties(0); print(f'{p.major}{p.minor}')"`，再 `FAST_ULYSSES_CUDA_ARCH=<该值> pip install -e . --no-build-isolation`。
+3. **自检**：`fast-ulysses doctor`，逐段抄录输出，标注 ①—④ 各对应哪几行，写明退出码。
+4. **首跑**：把 README quickstart 存成 `example.py`，`torchrun --nproc_per_node=<卡数> example.py`，确认正常退出。
+5. **示例**：`torchrun --nproc_per_node=<卡数> examples/dit_attention.py`，抄录输出/梯度比对与 loss 行。
+6. **对照实验（单卡者必做，多卡者选做）**：把 `--nproc_per_node` 改成 1 再跑一遍第 4、5 步，在日志里写三行结论：(a) 脚本是否照常成功；(b) 依据 [src/barrier.cu:L56-L57](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu#L56-L57) 说明屏障发生了什么；(c) 往返 `torch.equal(x, z)` 是否成立。
 
-所有运行步骤本讲均未代跑，`待本地验证`。
+完成标准：日志里 ①—④ 每段都有真实输出对应；第 6 步的三个结论各有一句源码依据或实测证据。零 GPU 机器的替代版：完成第 1、2（源码路径需要 nvcc，不可用时改为纸面推演并注明）、3（记录 `devices: none visible to CUDA`），并跑 `pytest -m "not multigpu"` 作为本讲的收尾验证。
 
 ## 6. 本讲小结
 
-- wheel 的选择由 **torch minor × CUDA 大版本** 决定（`.so` 嵌入 `c10d::Work` vtable、pybind11 模块与 `TORCH_LIBRARY` 注册，活不过 minor 升级；只链接 `libcudart.so.<major>`）；专用索引靠「无 torch 可装」迫使 pip 回溯解析出正确的行。
-- PEP 440 对本地版本的排序让不带标签的说明符**静默**选中最高的 `+torch213cu130`：`--find-links` 场景必须写全标签，PyPI 单独对待。
-- 源码构建的两条铁律：`--no-build-isolation`（CMake 与 pin 推导都要用你环境里的那份 torch，构建依赖里反而不能声明 torch）；`FAST_ULYSSES_CUDA_ARCH` 只编本机架构（默认四架构，jobs 按内存每并发 pass 3 GiB 预算推导）。
-- `torchrun` 起的每个 rank 是同一份 SPMD 代码：绑 `LOCAL_RANK`、同种子构造、集合调用序列一致、init/destroy 成对；`world_size=1` 是受支持的合法配置，屏障在该点被显式跳过。
-- `examples/dit_attention.py` 用「与单卡参照对拍输出+梯度（容差 5e-2）+ 5 个优化器步」同时证明正确性与可训练性。
-- `doctor` 输出构建事实、设备/架构匹配、NVLink 矩阵三段，绿矩阵是必要条件；NVML 答不了时 fail-open。
+- wheel 按「torch minor × CUDA major」两个轴发布（8 行 × 4 CPython + PyPI 单行）；扩展嵌入 `c10d::Work` 虚表、pybind11 模块与 `TORCH_LIBRARY` 注册，torch minor 一变就废，CUDA major 一变就找不到 `libcudart`。
+- 选 wheel 首选 `--index-url` 总索引（只含本包，靠依赖回退解析出你的 torch minor）；裸 PyPI 安装与不带标签的 `--find-links` 都会**静默**把 torch 换成 2.13——PEP 440 给本地标签排序是根源，`fast-ulysses wheel-url` 帮你把版本写全。
+- 源码构建的两个要点：`--no-build-isolation` 是硬性要求（构建必须 import 并链接你环境里的那份 torch，把它声明成 build requirement 反而会链接错）；`FAST_ULYSSES_CUDA_ARCH` 单架构构建既少编又提高并行度（作业数按「3 GiB × 并发 pass」的内存预算推导）。
+- `torchrun --nproc_per_node=N` 跑 quickstart 与 `examples/dit_attention.py`；`world_size=1` 是合法一等公民，屏障在 `ws==1` 时被整体跳过，单卡机器也能做本手册大部分观察实验。
+- `fast-ulysses doctor` 输出四段（扩展/构建事实/设备/NVLink 矩阵），绿色矩阵是必要条件而非替代；NVML 答不出时 fail-open，有缺失对时建议改用 `torch.distributed`。
+- 集合调用的纪律从第一次运行就生效：所有 rank 必须发出相同形状序列，违反的后果是挂起而非报错。
 
 ## 7. 下一步学习建议
 
-- **u1-l4（仓库结构与阅读地图）**：本讲你已经按过不少门铃（setup.py、cli.py、__init__.py），下一讲把整个仓库的目录职责与「一次调用的调用链骨架」系统化，为进入 C++ 源码做准备。
-- 精读 [docs/develop.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/develop.md)：开发工具链与测试布局——你刚用过的 `pytest -m "not multigpu"` 的完整语境在那里。
-- 若你走的是 wheel 路线且想彻底吃透匹配算法，提前读 [python/fast_ulysses/cli.py:L130-L184](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/cli.py#L130-L184) 的 `_match`（正式讲解在 u8-l3）。
-- 运行成功后，带着「这两次 all_to_all 之间为什么不会数据竞争」的问题进入 u2/u5：屏障（本讲瞥见的 [src/barrier.cu](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/barrier.cu)）是答案的一半。
+- **下一讲（u1-l4）**：仓库结构与阅读地图——`docs/develop.md` 的目录导航、`a2a_plan.cc` 为什么刻意写成无 CUDA/无 torch，以及从 `python/fast_ulysses/group.py` 到 `src/transfer.cu` 的完整调用链骨架。装好环境的你现在有条件边读边跑了。
+- **本单元收尾（u2-l1 起）**：进入 Python API——`UlyssesGroup` 构造参数、NVLink 检查的失败开放语义、子组支持；本讲 4.4 的 `doctor` 输出会在那里从「消费者视角」翻到「实现视角」（`src/nvlink.cc`，u8-l1）。
+- **延伸阅读**：[docs/install.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/install.md) 的「When the import fails」与「Other problems」两节（NCCL NVLS 报错、CMake 缓存路径冲突），以及 [docs/quickstart.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/quickstart.md) 的「What will hang you」——排障时先翻这两处。

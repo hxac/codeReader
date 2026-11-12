@@ -1,0 +1,1405 @@
+{
+  "head": "896a734f5152f6092a1ae2c2bccb8195a70abc42",
+  "project": "open-instruct",
+  "rationale": "open-instruct 是 Allen AI 的大模型后训练研究代码库，核心价值链是「SFT → DPO/偏好优化 → RLVR 强化学习」，并在此之上生长出 OLMo-core 高效训练路线与 MILES 新一代 RL 系统两套子系统。大纲按认知梯度分九个单元：单元 1 让读者跑起来并建立目录与入口心智模型；单元 2-3 精读 SFT 主链路与数据工程，这是所有后续算法的共同地基；单元 4-6 依次覆盖偏好优化 DPO、奖励建模与合成数据、RLVR/GRPO 核心，对应 Tülu 3 的后训练配方；单元 7-8 进入当前主力工作的 OLMo-core SFT 路线与 MILES RL 系统（先进架构、配置、执行、奖励、运维）；单元 9 收束工程化技能（mason/Beaker 启动、configs 体系、测试贡献流程、去污染与 Tülu 3 复现串讲）。讲义遵循「一篇只讲一个问题、引用真实源码与行号、配一个可动手实践任务」，单元内递进、跨单元显式依赖，可按序通读也可按子系统跳读。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "order": 1,
+      "title": "从零认识 open-instruct",
+      "lectures": [
+        {
+          "id": "u1-l1",
+          "title": "open-instruct 是什么：开放后训练与 Tülu/OLMo 全景",
+          "order": 1,
+          "filename": "u1-l1-project-overview.md",
+          "level": "beginner",
+          "topic": "介绍 open-instruct 的定位：一个开放的大模型后训练代码库，覆盖 SFT、DPO、RLVR 全链路，产出 Tülu 与 OLMo 系列模型。",
+          "learning_goals": [
+            "说出 open-instruct 的定位及其与 Tülu 1/2/3、OLMo 3 的关系",
+            "识别 SFT、DPO、RLVR 三大阶段各自的训练入口文件",
+            "理解仓库的研究性质与向后兼容策略"
+          ],
+          "source_files": [
+            "README.md",
+            "docs/index.md"
+          ],
+          "minimal_modules": [
+            "README 项目介绍",
+            "模型发布表格",
+            "仓库结构图"
+          ],
+          "practice_task": "阅读 README 与 docs/index.md，绘制『基座模型 → SFT → DPO → RLVR → 最终模型』流程图，并在每个阶段标注对应入口文件（finetune.py / dpo.py / grpo.py / grpo_fast.py / python -m open_instruct.miles）。",
+          "depends_on": [],
+          "action": "new"
+        },
+        {
+          "id": "u1-l2",
+          "title": "环境搭建：uv、Docker 与开发工具链",
+          "order": 2,
+          "filename": "u1-l2-installation-and-toolchain.md",
+          "level": "beginner",
+          "topic": "讲解如何安装 open-instruct：uv sync、Docker 镜像、Python/CUDA 版本约束，以及 ruff/pytest/mkdocs 等日常开发命令。",
+          "learning_goals": [
+            "用 uv 完成本地开发环境安装",
+            "理解 cuda12/cuda13 依赖组与平台差异",
+            "掌握 make style、make quality 与 pytest 的用法"
+          ],
+          "source_files": [
+            "docs/get_started/installation.md",
+            "pyproject.toml",
+            "Dockerfile",
+            "Makefile"
+          ],
+          "minimal_modules": [
+            "pyproject 依赖与 uv 分组",
+            "Makefile 风格检查目标",
+            "Dockerfile 构建入口"
+          ],
+          "practice_task": "执行 `uv sync` 完成安装，运行 `uv run pytest open_instruct/test_math_utils.py`，记录用例结果，再用 `make style && make quality` 验证代码风格工具链可用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l3",
+          "title": "仓库目录结构导览",
+          "order": 3,
+          "filename": "u1-l3-repo-layout.md",
+          "level": "beginner",
+          "topic": "带读者走一遍仓库目录：open_instruct 源码、scripts 训练/数据/评测脚本、configs 配置、docs 文档与 tests 测试的组织方式。",
+          "learning_goals": [
+            "说出每个顶层目录的职责",
+            "定位训练、评测、数据、配置四类脚本的位置",
+            "会用 mkdocs 文档站检索学习材料"
+          ],
+          "source_files": [
+            "README.md",
+            "scripts/README.md",
+            "mkdocs.yml"
+          ],
+          "minimal_modules": [
+            "仓库目录结构",
+            "docs 文档地图",
+            "scripts 三大子目录"
+          ],
+          "practice_task": "对照 README 的 Repo structure 与实际目录，写一份导览笔记：为 open_instruct/、scripts/train、scripts/data、scripts/eval、configs、docs、tests 各列出 2-3 个代表文件并说明作用。",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u1-l4",
+          "title": "跑通第一个训练：debug 冒烟脚本与镜像启动",
+          "order": 4,
+          "filename": "u1-l4-first-debug-run.md",
+          "level": "beginner",
+          "topic": "通过 scripts/train/debug 冒烟脚本与 build_image_and_launch.sh，理解一次训练任务从构建镜像到提交 Beaker 运行的完整路径。",
+          "learning_goals": [
+            "读懂 build_image_and_launch.sh 的构建与提交流程",
+            "理解 debug 冒烟脚本与正式训练脚本的关系",
+            "能改小参数跑通一次 SFT"
+          ],
+          "source_files": [
+            "scripts/train/build_image_and_launch.sh",
+            "scripts/train/debug/finetune.sh",
+            "scripts/train/debug/sft_integration_test.sh",
+            "CLAUDE.md"
+          ],
+          "minimal_modules": [
+            "镜像构建脚本",
+            "debug 冒烟脚本",
+            "GPU 测试约定"
+          ],
+          "practice_task": "阅读 scripts/train/debug/finetune.sh 与 sft_integration_test.sh，把模型换成一个 0.5-1B 的小模型、调小 max_seq_length 与训练步数，在单卡或 Beaker 上跑通一次冒烟测试并记录日志中的 loss 曲线。",
+          "depends_on": [
+            "u1-l2",
+            "u1-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "order": 2,
+      "title": "SFT 主链路精读",
+      "lectures": [
+        {
+          "id": "u2-l1",
+          "title": "finetune.py：SFT 入口与参数全景",
+          "order": 1,
+          "filename": "u2-l1-finetune-entry.md",
+          "level": "beginner",
+          "topic": "精读 SFT 主入口 finetune.py：命令行参数体系、模型与 tokenizer 加载、Trainer 的组装与训练启动。",
+          "learning_goals": [
+            "理解 finetune.py 的 main 流程与参数分组",
+            "掌握 dataset_mixer_list、max_seq_length 等关键参数",
+            "能把参数映射到 Tülu 3 SFT 复现命令"
+          ],
+          "source_files": [
+            "open_instruct/finetune.py",
+            "docs/algorithms/sft_running_guide.md",
+            "docs/algorithms/finetune.md"
+          ],
+          "minimal_modules": [
+            "finetune 参数定义",
+            "模型与 tokenizer 加载",
+            "Trainer 组装与启动"
+          ],
+          "practice_task": "通读 finetune.py 的 argparse 定义，整理一份不少于 20 个关键参数的表格（名称、默认值、作用），并与 docs/tulu3.md 中的 SFT 复现命令逐项对应。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l2",
+          "title": "数据加载与多数据集混合",
+          "order": 2,
+          "filename": "u2-l2-data-loading-mixtures.md",
+          "level": "beginner",
+          "topic": "讲解 data_loader.py 如何按 dataset_mixer_list 拉取、混合并缓存多个 HuggingFace 数据集，形成训练用数据源。",
+          "learning_goals": [
+            "理解数据集混合比例（mixer）的语义",
+            "掌握数据缓存目录与多机预缓存的机制",
+            "会用测试验证加载逻辑"
+          ],
+          "source_files": [
+            "open_instruct/data_loader.py",
+            "open_instruct/test_data_loader.py",
+            "open_instruct/test_hf_data_loader.py"
+          ],
+          "minimal_modules": [
+            "数据集混合配置",
+            "HF 数据集加载与缓存",
+            "DataPreparationActor"
+          ],
+          "practice_task": "写一个脚本用两个小数据集（如 allenai/tulu-3-sft-mixture 的子集）组成 dataset_mixer_list，运行加载流程并打印每个子集的实际样本数与混合后总数。",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l3",
+          "title": "从对话到张量：DatasetProcessor、chat template 与 loss 掩码",
+          "order": 3,
+          "filename": "u2-l3-dataset-processor-masking.md",
+          "level": "beginner",
+          "topic": "讲解 dataset_processor.py 与 tokenizer_utils.py：如何把 messages 格式对话经 chat template 变成 input_ids，并对非训练部分做 label 掩码。",
+          "learning_goals": [
+            "理解 messages 统一数据格式",
+            "掌握 SFTDatasetProcessor 的 tokenization 与掩码流程",
+            "理解多轮对话中 prompt/completion 的边界处理"
+          ],
+          "source_files": [
+            "open_instruct/dataset_processor.py",
+            "open_instruct/tokenizer_utils.py",
+            "open_instruct/test_dataset_processor.py",
+            "open_instruct/test_tokenizer_utils.py"
+          ],
+          "minimal_modules": [
+            "SFTDatasetProcessor",
+            "chat template 渲染",
+            "label 掩码生成"
+          ],
+          "practice_task": "构造一条两轮对话样本，手动调用 SFTDatasetProcessor 完成编码，打印 input_ids 与 labels 对齐结果，验证只有 assistant 部分的 label 不为 -100。",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l4",
+          "title": "批次构建：collator、变长序列与 padding-free",
+          "order": 4,
+          "filename": "u2-l4-collator-padding-free.md",
+          "level": "intermediate",
+          "topic": "讲解批次级数据处理：padding collator 与 padding_free_collator.py 的序列打包机制，以及 position_ids 重置的原理。",
+          "learning_goals": [
+            "理解动态 padding 与 attention mask 的关系",
+            "掌握 padding-free/序列打包如何节省显存",
+            "能对比两种 collator 的张量形状"
+          ],
+          "source_files": [
+            "open_instruct/padding_free_collator.py",
+            "open_instruct/test_padding_free_collator.py",
+            "open_instruct/finetune.py"
+          ],
+          "minimal_modules": [
+            "padding collator",
+            "padding-free 打包",
+            "position_ids 重置"
+          ],
+          "practice_task": "用 4 条不同长度的样本分别走 padding 与 padding-free 两条 collator 路径，打印两種批次的形状与 attention mask，估算省下的 padding token 数。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l5",
+          "title": "训练循环之外：checkpoint、指标与工具函数",
+          "order": 5,
+          "filename": "u2-l5-trainer-checkpointing.md",
+          "level": "intermediate",
+          "topic": "梳理 finetune.py 训练主循环外围：model_utils.py 的模型/保存工具与 utils.py 的通用工具（日志、参数解析、指标记录）。",
+          "learning_goals": [
+            "理解 checkpoint 保存、加载与多机一致性",
+            "掌握 logger_utils 的统一日志约定",
+            "了解 wandb/tensorboard 跟踪接入方式"
+          ],
+          "source_files": [
+            "open_instruct/finetune.py",
+            "open_instruct/model_utils.py",
+            "open_instruct/utils.py",
+            "open_instruct/logger_utils.py"
+          ],
+          "minimal_modules": [
+            "模型工具函数",
+            "checkpoint 保存",
+            "日志与指标记录"
+          ],
+          "practice_task": "在小模型上跑通一次带 checkpointing_steps 的短训练，然后写代码从保存的 checkpoint 恢复并继续训练 2 步，验证 loss 与中断前衔接。",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u2-l6",
+          "title": "LoRA / QLoRA 参数高效微调与权重合并",
+          "order": 6,
+          "filename": "u2-l6-lora-qlora.md",
+          "level": "intermediate",
+          "topic": "讲解参数高效微调路径：finetune.py 中的 LoRA/QLoRA 选项、peft 集成，以及 merge_lora.py 如何把 LoRA 权重合并回基座模型。",
+          "learning_goals": [
+            "理解 LoRA/QLoRA 的配置方式",
+            "掌握合并权重的流程与验证方法",
+            "能对比全量微调与 LoRA 的资源开销"
+          ],
+          "source_files": [
+            "open_instruct/finetune.py",
+            "open_instruct/model_utils.py",
+            "open_instruct/merge_lora.py",
+            "scripts/finetune_lora_with_accelerate.sh"
+          ],
+          "minimal_modules": [
+            "LoRA 配置",
+            "peft 集成",
+            "权重合并脚本"
+          ],
+          "practice_task": "用 LoRA 配置跑一次小模型微调，再用 merge_lora.py 合并权重，用 transformers 加载合并后模型生成一句话，对比合并前后输出是否一致。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "order": 3,
+      "title": "训练数据工程",
+      "lectures": [
+        {
+          "id": "u3-l1",
+          "title": "统一数据格式：messages、data_types 与数据校验",
+          "order": 1,
+          "filename": "u3-l1-unified-data-format.md",
+          "level": "intermediate",
+          "topic": "讲解仓库的统一消息格式与承载它的数据类型（data_types.py），以及自定义数据如何转换成可被训练脚本消费的格式。",
+          "learning_goals": [
+            "掌握 messages 数据规范与角色约定",
+            "理解 data_types.py 中工具调用/统计相关的数据结构",
+            "能把原始 jsonl 转成合法训练数据"
+          ],
+          "source_files": [
+            "open_instruct/data_types.py",
+            "open_instruct/data_loader.py",
+            "open_instruct/test_data_loader.py"
+          ],
+          "minimal_modules": [
+            "messages 格式",
+            "data_types 数据结构",
+            "数据加载校验"
+          ],
+          "practice_task": "把 10 条自定义问答 jsonl 转成 messages 格式，走一遍 data_loader 的加载路径，构造非法样本（缺 role、多余字段）观察校验行为。",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l2",
+          "title": "数据统计、变换与 numpy 缓存",
+          "order": 2,
+          "filename": "u3-l2-dataset-statistics-numpy-cache.md",
+          "level": "intermediate",
+          "topic": "讲解 dataset_statistics.py、dataset_transformation.py 与 numpy_dataset_conversion.py：统计 token 分布、变换数据集，以及用 numpy 预编码缓存加速启动。",
+          "learning_goals": [
+            "会统计并解读 token 长度分布",
+            "掌握数据集变换脚本的用法",
+            "理解 numpy 缓存的生成与复用条件"
+          ],
+          "source_files": [
+            "open_instruct/dataset_statistics.py",
+            "open_instruct/numpy_dataset_conversion.py",
+            "open_instruct/dataset_transformation.py",
+            "scripts/data/get_statistics.py",
+            "open_instruct/test_dataset_statistics.py"
+          ],
+          "minimal_modules": [
+            "token 统计",
+            "数据集变换",
+            "numpy 预编码缓存"
+          ],
+          "practice_task": "对一个小型 SFT 数据集运行 token 统计，画出长度分布；然后用 numpy 转换流程生成缓存目录，对比直接加载与缓存加载的启动耗时。",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u3-l3",
+          "title": "数据制备脚本实战：scripts/data",
+          "order": 3,
+          "filename": "u3-l3-data-preparation-scripts.md",
+          "level": "intermediate",
+          "topic": "以 gsm8k、gpqa 等真实制备脚本为例，讲解如何把公开数据集处理成带 ground truth 的可验证训练数据。",
+          "learning_goals": [
+            "读懂 scripts/data 下制备脚本的通用结构",
+            "掌握为 RLVR 数据附加 ground_truth 字段的方法",
+            "能独立编写一个新数据集的制备脚本"
+          ],
+          "source_files": [
+            "scripts/data/gsm8k.py",
+            "scripts/data/create_gpqa_data.py",
+            "scripts/data/create_test_env_datasets.py",
+            "scripts/data/finetune_dataset_transformation.py"
+          ],
+          "minimal_modules": [
+            "GSM8K 制备",
+            "GPQA 制备",
+            "通用变换脚本"
+          ],
+          "practice_task": "模仿 gsm8k.py 为一个新的选择题数据集（自选）写一个制备脚本，输出包含 messages 与 ground_truth 字段的 HF 数据集并用 data_loader 加载验证。",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "order": 4,
+      "title": "偏好优化与 DPO",
+      "lectures": [
+        {
+          "id": "u4-l1",
+          "title": "dpo.py：DPO 主流程与 OLMo-core 路线",
+          "order": 1,
+          "filename": "u4-l1-dpo-entry.md",
+          "level": "intermediate",
+          "topic": "精读 dpo.py 的 main 流程：数据加载、参考模型 logprob 缓存、DPOTrainModule 组装与 Trainer 训练，并区分 dpo_tune_cache.py 旧版 DeepSpeed 路线。",
+          "learning_goals": [
+            "理解 DPO 训练的完整调用链",
+            "掌握参考模型 logprob 缓存机制（cache_logprobs_only）",
+            "了解新旧两条 DPO 路线的适用场景"
+          ],
+          "source_files": [
+            "open_instruct/dpo.py",
+            "open_instruct/dpo_tune_cache.py",
+            "docs/algorithms/dpo.md"
+          ],
+          "minimal_modules": [
+            "dpo.py main 流程",
+            "参考 logprob 缓存",
+            "dpo_tune_cache 旧路线"
+          ],
+          "practice_task": "对照 dpo.py 的 main 画出流程图，标注参考模型 logprob 缓存的生成与消费位置；再运行 scripts/train/debug/dpo/local.sh（或阅读脚本写出本地可跑的最小命令）。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l2",
+          "title": "DPO 家族损失函数：dpo_loss / simpo / wpo",
+          "order": 2,
+          "filename": "u4-l2-dpo-loss-family.md",
+          "level": "intermediate",
+          "topic": "精读 dpo_utils.py：dpo_loss、simpo_loss、wpo_loss 的数学形式与实现，compute_loss 如何从缓存取参考 logprob，以及 DPO 专用 collator。",
+          "learning_goals": [
+            "推导 DPO 损失与 beta、label smoothing 的作用",
+            "比较 simpo（无参考模型）与 wpo 的差异",
+            "理解 concatenated/separate 两种 forward"
+          ],
+          "source_files": [
+            "open_instruct/dpo_utils.py",
+            "open_instruct/test_dpo_forward.py",
+            "open_instruct/test_dpo_utils.py"
+          ],
+          "minimal_modules": [
+            "dpo_loss",
+            "simpo_loss 与 wpo_loss",
+            "compute_loss 分发",
+            "DataCollatorForSeq2SeqDPO"
+          ],
+          "practice_task": "运行 test_dpo_forward.py 与 test_dpo_utils.py，然后手写一段代码：固定一组 chosen/rejected logprob，画出 beta 从 0.1 到 1.0 时 dpo_loss 的变化曲线并解释。",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l3",
+          "title": "偏好数据格式与加载",
+          "order": 3,
+          "filename": "u4-l3-preference-data-loading.md",
+          "level": "intermediate",
+          "topic": "讲解偏好数据的组织方式：chosen/rejected 格式、docs/data/preference-data.md 的数据规范，以及偏好数据在 data_loader 中的加载路径。",
+          "learning_goals": [
+            "掌握偏好数据集的字段规范",
+            "理解 chosen/rejected 的 tokenization 与配对方式",
+            "能构造并验证一个偏好数据集"
+          ],
+          "source_files": [
+            "open_instruct/data_loader.py",
+            "docs/data/preference-data.md",
+            "open_instruct/test_data_loader.py"
+          ],
+          "minimal_modules": [
+            "偏好数据字段规范",
+            "chosen/rejected 编码",
+            "加载与校验"
+          ],
+          "practice_task": "手工构造一个包含 8 个样本的偏好数据集（同一 prompt 两个回答），按 preference-data.md 规范处理成 HF 数据集，走 DPO 数据加载路径并检查 batch 形状。",
+          "depends_on": [
+            "u3-l1",
+            "u4-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u4-l4",
+          "title": "Online DPO 概览",
+          "order": 4,
+          "filename": "u4-l4-online-dpo.md",
+          "level": "intermediate",
+          "topic": "阅读 docs/algorithms/online_dpo.md，理解在线 DPO 与离线 DPO 的差异、采样-判优-更新的循环及其与 mason 启动的结合方式（入口脚本位置待确认）。",
+          "learning_goals": [
+            "区分在线与离线偏好优化的数据来源",
+            "理解在线 DPO 的训练循环组成",
+            "知道何时选择 online DPO"
+          ],
+          "source_files": [
+            "docs/algorithms/online_dpo.md",
+            "open_instruct/dpo.py"
+          ],
+          "minimal_modules": [
+            "online DPO 文档",
+            "与离线 DPO 的对比"
+          ],
+          "practice_task": "通读 online_dpo.md，写一份与离线 DPO 的对比表（数据来源、参考模型、采样策略、启动方式），并列出复现所需的最小命令组合。",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "order": 5,
+      "title": "奖励模型与合成数据",
+      "lectures": [
+        {
+          "id": "u5-l1",
+          "title": "reward_modeling.py：奖励模型训练",
+          "order": 1,
+          "filename": "u5-l1-reward-modeling.md",
+          "level": "intermediate",
+          "topic": "精读 reward_modeling.py：用 AutoModelForSequenceClassification 构建打分头、Bradley-Terry 偏好损失、SimplePreferenceCollator 与自定义训练循环。",
+          "learning_goals": [
+            "理解奖励模型的输出头与初始化策略",
+            "掌握 Bradley-Terry 损失与 chosen-rejected 分数差",
+            "会解读 margin/accuracy 训练指标"
+          ],
+          "source_files": [
+            "open_instruct/reward_modeling.py",
+            "docs/algorithms/reward_modeling.md",
+            "scripts/train/debug/reward_modeling.sh"
+          ],
+          "minimal_modules": [
+            "模型构建与打分头",
+            "偏好损失",
+            "自定义训练循环"
+          ],
+          "practice_task": "运行（或本地缩小运行）scripts/train/debug/reward_modeling.sh，从 wandb/日志中摘出 reward margin 与 accuracy 曲线，解释它们随训练的变化含义。",
+          "depends_on": [
+            "u2-l5",
+            "u4-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l2",
+          "title": "奖励模型评估与打分实践",
+          "order": 2,
+          "filename": "u5-l2-reward-model-eval.md",
+          "level": "intermediate",
+          "topic": "讲解 reward_modeling_eval.py：如何在偏好验证集上计算准确率、margin，并可视化模型对文本的打分行为。",
+          "learning_goals": [
+            "掌握奖励模型的评估指标",
+            "理解 find_shared_text 等可解释性辅助",
+            "能用 RM 给成对样本打分并验证排序"
+          ],
+          "source_files": [
+            "open_instruct/reward_modeling_eval.py",
+            "open_instruct/reward_modeling.py"
+          ],
+          "minimal_modules": [
+            "evaluate 流程",
+            "指标计算",
+            "打分可视化"
+          ],
+          "practice_task": "加载一个小奖励模型（如 allenai/Llama-3.1-Tulu-3-8B-RM），对 5 对自拟偏好样本打分，验证 chosen 分数是否高于 rejected，并分析一个反例。",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l3",
+          "title": "拒绝采样：用 RM 从采样中筛好数据",
+          "order": 3,
+          "filename": "u5-l3-rejection-sampling.md",
+          "level": "intermediate",
+          "topic": "精读 rejection_sampling 包：generation.py 用 vLLM 对每个 prompt 采 n 个回答，rejection_sampling.py 用 RM 打分并产出 best/worst 偏好对或 SFT 数据。",
+          "learning_goals": [
+            "理解三阶段拒绝采样流水线",
+            "掌握多 RM 投票（majority_vote）机制",
+            "会用产出的 best/worst 构造偏好数据"
+          ],
+          "source_files": [
+            "open_instruct/rejection_sampling/generation.py",
+            "open_instruct/rejection_sampling/rejection_sampling.py",
+            "docs/algorithms/rejection_sampling.md"
+          ],
+          "minimal_modules": [
+            "vLLM 批量采样",
+            "RM 打分与分片",
+            "best/worst 数据产出"
+          ],
+          "practice_task": "用一个小模型对 20 个 prompt 各采样 4 个回答，接一个 RM 打分，产出 best/worst 两个数据集，统计每个 prompt 内分数的极差分布。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u5-l4",
+          "title": "合成偏好数据：LLM 裁判与 pairwise 构造",
+          "order": 4,
+          "filename": "u5-l4-synthetic-preference-data.md",
+          "level": "intermediate",
+          "topic": "讲解 synthetic_preference_dataset.py：对采样结果做两两组合，用异步 LLM 裁判（打乱顺序防位置偏差）产出偏好标签。",
+          "learning_goals": [
+            "理解 pairwise 组合与裁判流程",
+            "掌握防位置偏差的顺序打乱策略",
+            "能产出带裁判标签的偏好数据集"
+          ],
+          "source_files": [
+            "open_instruct/rejection_sampling/synthetic_preference_dataset.py",
+            "docs/algorithms/synthetic_preference_dataset.md"
+          ],
+          "minimal_modules": [
+            "pairwise 组合",
+            "异步 LLM 裁判",
+            "偏好标签产出"
+          ],
+          "practice_task": "对一个prompt 的 3 个回答构造全部 pairwise 组合，写一个 LiteLLM 裁判调用（或 mock 打分函数）产出偏好标签，验证打乱顺序后标签的一致率。",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "order": 6,
+      "title": "RLVR 与 GRPO 核心",
+      "lectures": [
+        {
+          "id": "u6-l1",
+          "title": "grpo.py：GRPO 训练主流程",
+          "order": 1,
+          "filename": "u6-l1-grpo-entry.md",
+          "level": "intermediate",
+          "topic": "精读 grpo.py：Ray 初始化、数据与工具环境准备、RewardConfig 构建、ActorManager 与 OLMoCoreModelGroup 的编排、初始权重同步与训练循环。",
+          "learning_goals": [
+            "理解 GRPO 训练的整体编排",
+            "掌握 vLLM 推理引擎与训练 actor 的关系",
+            "能对照 grpo.py main 画出组件图"
+          ],
+          "source_files": [
+            "open_instruct/grpo.py",
+            "docs/algorithms/grpo.md",
+            "open_instruct/actor_manager.py"
+          ],
+          "minimal_modules": [
+            "main 编排流程",
+            "RewardConfig 构建",
+            "ActorManager 与模型组"
+          ],
+          "practice_task": "对照 grpo.py 的 main（约 L103 起）绘制组件图：数据队列、vLLM 引擎、训练进程、权重同步各为一个方框，标注它们之间传递的数据类型。",
+          "depends_on": [
+            "u2-l5",
+            "u5-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l2",
+          "title": "GRPO 损失与优势计算：grpo_utils 与 rl_utils",
+          "order": 2,
+          "filename": "u6-l2-grpo-loss-advantages.md",
+          "level": "intermediate",
+          "topic": "精读核心数学：compute_grpo_loss 的 DAPO 裁剪与 CISPO 变体、rho 修正、组内标准化优势（compute_group_advantages）与序列打包。",
+          "learning_goals": [
+            "推导 GRPO 的组相对优势",
+            "理解 DAPO 上下裁剪与 CISPO 的差异",
+            "掌握 pack_sequences 与 masked_mean 的实现"
+          ],
+          "source_files": [
+            "open_instruct/grpo_utils.py",
+            "open_instruct/rl_utils.py",
+            "open_instruct/test_rl_utils.py",
+            "open_instruct/test_grpo_utils.py"
+          ],
+          "minimal_modules": [
+            "compute_grpo_loss",
+            "优势计算与 rho 修正",
+            "序列打包与 masked_mean"
+          ],
+          "practice_task": "运行 test_rl_utils.py 与 test_grpo_utils.py，然后构造一个 4 样本小组的优势计算样例（手工算出期望值），调用组标准化逻辑验证结果一致。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l3",
+          "title": "可验证奖励：verifier 注册表与数学判分",
+          "order": 3,
+          "filename": "u6-l3-verifiable-rewards.md",
+          "level": "intermediate",
+          "topic": "精读 ground_truth_utils.py 与 math_utils.py：VerifierFunction 抽象类、按数据集名分发的 apply_verifiable_reward、Math/GSM8K/Code 等验证器与 sympy 等价判定。",
+          "learning_goals": [
+            "理解验证器注册表与自动发现机制",
+            "掌握 boxed 答案抽取与数学等价判定流程",
+            "能编写并注册一个自定义验证器"
+          ],
+          "source_files": [
+            "open_instruct/ground_truth_utils.py",
+            "open_instruct/math_utils.py",
+            "open_instruct/test_ground_truth_utils.py",
+            "open_instruct/test_math_utils.py"
+          ],
+          "minimal_modules": [
+            "VerifierFunction 基类",
+            "apply_verifiable_reward 分发",
+            "Math/GSM8K 验证器"
+          ],
+          "practice_task": "写一个新的 VerifierFunction 子类（如判断答案是否为质数），参考现有验证器接入 RewardConfig，并用 5 组样例验证打分正确。",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l4",
+          "title": "grpo_fast.py：Ray + vLLM + DeepSpeed 架构",
+          "order": 4,
+          "filename": "u6-l4-grpo-fast-ray-architecture.md",
+          "level": "intermediate",
+          "topic": "解析 grpo_fast.py 的分布式架构：PolicyTrainerRayProcess 学习器 actor、ModelGroup 与 placement group、run_training 主循环，以及与 vllm_utils 中 LLMRayActor 的协作。",
+          "learning_goals": [
+            "理解 Ray actor 拓扑与 GPU 分配",
+            "掌握训练 step 的数据流（logprob→ratio→loss）",
+            "理解推理引擎与训练器的队列通信"
+          ],
+          "source_files": [
+            "open_instruct/grpo_fast.py",
+            "open_instruct/vllm_utils.py",
+            "scripts/train/debug/grpo_fast.sh"
+          ],
+          "minimal_modules": [
+            "PolicyTrainerRayProcess",
+            "ModelGroup 与资源规划",
+            "run_training 主循环"
+          ],
+          "practice_task": "画出 grpo_fast.py 的 Ray 拓扑图（driver、trainer actors、vLLM engines、ActorManager），并阅读 scripts/train/debug/grpo_fast.sh 说明每面旗标对应拓扑中的哪个角色。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l5",
+          "title": "权重同步、资源规划与训练回调",
+          "order": 5,
+          "filename": "u6-l5-weight-sync-callbacks.md",
+          "level": "advanced",
+          "topic": "讲解训练与推理引擎的一致性机制：perform_weight_sync 的暂停-广播-唤醒流程、IPC 权重广播、grpo_fast_resource_plan.py 的资源规划与 grpo_callbacks.py 的回调集。",
+          "learning_goals": [
+            "理解异步权重同步为何要暂停引擎",
+            "掌握资源规划如何分配训练/推理 GPU",
+            "了解回调（计时、ref 更新、评估）的挂载点"
+          ],
+          "source_files": [
+            "open_instruct/grpo_fast_resource_plan.py",
+            "open_instruct/grpo_callbacks.py",
+            "open_instruct/vllm_utils.py",
+            "open_instruct/test_grpo_fast_resource_plan.py"
+          ],
+          "minimal_modules": [
+            "perform_weight_sync",
+            "资源规划器",
+            "VLLMWeightSyncCallback 等回调"
+          ],
+          "practice_task": "用 grpo_fast_resource_plan 的逻辑为「4 卡、1 个 vLLM 引擎」推演一份分配方案，并对照 test_grpo_fast_resource_plan.py 的断言验证你的推演。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l6",
+          "title": "工具调用 RL：environments 与 ToolRL",
+          "order": 6,
+          "filename": "u6-l6-tool-rl-environments.md",
+          "level": "advanced",
+          "topic": "讲解工具与环境体系：environments/base.py 的 RLEnvironment/RolloutState 抽象、tools 目录的解析器与 MCP 集成、toolrl_utils.py 的离线工具调用打分。",
+          "learning_goals": [
+            "理解多轮工具调用的 rollout 状态机",
+            "掌握 StepResult 与奖励聚合（Last/Sum）",
+            "理解 ToolRL 打分中调用名与参数匹配规则"
+          ],
+          "source_files": [
+            "open_instruct/environments/base.py",
+            "open_instruct/toolrl_utils.py",
+            "open_instruct/environments/tools/generic_mcp.py",
+            "docs/algorithms/tool_training.md",
+            "tests/test_environments.py"
+          ],
+          "minimal_modules": [
+            "RLEnvironment 抽象",
+            "工具解析器",
+            "ToolRL 打分"
+          ],
+          "practice_task": "运行 tests/test_environments.py，然后实现一个最小环境（如猜数字）：继承现有基类，让一次 rollout 记录 StepResult 并按 SumRewardAggregator 聚合奖励。",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u6-l7",
+          "title": "代码奖励与沙箱执行",
+          "order": 7,
+          "filename": "u6-l7-code-rewards-sandbox.md",
+          "level": "advanced",
+          "topic": "讲解代码类可验证奖励：CodeVerifier 通过外部执行服务跑测试用例，code_utils 的沙箱执行与 generic_sandbox 环境。",
+          "learning_goals": [
+            "理解代码验证器的执行与判定流程",
+            "掌握沙箱隔离与超时控制",
+            "能本地复现一次代码判分"
+          ],
+          "source_files": [
+            "open_instruct/code_utils/code_utils.py",
+            "open_instruct/code_utils/api.py",
+            "open_instruct/environments/generic_sandbox.py",
+            "open_instruct/test_complete_code.py"
+          ],
+          "minimal_modules": [
+            "CodeVerifier 执行链路",
+            "沙箱执行工具",
+            "测试用例判定"
+          ],
+          "practice_task": "用 code_utils 在沙箱中执行 3 段含 bug/正确的函数实现并配对测试用例，记录通过率，再阅读 test_complete_code.py 说明测试如何 mock 执行服务。",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "order": 7,
+      "title": "OLMo-core 高效训练路线",
+      "lectures": [
+        {
+          "id": "u7-l1",
+          "title": "olmo_core_finetune.py：OLMo-core SFT 入口",
+          "order": 1,
+          "filename": "u7-l1-olmo-core-sft-entry.md",
+          "level": "intermediate",
+          "topic": "精读 OLMo-core SFT 入口：numpy 预编码缓存、setup_model、HSDP/FSDP 数据并行配置、打包式数据加载与 TrainerConfig 训练。",
+          "learning_goals": [
+            "理解 numpy 缓存先行的工作流与报错提示",
+            "掌握 OLMo-core 与 HF finetune 路线的差异",
+            "会跑 oc_sft 冒烟脚本"
+          ],
+          "source_files": [
+            "open_instruct/olmo_core_finetune.py",
+            "open_instruct/olmo_core_utils.py",
+            "scripts/train/debug/oc_sft.sh",
+            "open_instruct/test_olmo_core_finetune.py"
+          ],
+          "minimal_modules": [
+            "numpy 预编码缓存",
+            "模型与并行配置",
+            "TrainerConfig 组装"
+          ],
+          "practice_task": "运行 scripts/train/debug/oc_sft.sh（或读脚本写出最小命令），观察缺少 numpy 缓存时的报错提示，按提示生成缓存后重跑成功。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l2",
+          "title": "OLMo-core 训练模块与回调扩展",
+          "order": 2,
+          "filename": "u7-l2-olmo-core-modules-callbacks.md",
+          "level": "intermediate",
+          "topic": "讲解 olmo_core_train_modules.py（DPOTrainModule/GRPOTrainModule）与 olmo_core_callbacks.py（BeakerCallbackV2、PerfCallback）的扩展点。",
+          "learning_goals": [
+            "理解 TrainModule 抽象如何承载不同算法损失",
+            "掌握回调体系如何注入平台与性能监控",
+            "能定位新增自定义回调的挂载点"
+          ],
+          "source_files": [
+            "open_instruct/olmo_core_train_modules.py",
+            "open_instruct/olmo_core_callbacks.py",
+            "open_instruct/olmo_core_utils.py",
+            "open_instruct/test_olmo_core_callbacks.py"
+          ],
+          "minimal_modules": [
+            "DPOTrainModule",
+            "GRPOTrainModule",
+            "Beaker/Perf 回调"
+          ],
+          "practice_task": "写一个自定义 OLMo-core 回调（每 N 步打印 token 吞吐），参考 build_base_callbacks 的组装方式接入，并在单机小模型上验证输出。",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u7-l3",
+          "title": "混合注意力模型与 HSDP 分片",
+          "order": 3,
+          "filename": "u7-l3-olmo-hybrid-sharding.md",
+          "level": "advanced",
+          "topic": "讲解 olmo_core_hybrid.py 的混合注意力（滑动+全量）模型构建与 HF↔OLMo-core 权重转换，以及 HSDP 分片策略的原理与默认值。",
+          "learning_goals": [
+            "理解混合注意力的结构与显存收益",
+            "掌握 HSDP 中 shard/replica group 的划分",
+            "理解权重在 HF 与 OLMo-core 间转换的流程"
+          ],
+          "source_files": [
+            "open_instruct/olmo_core_hybrid.py",
+            "docs/algorithms/olmo_core_sharding.md",
+            "open_instruct/test_olmo_core_hybrid.py",
+            "scripts/train/debug/oc_sft_olmo_hybrid_7b_1node.sh"
+          ],
+          "minimal_modules": [
+            "混合注意力构建",
+            "HSDP 分片",
+            "权重转换"
+          ],
+          "practice_task": "对照 docs/algorithms/olmo_core_sharding.md 画出 2 节点 HSDP 的分组示意图（shard group 与 replica group），并用 load_hf_hybrid_model 的转换逻辑解释为什么权重名需要映射。",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "order": 8,
+      "title": "MILES：新一代 RL 系统",
+      "lectures": [
+        {
+          "id": "u8-l1",
+          "title": "MILES 总览与架构分层",
+          "order": 1,
+          "filename": "u8-l1-miles-overview.md",
+          "level": "advanced",
+          "topic": "介绍 MILES 的定位与分层：open-instruct 负责配置/数据/奖励集成，MILES 运行时负责 rollout 编排与共享 RL 机制，Core 适配器经 OLMo-core 训练、SGLang 服务。",
+          "learning_goals": [
+            "说出 MILES 与 grpo.py/grpo_fast.py 的关系与适用范围",
+            "理解三层所有权划分",
+            "会用 python -m open_instruct.miles 的五个子命令"
+          ],
+          "source_files": [
+            "docs/miles/index.md",
+            "docs/miles/architecture.md",
+            "open_instruct/miles/__main__.py",
+            "docs/miles/grpo.md"
+          ],
+          "minimal_modules": [
+            "CLI 入口",
+            "架构分层",
+            "文档地图"
+          ],
+          "practice_task": "阅读 docs/miles/index.md 与 architecture.md，绘制 MILES 三层架构图，并用 `python -m open_instruct.miles plan`（无 GPU 也可运行）对一份示例 TOML 做计划验证。",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l2",
+          "title": "配置系统：TOML → RunSpec → RunConfig",
+          "order": 2,
+          "filename": "u8-l2-miles-configuration.md",
+          "level": "advanced",
+          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接 open-instruct 的奖励/数据钩子，constraints 驱动的校验。",
+          "learning_goals": [
+            "掌握 TOML run 文件的结构与 schema_version",
+            "理解 RunSpec.compile 到 RunConfig 的编译链",
+            "会用 --set 覆盖与 validate 命令排查配置错误"
+          ],
+          "source_files": [
+            "open_instruct/miles/configuration/run_spec.py",
+            "open_instruct/miles/configuration/config.py",
+            "open_instruct/miles/configuration/validation.py",
+            "docs/miles/configuration-intro.md"
+          ],
+          "minimal_modules": [
+            "RunSpec",
+            "CoreConfig/RunConfig 编译",
+            "校验与约束"
+          ],
+          "practice_task": "复制 configs/miles/examples/dev.toml，修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息。",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l3",
+          "title": "工作流与执行：driver、workflow 与集群启动",
+          "order": 3,
+          "filename": "u8-l3-miles-workflow-execution.md",
+          "level": "advanced",
+          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动。",
+          "learning_goals": [
+            "理解一次 MILES run 的阶段划分与断点恢复",
+            "掌握 driver 与 MILES 运行时的职责边界",
+            "理解指纹（fingerprint）如何支撑 resume"
+          ],
+          "source_files": [
+            "open_instruct/miles/execution/workflow.py",
+            "open_instruct/miles/execution/driver.py",
+            "open_instruct/miles/execution/cluster.py",
+            "docs/miles/workflow.md"
+          ],
+          "minimal_modules": [
+            "workflow 阶段与指纹",
+            "driver 协调循环",
+            "Supervisor 启动监管"
+          ],
+          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l4",
+          "title": "数据源、混合与源准备",
+          "order": 4,
+          "filename": "u8-l4-miles-data-sources.md",
+          "level": "advanced",
+          "topic": "讲解 datasets 包：mixture 混合、run_data 的提示词/验证目标/清单准备、source_preparation 与 source_catalog 的源管理。",
+          "learning_goals": [
+            "理解 MILES 数据源的声明方式",
+            "掌握 mixture 与 verifier 目标的绑定",
+            "会用 source preparation 预处理新数据"
+          ],
+          "source_files": [
+            "open_instruct/miles/datasets/mixture.py",
+            "open_instruct/miles/datasets/run_data.py",
+            "open_instruct/miles/datasets/source_preparation.py",
+            "docs/miles/data-and-evaluation.md"
+          ],
+          "minimal_modules": [
+            "mixture 混合",
+            "run_data 准备",
+            "源目录与准备"
+          ],
+          "practice_task": "为一份新数据（如自制的数学题集）写 source 声明并接入 mixture，运行 validate 确认可被 MILES 接受，并说明验证器目标如何随样本携带。",
+          "depends_on": [
+            "u8-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l5",
+          "title": "Rollout 提供者：pool、replay 与前缀缓存",
+          "order": 5,
+          "filename": "u8-l5-miles-rollout-providers.md",
+          "level": "advanced",
+          "topic": "讲解 rollout 包：PromptProvider 协议、PoolPromptProvider 的有限提示池、replay/remind 提供者与 DashboardDrainingRolloutDataSource 的排空与游标机制。",
+          "learning_goals": [
+            "理解不同 rollout 提供者的采样语义",
+            "掌握 pool 指标与排除表的作用",
+            "理解策略前缀缓存对长提示的收益"
+          ],
+          "source_files": [
+            "open_instruct/miles/rollout/data_source.py",
+            "open_instruct/miles/rollout/pool_provider.py",
+            "open_instruct/miles/rollout/replay_provider.py",
+            "docs/miles/policy-prefix-cache.md"
+          ],
+          "minimal_modules": [
+            "PromptProvider 协议",
+            "Pool/Replay 提供者",
+            "排空数据源"
+          ],
+          "practice_task": "实现一个自定义 PromptProvider（如按难度循环出题），对照协议接口补齐方法，并解释它与 pool_provider 在耗尽行为上的差异。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l6",
+          "title": "MILES 奖励体系：可信验证器注册表与裁判",
+          "order": 6,
+          "filename": "u8-l6-miles-rewards-verifiers.md",
+          "level": "advanced",
+          "topic": "讲解 rewards 包：rewards.py 把样本元数据映射到可信注册表中的验证器工厂（数据不能自带任意代码）、math/task 验证器的进程隔离、托管裁判服务。",
+          "learning_goals": [
+            "理解可信注册表的安全模型",
+            "掌握验证器工厂与 metadata.verifiers 的绑定",
+            "了解托管 judge 的固定权重放置"
+          ],
+          "source_files": [
+            "open_instruct/miles/rewards/rewards.py",
+            "open_instruct/miles/rewards/verifiers.py",
+            "open_instruct/miles/rewards/math_verifier.py",
+            "open_instruct/miles/rewards/judge_registry.py",
+            "docs/miles/managed-judges.md"
+          ],
+          "minimal_modules": [
+            "奖励桥接与注册表",
+            "数学验证器隔离",
+            "命名裁判注册"
+          ],
+          "practice_task": "在一个 JSON 注册表中登记你在 u6-l3 写的验证器（factory + config），构造携带该验证器名的样本元数据，走 rewards.py 的分发路径验证调用与超时行为。",
+          "depends_on": [
+            "u8-l3",
+            "u6-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l7",
+          "title": "Core 适配器：OLMo-core 训练与 checkpoint 管理",
+          "order": 7,
+          "filename": "u8-l7-miles-core-actor.md",
+          "level": "advanced",
+          "topic": "对比两条 OLMo-core RL 路径：grpo_olmo_core_actor.py（grpo.py 使用的 Ray actor 与 vLLM 权重传输）与 MILES 运行时内部的 Core 适配器，以及 checkpoint 转换/导出。",
+          "learning_goals": [
+            "理解 PolicyTrainerOLMoCoreProcess 的职责",
+            "掌握 MILES 与旧路径在权重同步上的差异",
+            "了解模型转换、保存与恢复的约定"
+          ],
+          "source_files": [
+            "open_instruct/grpo_olmo_core_actor.py",
+            "docs/miles/core.md",
+            "docs/miles/models-and-checkpoints.md"
+          ],
+          "minimal_modules": [
+            "OLMo-core Ray actor",
+            "权重同步对比",
+            "checkpoint 转换"
+          ],
+          "practice_task": "阅读 grpo_olmo_core_actor.py 与 docs/miles/core.md，写一页对比笔记：两条路径各自的引擎（vLLM vs SGLang）、同步方式与适用模型，并标注 open-instruct 侧需要维护的代码范围。",
+          "depends_on": [
+            "u8-l3",
+            "u7-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l8",
+          "title": "启动、提交与运维",
+          "order": 8,
+          "filename": "u8-l8-miles-launching-operations.md",
+          "level": "advanced",
+          "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断。",
+          "learning_goals": [
+            "掌握 run 与 train 两种启动方式的区别",
+            "理解 launch receipt 与断点状态存储",
+            "会用 status 与指标判断 run 是否完成"
+          ],
+          "source_files": [
+            "open_instruct/miles/execution/launch.py",
+            "open_instruct/miles/execution/submit.py",
+            "scripts/train/build_image_and_launch.sh",
+            "docs/miles/launching.md",
+            "docs/miles/operations.md"
+          ],
+          "minimal_modules": [
+            "Beaker 实验编译",
+            "提交与回执",
+            "运维判据"
+          ],
+          "practice_task": "用 `python -m open_instruct.miles run` 走一次提交（或 dry-run），找到本地 launches 回执目录，然后按 operations.md 的清单列出判断 run 完成所需的三个证据。",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l9",
+          "title": "后台评估与推理记录",
+          "order": 9,
+          "filename": "u8-l9-miles-evaluation-records.md",
+          "level": "advanced",
+          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析。",
+          "learning_goals": [
+            "理解后台评估的里程碑与回执机制",
+            "掌握推理记录的存储结构",
+            "会用 records summarize/select 做数据分析"
+          ],
+          "source_files": [
+            "open_instruct/miles/evaluation/evaluation.py",
+            "open_instruct/miles/evaluation/evaluation_runner.py",
+            "open_instruct/miles/datasets/record_selection.py",
+            "docs/miles/inference-records.md",
+            "docs/miles/background-evaluation.md"
+          ],
+          "minimal_modules": [
+            "评估 Coordinator",
+            "评估 runner",
+            "记录筛选"
+          ],
+          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义。",
+          "depends_on": [
+            "u8-l8"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u8-l10",
+          "title": "高阶主题：序列打包、长序列与吞吐调优",
+          "order": 10,
+          "filename": "u8-l10-miles-advanced-topics.md",
+          "level": "advanced",
+          "topic": "汇总性能相关专题：文档隔离的序列打包语义、长序列的预算与准入控制、topology 的 GPU 布局与容量规划、吞吐画像与队列指标。",
+          "learning_goals": [
+            "理解打包的文档隔离与损失语义",
+            "掌握长序列的内存与准入参数",
+            "会读吞吐/队列/浪费指标做容量决策"
+          ],
+          "source_files": [
+            "docs/miles/sequence-packing.md",
+            "docs/miles/long-sequences.md",
+            "docs/miles/topology.md",
+            "docs/miles/throughput-profiles.md",
+            "docs/miles/async-pipeline.md"
+          ],
+          "minimal_modules": [
+            "序列打包语义",
+            "长序列预算",
+            "拓扑与吞吐画像"
+          ],
+          "practice_task": "为一个假想的 8 卡预算设计两种拓扑（重训练 vs 重推理），按 throughput/topology 文档的指标论证选择，并指出哪种拓扑下应调整 async 缓冲区大小。",
+          "depends_on": [
+            "u8-l4",
+            "u8-l5"
+          ],
+          "action": "new"
+        }
+      ]
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "order": 9,
+      "title": "工程化与二次开发",
+      "lectures": [
+        {
+          "id": "u9-l1",
+          "title": "mason.py 与 Beaker 任务启动",
+          "order": 1,
+          "filename": "u9-l1-mason-beaker-launching.md",
+          "level": "advanced",
+          "topic": "精读 mason.py：命令解析（-- 分隔）、make_internal_command 的环境与数据集注入、make_task_spec 的任务规格组装与重试退避提交。",
+          "learning_goals": [
+            "掌握 mason 的核心参数与多机启动方式",
+            "理解纯 Docker 模式与自动数据缓存的交互",
+            "能诊断排队/失败的任务"
+          ],
+          "source_files": [
+            "mason.py",
+            "test_mason.py",
+            "scripts/train/build_image_and_launch.sh",
+            "docs/get_started/ai2_internal_setup.md"
+          ],
+          "minimal_modules": [
+            "参数与命令解析",
+            "内部命令包装",
+            "任务规格与提交"
+          ],
+          "practice_task": "用 mason.py 的外部用户模式（无 Beaker 配置时打印可运行命令）为一条训练命令生成完整命令行，逐段注释 mason 注入了哪些环境变量与数据集挂载。",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l2",
+          "title": "configs 体系：DeepSpeed、训练与 Beaker 配置",
+          "order": 2,
+          "filename": "u9-l2-configs-deepspeed-beaker.md",
+          "level": "advanced",
+          "topic": "讲解三套配置如何配合：ds_configs 的 ZeRO 分级与 offload、train_configs 的超参数预设、beaker_configs 的集群与节点设置。",
+          "learning_goals": [
+            "读懂 ZeRO stage 2/3 与 offload 配置的每个字段",
+            "理解训练超参预设的组织方式",
+            "掌握配置在 accelerate 与 mason 两条链路中的传递"
+          ],
+          "source_files": [
+            "configs/ds_configs/stage3_no_offloading_accelerate.conf",
+            "configs/ds_configs/deepspeed_zero2.yaml",
+            "configs/train_configs/sft/default.yaml",
+            "configs/beaker_configs/default_finetune_multinode.yaml",
+            "docs/tulu3.md"
+          ],
+          "minimal_modules": [
+            "DeepSpeed ZeRO 配置",
+            "训练超参预设",
+            "Beaker 集群配置"
+          ],
+          "practice_task": "为「单机 8 卡、模型放不进单卡显存」的场景选择并裁剪一份 ds 配置：说明选 stage 的理由，逐字段注释你打开/关闭的 offload 项。",
+          "depends_on": [
+            "u2-l5"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l3",
+          "title": "测试体系与贡献流程",
+          "order": 3,
+          "filename": "u9-l3-testing-contributing.md",
+          "level": "advanced",
+          "topic": "讲解仓库的测试组织（与代码同目录的 test_* 与 tests/、GPU 测试脚本）、ruff/ty 风格检查、pre-commit 与 CHANGELOG/PR 约定。",
+          "learning_goals": [
+            "掌握单测优先的开发与验证循环",
+            "理解 GPU 测试的触发条件与记录方式",
+            "能按贡献规范提交一个合规 PR"
+          ],
+          "source_files": [
+            "Makefile",
+            "CONTRIBUTING.md",
+            "CLAUDE.md",
+            "pyproject.toml"
+          ],
+          "minimal_modules": [
+            "测试布局",
+            "风格与类型检查",
+            "贡献约定"
+          ],
+          "practice_task": "为你新增的验证器/回调补一个单测（模仿相邻 test 文件的结构），运行 `uv run pytest <该文件>` 与 `make quality` 直到全部通过。",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l4",
+          "title": "数据去污染：decontamination",
+          "order": 4,
+          "filename": "u9-l4-decontamination.md",
+          "level": "advanced",
+          "topic": "讲解 decontamination 包：用 Elasticsearch 对训练集建索引（index.py），再用评测集查询（search.py）度量重叠，量化训练数据污染。",
+          "learning_goals": [
+            "理解 n-gram/向量两种索引方式",
+            "掌握按角色过滤与查询参数的含义",
+            "能对一个小数据集完成污染检查"
+          ],
+          "source_files": [
+            "decontamination/README.md",
+            "decontamination/index.py",
+            "decontamination/search.py"
+          ],
+          "minimal_modules": [
+            "ES 索引构建",
+            "重叠查询",
+            "污染量化"
+          ],
+          "practice_task": "本地起一个 Elasticsearch，把 50 条自拟训练样本建索引，用 10 条评测 prompt 查询重叠，输出重叠率并讨论阈值如何设定。",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "action": "new"
+        },
+        {
+          "id": "u9-l5",
+          "title": "Tülu 3 配方串讲：从 SFT 到 RLVR 的完整复现",
+          "order": 5,
+          "filename": "u9-l5-tulu3-recipe-recap.md",
+          "level": "advanced",
+          "topic": "以 docs/tulu3.md 为纲，把前面所有单元串成一次完整后训练：SFT 混合数据全量微调、偏好数据 DPO、RLVR 的 GRPO 收尾，以及有效批大小的换算。",
+          "learning_goals": [
+            "能独立规划一次完整的 SFT→DPO→RLVR 复现",
+            "掌握多机 accelerate 启动参数的换算",
+            "理解各阶段产物（SFT/DPO/Final 模型）的衔接"
+          ],
+          "source_files": [
+            "docs/tulu3.md",
+            "README.md",
+            "docs/algorithms/grpo.md",
+            "docs/algorithms/dpo.md"
+          ],
+          "minimal_modules": [
+            "SFT 复现命令",
+            "DPO 复现命令",
+            "RLVR 复现命令"
+          ],
+          "practice_task": "写一份「8 卡单机版 Tülu 3 复现 runbook」：把文档中 64 卡命令的 NUM_PROCESSES/梯度累积换算成 8 卡等效批大小，列出每阶段的输入模型、数据与产出模型名。",
+          "depends_on": [
+            "u4-l2",
+            "u5-l1",
+            "u6-l1"
+          ],
+          "action": "new"
+        }
+      ]
+    }
+  ]
+}
