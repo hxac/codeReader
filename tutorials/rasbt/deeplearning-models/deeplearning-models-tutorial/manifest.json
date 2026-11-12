@@ -1,0 +1,1281 @@
+{
+  "head": "59beda3aa25337e576564f1c18c6edd26f9f30e3",
+  "project": "deeplearning-models",
+  "rationale": "本仓库不是传统软件包，而是一个由 100+ 个自包含 Jupyter Notebook 组成的深度学习\"模型动物园\"，核心代码资产是 pytorch_ipynb 下的 6 个共享 helper_*.py 模块与按模型类别组织的 notebook 目录，因此学习路径设计为\"先认识仓库组织与公共基础设施，再沿模型复杂度递进\"。单元顺序：U1 仓库全景与运行方式；U2 从感知机/逻辑回归/softmax 回归到 MLP 与从零反向传播，掌握统一的标准训练循环范式（读懂后续所有 notebook 的钥匙）；U3 按架构演进史推进 CNN 家族（basic→LeNet/AlexNet→VGG/NiN/AllConv→ResNet→DenseNet/MobileNet）；U4 数据管线与 autograd 机制（自定义 Dataset、transforms、公共训练评估工具链、确定性）；U5 生成模型（AE→卷积AE→VAE→CVAE→GAN→卷积GAN/WGAN/DCGAN）；U6 序列与 NLP（RNN→LSTM/GRU/packed→双向/GloVe/自有数据→char-RNN→TextCNN→DistilBERT）；U7 评估与训练技巧（评估工具链、K折、训练技巧、迁移学习、有序回归、可解释性）；U8 工程化与高级专题（Lightning、模板、数据增强、梯度检查点、多GPU、GNN、TF1 框架对照收官）。每篇讲义锚定 1-6 个真实 notebook，实践任务要求读者改超参、改结构或迁移到自有数据，保证读源码与动手写结合；依赖关系沿\"基础训练循环→模型家族→数据与评估→工程化\"逐层展开，有经验的读者也可在任意单元切入。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "能说出仓库收录的主要模型类别",
+            "会用 README 表格定位某个模型的 notebook 路径",
+            "理解 pytorch_ipynb / pytorch-lightning_ipynb / tensorflow1_ipynb 三个目录的分工"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "仓库定位与 README 索引",
+            "三大框架目录分工",
+            "notebook 命名规律"
+          ],
+          "order": 1,
+          "practice_task": "本地 clone 仓库并通读 README，整理一张「模型类别 → 目录 → notebook 文件名」的速查表，并标出你最想学会的 5 个模型及其文件路径。",
+          "source_files": [
+            "README.md"
+          ],
+          "title": "项目全景：这是一个什么样的模型库",
+          "topic": "介绍 rasbt/deeplearning-models 的定位：以 Jupyter Notebook 为载体的深度学习「模型动物园」，覆盖 PyTorch、PyTorch Lightning 与 TensorFlow 1.x 三套实现，并解读 README 中的模型分类索引。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-setup-first-notebook.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "会安装 torch/torchvision 并运行仓库 notebook",
+            "理解 notebook 的五段式结构并能按段落定位代码",
+            "掌握 device 选择与 GPU/CPU 自动切换写法"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "环境与 watermark",
+            "device 选择",
+            "notebook 五段式结构"
+          ],
+          "order": 2,
+          "practice_task": "完整运行 perceptron.ipynb，用 %watermark 记录你的环境，并把 device 改成自动选择 GPU/CPU，观察训练输出是否变化。",
+          "source_files": [
+            "pytorch_ipynb/basic-ml/perceptron.ipynb"
+          ],
+          "title": "环境搭建与第一个 Notebook",
+          "topic": "讲解如何搭建 Python 环境并运行最简单的 perceptron.ipynb：用 %watermark 记录环境、用 torch.cuda.is_available() 判断 device，并认识 Model Zoo 中几乎所有 notebook 共有的「Imports → Settings/Dataset → Model → Training → Evaluation」五段式结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-helper-modules.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "知道每个 helper 模块提供哪些函数",
+            "理解 get_dataloaders_mnist/cifar10 的参数含义",
+            "会用 set_all_seeds 固定随机性"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "helper_data 数据加载",
+            "helper_train 训练循环",
+            "helper_evaluate/helper_plotting 评估绘图",
+            "helper_utils 随机性与确定性"
+          ],
+          "order": 3,
+          "practice_task": "写一个脚本导入 helper_data.get_dataloaders_mnist 与 helper_utils.set_all_seeds，打印 train/valid/test 三个 DataLoader 的 batch 形状与批次数，验证样本划分是否符合 validation_fraction。",
+          "source_files": [
+            "pytorch_ipynb/helper_data.py",
+            "pytorch_ipynb/helper_train.py",
+            "pytorch_ipynb/helper_evaluate.py",
+            "pytorch_ipynb/helper_plotting.py",
+            "pytorch_ipynb/helper_utils.py",
+            "pytorch_ipynb/helper.py"
+          ],
+          "title": "共享 helper 模块导览",
+          "topic": "导览 pytorch_ipynb 下的 6 个 helper_*.py：数据加载（get_dataloaders_mnist/cifar10）、训练循环（train_classifier_simple_v1/v2）、评估与绘图（compute_accuracy、plot_training_loss 等）、随机种子与确定性设置，以及 helper.py 中的 Quickdraw 数据转换工具。这些模块是新版 notebook 的公共基础设施。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "初识模型动物园"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u2-l1-perceptron-logistic-regression.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "理解感知机的逐样本更新规则",
+            "会用 autograd 训练线性分类器",
+            "能对比手工更新与基于梯度的更新差异"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "感知机模型与更新规则",
+            "逻辑回归与二元交叉熵",
+            "toy 数据可视化"
+          ],
+          "order": 1,
+          "practice_task": "修改 toy 数据的均值与方差生成线性不可分数据，分别运行感知机与逻辑回归 notebook，观察并解释两者表现差异。",
+          "source_files": [
+            "pytorch_ipynb/basic-ml/perceptron.ipynb",
+            "pytorch_ipynb/basic-ml/logistic-regression.ipynb"
+          ],
+          "title": "感知机与逻辑回归",
+          "topic": "用 2D toy 数据讲解最简单的两个线性模型：Rosenblatt 感知机的逐样本更新规则，以及用 PyTorch autograd 训练的逻辑回归，对比两者训练方式的本质差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-softmax-regression-mnist.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "掌握 datasets.MNIST 与 DataLoader 的最小用法",
+            "理解 cross_entropy 损失与 softmax 的关系",
+            "能逐行解释标准训练循环的五个步骤"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "MNIST 与 DataLoader",
+            "softmax 与交叉熵",
+            "标准训练循环",
+            "mlxtend 决策边界"
+          ],
+          "order": 2,
+          "practice_task": "以 softmax-regression.ipynb 为基础，把 learning_rate 与 num_epochs 换成 3 组不同取值，记录训练损失与测试准确率并绘制对比表。",
+          "source_files": [
+            "pytorch_ipynb/basic-ml/softmax-regression.ipynb",
+            "pytorch_ipynb/basic-ml/softmax-regression-mlxtend-1.ipynb"
+          ],
+          "title": "Softmax 回归与第一个完整训练循环",
+          "topic": "以 MNIST 为数据集讲解 softmax 回归：datasets.MNIST + DataLoader 的最小用法、cross_entropy 损失，以及「forward → loss → zero_grad → backward → step」标准训练循环的每个环节；顺带演示 mlxtend 的 plot_decision_regions 在 Iris 数据上的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-mlp-basics.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握自定义 nn.Module 的写法",
+            "理解隐藏层维度如何映射 MNIST 输入",
+            "会手工修改层权重初始化"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "nn.Module 与 forward",
+            "隐藏层与激活函数",
+            "权重初始化",
+            "SGD 优化器"
+          ],
+          "order": 3,
+          "practice_task": "把隐藏层改成 3 层（如 784-256-128-64-10）重新训练，用 model.parameters() 统计参数量，对比修改前后的测试准确率。",
+          "source_files": [
+            "pytorch_ipynb/mlp/mlp-basic.ipynb"
+          ],
+          "title": "多层感知机与 nn.Module",
+          "topic": "拆解 MultilayerPerceptron 的定义：继承 torch.nn.Module、在 __init__ 中搭建 Linear 层、forward 中的前向传播与手工 weight 初始化，以及 784-128-256-10 结构如何对应 MNIST 输入。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l4-mlp-dropout-batchnorm.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解 Dropout 的工作机制与 train/eval 模式差异",
+            "掌握 BatchNorm1d 的用法与 running statistics",
+            "会对比不同正则化强度下的过拟合程度"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Dropout 与模式切换",
+            "BatchNorm1d",
+            "过拟合观察"
+          ],
+          "order": 4,
+          "practice_task": "在 dropout notebook 中扫描 dropout probability ∈ {0.3, 0.5, 0.7}，绘制训练与测试准确率曲线，找出该设置下的较优值并解释原因。",
+          "source_files": [
+            "pytorch_ipynb/mlp/mlp-dropout.ipynb",
+            "pytorch_ipynb/mlp/mlp-batchnorm.ipynb"
+          ],
+          "title": "正则化 MLP：Dropout 与 BatchNorm",
+          "topic": "对比 mlp-dropout 与 mlp-batchnorm 两个 notebook：Dropout 随机失活与 model.train()/model.eval() 模式切换、BatchNorm1d 的批统计与 running stats，以及两者对过拟合的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u2-l5-mlp-backprop-from-scratch.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解反向传播四要素的链式法则实现",
+            "能对照 autograd 验证手工梯度",
+            "体会 sigmoid+MSE 与 softmax+CE 的差别"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "手工前向传播",
+            "逐层反向传播公式",
+            "梯度数值校验"
+          ],
+          "order": 5,
+          "practice_task": "在手工实现中把隐藏层激活从 sigmoid 换成 tanh，推导并实现对应反向传播，用 torch.autograd.grad 或数值梯度校验验证与 PyTorch 自动微分结果一致。",
+          "source_files": [
+            "pytorch_ipynb/mlp/mlp-fromscratch__sigmoid-mse.ipynb"
+          ],
+          "title": "从零实现反向传播",
+          "topic": "精读 mlp-fromscratch__sigmoid-mse.ipynb：不借助 autograd，手工推导并实现 sigmoid + MSE 网络的前向与反向传播，理解自动微分背后到底做了什么。"
+        }
+      ],
+      "level": "beginner",
+      "order": 2,
+      "title": "从线性模型到多层感知机"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u3-l1-cnn-basics.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "会推导卷积与池化层的输出尺寸公式",
+            "理解特征图通道数演化过程",
+            "知道 He 初始化适用的场景"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "卷积层与池化层",
+            "特征图形状计算",
+            "He 初始化"
+          ],
+          "order": 1,
+          "practice_task": "打印 cnn-basic 模型每层输出的特征图形状（手工推导或用 forward hook），再统计参数量并与 torch 中参数计数结果对照。",
+          "source_files": [
+            "pytorch_ipynb/cnn/cnn-basic.ipynb",
+            "pytorch_ipynb/cnn/cnn-he-init.ipynb"
+          ],
+          "title": "第一个卷积神经网络",
+          "topic": "以 cnn-basic.ipynb 为主线讲解卷积层、池化层的尺寸计算与特征图变化，并介绍 cnn-he-init.ipynb 中面向 ReLU 的 He 初始化做法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-lenet-alexnet.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "读懂 Sequential 堆叠式模型定义",
+            "理解输入尺寸差异带来的结构适配",
+            "掌握 grouped convolutions 的分组含义"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LeNet-5 结构",
+            "AlexNet 结构",
+            "分组卷积"
+          ],
+          "order": 2,
+          "practice_task": "把 LeNet-5 的激活函数从 tanh 换成 ReLU，在 MNIST 上对比收敛速度与最终准确率，并解释原因。",
+          "source_files": [
+            "pytorch_ipynb/cnn/cnn-lenet5-mnist.ipynb",
+            "pytorch_ipynb/cnn/cnn-lenet5-cifar10.ipynb",
+            "pytorch_ipynb/cnn/cnn-alexnet-cifar10.ipynb",
+            "pytorch_ipynb/cnn/cnn-alexnet-cifar10-grouped.ipynb"
+          ],
+          "title": "经典早期架构：LeNet-5 与 AlexNet",
+          "topic": "精读 LeNet-5 与 AlexNet 的模块化定义（Sequential 堆叠风格），比较 MNIST 与 CIFAR-10 输入尺寸差异带来的结构适配，并讲解 AlexNet 的 grouped convolutions。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-vgg-nin-allconv.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 VGG 小卷积核堆叠设计",
+            "掌握 1x1 卷积与全局平均池化的作用",
+            "会做全连接层与卷积层的等价转换"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "VGG 配置化结构",
+            "NiN 与 1x1 卷积",
+            "全连接转卷积"
+          ],
+          "order": 3,
+          "practice_task": "仿照 fc-to-conv.ipynb 把 nin-cifar10 的分类头换成等价的卷积形式，用同一输入验证两种形式的输出一致。",
+          "source_files": [
+            "pytorch_ipynb/cnn/cnn-vgg16.ipynb",
+            "pytorch_ipynb/cnn/cnn-vgg19.ipynb",
+            "pytorch_ipynb/cnn/nin-cifar10.ipynb",
+            "pytorch_ipynb/cnn/cnn-allconv.ipynb",
+            "pytorch_ipynb/cnn/fc-to-conv.ipynb"
+          ],
+          "title": "更深的网络：VGG、NiN 与 All-Conv",
+          "topic": "讲解 VGG 的小卷积核堆叠哲学、Network-in-Network 的 1x1 卷积与全局平均池化、All-Conv 完全卷积网络，以及 fc-to-conv.ipynb 中「全连接层 ↔ 卷积层等价转换」这一重要洞察。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-resnet.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 identity 与 convolutional 残差块差异",
+            "掌握 _make_layer 与 downsample 机制",
+            "能区分 BasicBlock 与 Bottleneck"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "残差块三种子写法",
+            "BasicBlock 与 downsample",
+            "_make_layer 组装"
+          ],
+          "order": 4,
+          "practice_task": "打印 ResNet-18 各 stage 的输出形状，解释 downsample 何时被触发；再在 resnet-ex-1 中选择一种残差块写法搭建小型网络并在 MNIST 上训练。",
+          "source_files": [
+            "pytorch_ipynb/cnn/resnet-ex-1.ipynb",
+            "pytorch_ipynb/cnn/cnn-resnet18-mnist.ipynb",
+            "pytorch_ipynb/cnn/cnn-resnet34-mnist.ipynb",
+            "pytorch_ipynb/cnn/cnn-resnet50-mnist.ipynb"
+          ],
+          "title": "残差网络 ResNet 与残差块",
+          "topic": "从 resnet-ex-1 的三种残差块写法（identity 块、conv 块、helper 类）入手，到标准 ResNet 的 BasicBlock/_make_layer/downsample 机制，理解跳跃连接为什么能让网络更深。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-densenet-mobilenet.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "理解 DenseBlock 的密集连接与拼接",
+            "掌握深度可分离卷积与倒残差块",
+            "会统计并比较模型参数量"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DenseBlock 与 TransitionLayer",
+            "深度可分离卷积",
+            "倒残差块"
+          ],
+          "order": 5,
+          "practice_task": "统计 DenseNet-121 与 MobileNet-v2 的参数量（手工或用 torchinfo），在 CIFAR-10 上训练 MobileNet-v3-small 若干 epoch，记录「准确率/参数量」比。",
+          "source_files": [
+            "pytorch_ipynb/cnn/cnn-densenet121-mnist.ipynb",
+            "pytorch_ipynb/cnn/cnn-densenet121-cifar10.ipynb",
+            "pytorch_ipynb/cnn/cnn-mobilenet-v2-cifar10.ipynb",
+            "pytorch_ipynb/cnn/cnn-mobilenet-v3-small-cifar10.ipynb"
+          ],
+          "title": "现代高效架构：DenseNet 与 MobileNet",
+          "topic": "讲解 DenseNet 的密集连接与 DenseBlock/Transition 结构，以及 MobileNet-v2 的倒残差块、深度可分离卷积和 v3 系列的效率导向设计。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "卷积神经网络家族"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u4-l1-dataloaders-validation-splits.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 SubsetRandomSampler 划分验证集的原理",
+            "掌握 train/valid/test 三个 loader 的组织方式",
+            "知道 DataLoader 嵌套迭代的状态陷阱"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "DataLoader 与 Sampler",
+            "验证集划分",
+            "嵌套迭代陷阱"
+          ],
+          "order": 1,
+          "practice_task": "仿照 get_dataloaders_mnist 为 FashionMNIST 实现支持 validation_fraction 的 get_dataloaders_fashionmnist，并验证三个 loader 样本数之和正确。",
+          "source_files": [
+            "pytorch_ipynb/helper_data.py",
+            "pytorch_ipynb/mechanics/validation-splits.ipynb",
+            "pytorch_ipynb/mechanics/dataloader-nesting.ipynb"
+          ],
+          "title": "数据集、DataLoader 与验证集划分",
+          "topic": "精读 helper_data.py 中 get_dataloaders_mnist/cifar10 的实现：用 SubsetRandomSampler 划分验证集、train/valid/test 三个 loader 的组织；并解释 dataloader-nesting.ipynb 中嵌套迭代 DataLoader 的陷阱。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-custom-datasets.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "掌握 Dataset 三要素的写法",
+            "会为按类存放的图片目录写 Dataset",
+            "了解 Quickdraw npy 数据转图片流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Dataset 三要素",
+            "图片目录数据集",
+            "Quickdraw npy 转换"
+          ],
+          "order": 2,
+          "practice_task": "为一个自选图片目录（或用 quickdraw_npy_to_imagefile 生成的目录）编写自己的 Dataset 类并支持 transform，用 DataLoader 批量加载并可视化 8 张样本。",
+          "source_files": [
+            "pytorch_ipynb/mechanics/custom-dataloader-png/custom-dataloader-example.ipynb",
+            "pytorch_ipynb/mechanics/custom-data-loader-celeba.ipynb",
+            "pytorch_ipynb/mechanics/custom-data-loader-quickdraw.ipynb",
+            "pytorch_ipynb/helper.py"
+          ],
+          "title": "自定义 Dataset 加载自己的数据",
+          "topic": "讲解自定义 Dataset 的三要素（__init__/__getitem__/__len__）、按类别子目录组织图片的读取方式，以及 helper.py 中 quickdraw_npy_to_imagefile 如何把 .npy 数据转成图片目录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l3-transforms-standardization.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "掌握 transforms.Compose 组合常用图像变换",
+            "理解逐通道标准化的计算方式",
+            "会用 UnNormalize 还原图像做可视化"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "transforms 组合",
+            "逐通道标准化",
+            "UnNormalize 还原"
+          ],
+          "order": 3,
+          "practice_task": "为 CIFAR-10 计算训练集通道均值与标准差，实现 train/test 两套 transform，用 UnNormalize 还原并对照可视化标准化前后的图片。",
+          "source_files": [
+            "pytorch_ipynb/mechanics/torchvision-transform-examples.ipynb",
+            "pytorch_ipynb/cnn/cnn-standardized.ipynb",
+            "pytorch_ipynb/helper_data.py"
+          ],
+          "title": "图像变换与标准化",
+          "topic": "演练 torchvision.transforms 的常用组合（Resize、CenterCrop、Normalize 等），解释 cnn-standardized.ipynb 的逐通道均值/标准差标准化，以及 helper_data.py 中 UnNormalize 如何还原图像用于可视化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l4-training-helpers-determinism.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 train_classifier_simple_v1/v2 的差异",
+            "会复用评估与绘图工具组织完整实验",
+            "理解随机种子与确定性设置的代价"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "训练循环 v1/v2",
+            "评估函数",
+            "绘图工具",
+            "随机性与确定性"
+          ],
+          "order": 4,
+          "practice_task": "用 helper_train 的训练函数加 helper_plotting 完整训练一个 MNIST 分类器，保存 loss/accuracy 图与最优权重；再对比开启 set_deterministic 前后两次运行的损失曲线是否完全一致。",
+          "source_files": [
+            "pytorch_ipynb/helper_train.py",
+            "pytorch_ipynb/helper_evaluate.py",
+            "pytorch_ipynb/helper_plotting.py",
+            "pytorch_ipynb/helper_utils.py",
+            "pytorch_ipynb/mechanics/deterministic_benchmark.ipynb"
+          ],
+          "title": "公共训练评估工具链与确定性",
+          "topic": "精读 train_classifier_simple_v1/v2 的日志与最优 epoch 记录逻辑、compute_accuracy/compute_epoch_loss、plot_training_loss/plot_accuracy 等工具，并讨论 set_all_seeds/set_deterministic 与运行确定性之间的权衡。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u4-l5-autograd-model-mechanics.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "会用 retain_grad 或 hook 获取中间变量梯度",
+            "理解层内权重共享的实现",
+            "掌握 Sequential API 与 hook 的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "中间变量梯度",
+            "权重共享",
+            "Sequential 与 hooks"
+          ],
+          "order": 5,
+          "practice_task": "在一个两层 MLP 上分别用 retain_grad() 与 register_hook() 捕获第一个隐藏层输出的梯度，验证两种方式数值一致，并用 hook 统计每层输出的均值与方差。",
+          "source_files": [
+            "pytorch_ipynb/mechanics/manual-gradients.ipynb",
+            "pytorch_ipynb/mechanics/cnn-weight-sharing.ipynb",
+            "pytorch_ipynb/mechanics/mlp-sequential.ipynb"
+          ],
+          "title": "Autograd 细节与模型机制杂谈",
+          "topic": "讲解 manual-gradients.ipynb 中获取中间变量梯度的 retain_grad/hooks 技巧、cnn-weight-sharing.ipynb 的层内权重共享、mlp-sequential.ipynb 的 Sequential API 与 forward hook 用法。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "数据管线与训练机制"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l1-autoencoder-basics.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 encoder/decoder 与瓶颈结构",
+            "掌握 MSE 重建损失训练法",
+            "会提取编码用于下游分类"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "自编码器结构",
+            "重建损失",
+            "编码 + 随机森林"
+          ],
+          "order": 1,
+          "practice_task": "把瓶颈层维度改成 {4, 16, 64} 训练三组自编码器，可视化重建质量，并对比随机森林在三种编码上的分类准确率。",
+          "source_files": [
+            "pytorch_ipynb/autoencoder/ae-basic.ipynb",
+            "pytorch_ipynb/autoencoder/ae-basic-with-rf.ipynb"
+          ],
+          "title": "自编码器基础",
+          "topic": "讲解 ae-basic.ipynb 的 encoder/decoder 结构与 MSE 重建损失的无监督训练，以及 ae-basic-with-rf.ipynb 如何把低维编码交给 sklearn 随机森林做分类。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1",
+            "u3-l1"
+          ],
+          "filename": "u5-l2-conv-autoencoders.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 ConvTranspose2d 上采样写法",
+            "理解插值上采样 + 卷积替代反卷积的思路",
+            "知道无 pooling 版本的结构差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "反卷积上采样",
+            "最近邻插值上采样",
+            "无 pooling 结构",
+            "Jaccard 重建损失"
+          ],
+          "order": 2,
+          "practice_task": "基于 ae-conv-nneighbor.ipynb 修改上采样倍率与卷积核，使输出匹配更大尺寸输入，并对比 deconv 与 nearest 两种解码器的重建效果。",
+          "source_files": [
+            "pytorch_ipynb/autoencoder/ae-deconv.ipynb",
+            "pytorch_ipynb/autoencoder/ae-deconv-nopool.ipynb",
+            "pytorch_ipynb/autoencoder/ae-conv-nneighbor.ipynb",
+            "pytorch_ipynb/autoencoder/ae-deconv-jaccard.ipynb"
+          ],
+          "title": "卷积自编码器的上采样之道",
+          "topic": "对比反卷积（转置卷积）上采样与最近邻插值 + 卷积上采样两条路线、无 pooling 版本的结构差异，以及用 Jaccard 距离替代 MSE 的重建损失变体。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-variational-autoencoder.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解重参数化技巧为何让采样可导",
+            "掌握 KL 散度与重建损失的加权组合",
+            "会从先验采样生成新图像"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "重参数化技巧",
+            "KL + 重建损失",
+            "隐空间采样生成"
+          ],
+          "order": 3,
+          "practice_task": "修改 KL 项权重做 β-VAE 小实验，观察 β ∈ {0.5, 1, 4} 下重建清晰度与隐空间平滑性的变化，并从隐空间线性插值生成 10 张过渡图像。",
+          "source_files": [
+            "pytorch_ipynb/autoencoder/ae-var.ipynb",
+            "pytorch_ipynb/autoencoder/ae-conv-var.ipynb"
+          ],
+          "title": "变分自编码器 VAE",
+          "topic": "讲解 VAE 的重参数化技巧、KL 散度与重建损失的组合，以及 ae-conv-var.ipynb 的卷积版结构，并演示如何从先验采样生成新图像。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l3"
+          ],
+          "filename": "u5-l4-conditional-vae.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解标签拼接实现条件生成的原理",
+            "区分类别是否参与重建损失两种实现",
+            "掌握按条件采样的生成流程"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "标签 one-hot 拼接",
+            "条件解码器",
+            "按条件采样"
+          ],
+          "order": 4,
+          "practice_task": "训练 ae-cvae 后编写一个生成函数：固定隐变量、遍历 0-9 十个数字标签各生成一张图像，观察同一隐变量下不同条件的输出差异。",
+          "source_files": [
+            "pytorch_ipynb/autoencoder/ae-cvae.ipynb",
+            "pytorch_ipynb/autoencoder/ae-cvae_no-out-concat.ipynb",
+            "pytorch_ipynb/autoencoder/ae-cnn-cvae.ipynb"
+          ],
+          "title": "条件变分自编码器 CVAE",
+          "topic": "讲解 CVAE 如何把类别标签 one-hot 拼接进输入与解码器实现「按条件生成」，对比标签是否参与重建损失（with/without out-concat）两种实现，以及卷积版 CVAE 的结构。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u5-l5-gan-basics.md",
+          "id": "u5-l5",
+          "learning_goals": [
+            "理解生成器与判别器的交替训练",
+            "掌握 BCE 损失下真实/伪造标签的构造",
+            "会固定噪声向量对比生成质量演变"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "生成器与判别器",
+            "对抗训练循环",
+            "BCE 损失"
+          ],
+          "order": 5,
+          "practice_task": "修改生成器与判别器的隐藏层宽度，记录不同容量配比下 20 个 epoch 后的生成样本质量，总结容量失衡的后果。",
+          "source_files": [
+            "pytorch_ipynb/gan/gan.ipynb"
+          ],
+          "title": "生成对抗网络 GAN 基础",
+          "topic": "精读全连接 GAN：Generator 与 Discriminator 的交替训练、BCE 损失、真实/伪造标签的构造，理解两者博弈如何驱动生成质量提升。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l5",
+            "u3-l1"
+          ],
+          "filename": "u5-l6-conv-gan-wgan-dcgan.md",
+          "id": "u5-l6",
+          "learning_goals": [
+            "掌握卷积判别器与转置卷积生成器组合",
+            "理解 WGAN 权重裁剪训练法",
+            "知道 label smoothing 的作用"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "卷积 GAN",
+            "WGAN 权重裁剪",
+            "label smoothing",
+            "DCGAN 流程"
+          ],
+          "order": 6,
+          "practice_task": "在同一随机种子下对比 gan-conv 与 wgan-1 在 MNIST 上的训练稳定性（每 5 epoch 保存生成图），再用 DCGAN 结构生成一张 64 样本网格图。",
+          "source_files": [
+            "pytorch_ipynb/gan/gan-conv.ipynb",
+            "pytorch_ipynb/gan/wgan-1.ipynb",
+            "pytorch_ipynb/gan/dc-wgan-1.ipynb",
+            "pytorch_ipynb/gan/gan-conv-smoothing.ipynb",
+            "pytorch_ipynb/gan/dcgan-celeba.ipynb"
+          ],
+          "title": "卷积 GAN、WGAN 与 DCGAN",
+          "topic": "讲解卷积判别器 + 转置卷积生成器的组合、WGAN 用权重裁剪替代 sigmoid+BCE 的训练方式、label smoothing 技巧，以及 DCGAN 在真实人脸数据上的完整流程。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 5,
+      "title": "生成模型：自编码器与 GAN"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u6-l1-rnn-basics-imdb.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "掌握词表构建与 Embedding 层",
+            "理解 nn.RNN 的输入输出形状",
+            "会取最后时间步做情感分类"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "词表与 Embedding",
+            "nn.RNN",
+            "many-to-one 分类"
+          ],
+          "order": 1,
+          "practice_task": "修改序列长度截断与 embedding 维度，观察对验证准确率与训练时间的影响，整理成对比表。",
+          "source_files": [
+            "pytorch_ipynb/rnn/rnn_simple_imdb.ipynb"
+          ],
+          "title": "第一个 RNN：IMDb 情感分类",
+          "topic": "讲解词表构建、Embedding 层、nn.RNN 的 many-to-one 用法与最后时间步输出的选取，串起 IMDb 情感分类的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-lstm-gru-packed-sequences.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 padding 对 RNN 计算的影响",
+            "掌握 pack/pad_padded_sequence 的配对使用",
+            "会切换 RNN/LSTM/GRU 单元对比效果"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "packed sequence",
+            "LSTM",
+            "GRU"
+          ],
+          "order": 2,
+          "practice_task": "在同一数据划分下分别训练 simple RNN、LSTM、GRU（packed 版本），对比验证准确率与单 epoch 耗时。",
+          "source_files": [
+            "pytorch_ipynb/rnn/rnn_simple_packed_imdb.ipynb",
+            "pytorch_ipynb/rnn/rnn_lstm_packed_imdb.ipynb",
+            "pytorch_ipynb/rnn/rnn_gru_packed_imdb.ipynb"
+          ],
+          "title": "LSTM、GRU 与 packed sequences",
+          "topic": "讲解 pack_padded_sequence/pad_packed_sequence 如何让 RNN 跳过 padding 位置，以及 LSTM/GRU 的接口与简单 RNN 的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l3-bidirectional-glove-own-csv.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "理解双向与层数堆叠对输出维度的影响",
+            "会用 GloVe 初始化 Embedding",
+            "能把自有 CSV 文本接入训练管线"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "双向多层 RNN",
+            "GloVe 预训练向量",
+            "自有 CSV 数据管线"
+          ],
+          "order": 3,
+          "practice_task": "用 rnn_lstm_packed_own_csv_imdb 的模板加载你自己的 CSV 文本数据（或 AG News 子集），训练一个双向两层 LSTM 并报告测试准确率。",
+          "source_files": [
+            "pytorch_ipynb/rnn/rnn_lstm_bi_imdb.ipynb",
+            "pytorch_ipynb/rnn/rnn_lstm_packed_imdb-glove.ipynb",
+            "pytorch_ipynb/rnn/rnn_lstm_packed_own_csv_imdb.ipynb",
+            "pytorch_ipynb/rnn/rnn_bi_multilayer_lstm_own_csv_agnews.ipynb"
+          ],
+          "title": "双向多层 RNN、GloVe 与自有 CSV 数据",
+          "topic": "讲解 bidirectional + num_layers 设置下 RNN 输出维度的变化、加载预训练 GloVe 向量初始化 Embedding 的方法，以及如何把自有 CSV 文本数据接入同一套训练管线。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l4-char-rnn-generation.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解字符级 many-to-many 训练样本构造",
+            "掌握按步截断计算图的长序列训练",
+            "会用温度采样生成文本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "字符词表",
+            "many-to-many 训练",
+            "采样生成"
+          ],
+          "order": 4,
+          "practice_task": "换一份纯文本语料（如项目 LICENSE 或其他公开文本）训练 char-RNN，对比不同采样温度下生成文本的连贯度。",
+          "source_files": [
+            "pytorch_ipynb/rnn/char_rnn-charlesdickens.ipynb"
+          ],
+          "title": "字符级 RNN 文本生成",
+          "topic": "讲解 many-to-many 字符级语言模型：字符到索引的映射、按时间步的交叉熵、以及采样生成新文本时温度等策略的影响。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1",
+            "u6-l1"
+          ],
+          "filename": "u6-l5-text-cnn-imdb.md",
+          "id": "u6-l5",
+          "learning_goals": [
+            "掌握多尺度 1D 卷积核设计",
+            "理解全局最大池化提取 n-gram 特征",
+            "会按 checkpoint 选择最优模型"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "词嵌入层",
+            "多尺度 1D 卷积",
+            "全局最大池化"
+          ],
+          "order": 5,
+          "practice_task": "调整卷积核尺寸组合（如 {2,3,4} 改为 {3,4,5,6}）与卷积通道数，重新训练并对比 IMDb 测试准确率。",
+          "source_files": [
+            "pytorch_ipynb/cnn-nlp/cnn_imdb.ipynb"
+          ],
+          "title": "Text CNN：用卷积做 NLP",
+          "topic": "讲解 cnn_imdb.ipynb 的词嵌入 + 多尺度 1D 卷积 + 全局最大池化的 TextCNN 结构，以及训练/验证/测试与 checkpoint 选择的实验组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l6-distilbert-transformers.md",
+          "id": "u6-l6",
+          "learning_goals": [
+            "会用 transformers 加载 DistilBERT 与分词器",
+            "掌握冻结特征提取 + 传统分类器路线",
+            "掌握端到端微调的学习率与调度设置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "分词与数值化",
+            "特征提取路线",
+            "端到端微调路线"
+          ],
+          "order": 6,
+          "practice_task": "分别用特征提取与端到端微调两条路线在 IMDb 子集上训练 DistilBERT 分类器，对比准确率、显存与训练时间。",
+          "source_files": [
+            "pytorch_ipynb/transformer/1_distilbert-as-feature-extractor.ipynb",
+            "pytorch_ipynb/transformer/distilbert-hf-finetuning.ipynb",
+            "pytorch-lightning_ipynb/transformer/distilbert-finetuning-ii.ipynb"
+          ],
+          "title": "Transformer 实战：DistilBERT 特征提取与微调",
+          "topic": "讲解用 Hugging Face transformers 做 IMDb 情感分类的两条路线：DistilBERT 冻结特征提取 + 传统分类器，以及端到端微调（含分词与数值化、优化器调度）。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 6,
+      "title": "序列建模与 NLP"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u7-l1-evaluation-toolkit.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "会计算并可视化混淆矩阵",
+            "会展示误分类样本图片",
+            "理解 torchmetrics 两种调用语义的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "混淆矩阵",
+            "样本展示工具",
+            "torchmetrics 指标"
+          ],
+          "order": 1,
+          "practice_task": "训练任一 MNIST/CIFAR 模型后，用 helper 模块输出混淆矩阵与 16 个误分类样本图，再用 torchmetrics 复现同一准确率并解释两种调用方式的结果一致性。",
+          "source_files": [
+            "pytorch_ipynb/helper_evaluate.py",
+            "pytorch_ipynb/helper_plotting.py",
+            "pytorch_ipynb/related-libraries/torchmetrics-update-forward.ipynb"
+          ],
+          "title": "评估工具链：准确率、混淆矩阵与失败案例",
+          "topic": "讲解 compute_confusion_matrix、plot_confusion_matrix、show_examples 的实现与用法，以及 torchmetrics 的 update() 与 forward() 语义差异和指标累计的正确姿势。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-kfold-cross-validation.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 K 折划分的索引构造",
+            "掌握每折重置模型与优化器的必要性",
+            "了解 pl_cross 在 Lightning 中的用法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "基线划分",
+            "K 折循环",
+            "pl_cross 库"
+          ],
+          "order": 2,
+          "practice_task": "基于 baseline-cnn-mnist 实现一个 5 折交叉验证循环（每折重新初始化模型与优化器），报告各折测试准确率的均值与标准差。",
+          "source_files": [
+            "pytorch_ipynb/kfold/baseline-cnn-mnist.ipynb",
+            "pytorch-lightning_ipynb/kfold/baseline-light-cnn-mnist.ipynb",
+            "pytorch-lightning_ipynb/kfold/kfold-light-cnn-mnist.ipynb"
+          ],
+          "title": "K 折交叉验证",
+          "topic": "以 baseline-cnn-mnist 为对照，讲解 K 折交叉验证的划分逻辑、每折重置模型与优化器的注意事项，以及 pl_cross 库在 Lightning 中的 5 折实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u7-l3-training-tricks.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "会执行 LR Range Test 并读图选边界",
+            "掌握三种 cyclical learning rate 模式",
+            "掌握 clip_grad_norm_ 与 batch size 退火"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LR Range Test",
+            "循环学习率",
+            "梯度裁剪",
+            "batch size 退火"
+          ],
+          "order": 3,
+          "practice_task": "在 MLP 上先做 LR Range Test 画出损失-学习率曲线，据此选定 CLR 边界后用 triangular2 策略训练，并与固定学习率基线对比收敛曲线。",
+          "source_files": [
+            "pytorch_ipynb/tricks/cyclical-learning-rate.ipynb",
+            "pytorch_ipynb/tricks/gradclipping_mlp.ipynb",
+            "pytorch_ipynb/tricks/cnn-alexnet-cifar10-batchincrease.ipynb"
+          ],
+          "title": "训练技巧：循环学习率、梯度裁剪与 batch 退火",
+          "topic": "讲解 LR Range Test 与 triangular/triangular2/exp_range 三种循环学习率、clip_grad_norm_ 的使用场景，以及「增大 batch size 代替学习率衰减」的退火策略。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u7-l4-transfer-learning.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "会加载 torchvision 预训练 VGG16",
+            "理解冻结参数 requires_grad=False 的效果",
+            "会替换并只训练新分类头"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "预训练模型加载",
+            "参数冻结",
+            "分类头替换"
+          ],
+          "order": 4,
+          "practice_task": "把预训练 VGG16 的最后一个卷积块也解冻（分层微调），对比「只训分类头」与「最后块 + 头联合微调」在 CIFAR-10 上的准确率与训练耗时。",
+          "source_files": [
+            "pytorch_ipynb/transfer/transferlearning-vgg16-cifar10-1.ipynb",
+            "pytorch_ipynb/mechanics/transferlearning-vgg16.ipynb"
+          ],
+          "title": "迁移学习",
+          "topic": "讲解 transferlearning-vgg16-cifar10-1：加载 ImageNet 预训练 VGG16、用 requires_grad=False 冻结特征提取器、替换分类头，以及仅训练新头的完整流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3"
+          ],
+          "filename": "u7-l5-ordinal-regression.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "理解 CE 基线在有序目标上的缺陷",
+            "掌握 CORAL 共享权重 + 独立偏置设计",
+            "会从累积概率得到最终有序预测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "有序回归问题定义",
+            "CORAL 层与损失",
+            "CORN 条件概率"
+          ],
+          "order": 5,
+          "practice_task": "在同一数据划分下训练 baseline 与 CORAL，对比 MAE，并实现从 CORAL 累积概率转换成最终类别预测的函数。",
+          "source_files": [
+            "pytorch_ipynb/ordinal/baseline_cement.ipynb",
+            "pytorch_ipynb/ordinal/CORAL_cement.ipynb",
+            "pytorch_ipynb/ordinal/CORN_cement.ipynb"
+          ],
+          "title": "有序回归：CORAL 与 CORN",
+          "topic": "以水泥强度数据集为例讲解有序回归：cross entropy 基线的问题、CORAL 的共享权重 + 独立偏置与秩一致性、CORN 的条件概率分解。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u7-l6-interpretability-visualization.md",
+          "id": "u7-l6",
+          "learning_goals": [
+            "会对输入求损失梯度得到显著性图",
+            "掌握 guided backprop 改写 ReLU 反向的实现",
+            "能将热力图叠加原图对比两种方法"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "对输入求梯度",
+            "guided backprop hook 改写",
+            "热力图叠加可视化"
+          ],
+          "order": 6,
+          "practice_task": "对 cats-and-dogs 模型分别生成 vanilla gradient 与 guided backprop 热力图各 8 张，叠加到原图上对比两者的定位能力差异。",
+          "source_files": [
+            "pytorch_ipynb/viz/cnns/cats-and-dogs/cnn-viz-grad__vgg16-cats-dogs.ipynb",
+            "pytorch_ipynb/viz/cnns/cats-and-dogs/cnn-viz-guided-backprop__vgg16-cats-dogs.ipynb",
+            "pytorch_ipynb/viz/cnns/cats-and-dogs/vgg16.py",
+            "pytorch_ipynb/viz/cnns/cats-and-dogs/datautils.py"
+          ],
+          "title": "模型可解释性可视化",
+          "topic": "讲解对输入求损失梯度得到显著性图的方法，以及 guided backprop 中通过 hook 改写 ReLU 反向传播的实现，并结合 vgg16.py 与 datautils.py 的数据管线。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 7,
+      "title": "训练评估与技巧"
+    },
+    {
+      "id": "u8",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u8-l1-lightning-basics.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "会实现 training_step/validation_step",
+            "会用 DataModule 封装数据",
+            "会配置 Trainer、TensorBoard 与最优 checkpoint"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "LightningModule",
+            "DataModule",
+            "Trainer 与 checkpoint"
+          ],
+          "order": 1,
+          "practice_task": "把手写的 MNIST MLP 训练循环迁移成 LightningModule + DataModule 版本，用 Trainer 训练，并从最优 checkpoint 加载后继续训练 5 个 epoch。",
+          "source_files": [
+            "pytorch_ipynb/lightning/lightning-mlp.ipynb",
+            "pytorch_ipynb/lightning/lightning-mlp-best-model.ipynb",
+            "pytorch-lightning_ipynb/mlp/mlp-basic.ipynb"
+          ],
+          "title": "PyTorch Lightning 基础",
+          "topic": "讲解 LightningModule 的 training_step/validation_step 配置、DataModule 封装数据、Trainer 一键训练，以及 TensorBoard 日志、继续训练与最优 checkpoint 保存。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1"
+          ],
+          "filename": "u8-l2-lightning-zoo-templates.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "能对照两种风格的同名 notebook 迁移代码",
+            "理解 LightningModule 与普通 Module 的映射",
+            "会用模板脚本批量启动实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "风格对照迁移",
+            "分类模板 notebook",
+            "tune 脚本"
+          ],
+          "order": 2,
+          "practice_task": "选一个尚无 Lightning 版本的模型（如 cnn-resnet34-mnist），仿照模板把它改写成 Lightning 版本并跑通至少一个 epoch。",
+          "source_files": [
+            "pytorch-lightning_ipynb/cnn/cnn-basic.ipynb",
+            "pytorch-lightning_ipynb/mlp/template_classification_basic.ipynb",
+            "templates/pytorch_lightning/template_classification_basic.ipynb",
+            "templates/pytorch_lightning/tune_classification_basic.py"
+          ],
+          "title": "Lightning 模型库对照与官方模板",
+          "topic": "对照 pytorch_ipynb 与 pytorch-lightning_ipynb 的同名 cnn-basic notebook，理解两种风格的映射关系；讲解 templates/pytorch_lightning 的分类模板与 tune 脚本如何支撑批量实验。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l1",
+            "u4-l3"
+          ],
+          "filename": "u8-l3-data-augmentation.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "掌握 AutoAugment 与 TrivialAugment 的接入方式",
+            "理解增强只作用于训练集的原因",
+            "会做增强收益的对照实验"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "无增强基线",
+            "AutoAugment",
+            "TrivialAugment"
+          ],
+          "order": 3,
+          "practice_task": "在 without/with-autoaugment/with-trivialaugment 三个 notebook 中保持超参一致各训练若干 epoch，绘制验证准确率曲线并总结增强收益。",
+          "source_files": [
+            "pytorch-lightning_ipynb/data-augmentation/autoaugment/without-augmentation.ipynb",
+            "pytorch-lightning_ipynb/data-augmentation/autoaugment/with-autoaugment.ipynb",
+            "pytorch-lightning_ipynb/data-augmentation/autoaugment/with-trivialaugment.ipynb",
+            "pytorch-lightning_ipynb/data-augmentation/autoaugment/helper_utilities.py"
+          ],
+          "title": "数据增强实战：AutoAugment 与 TrivialAugment",
+          "topic": "通过三个对照实验讲解 torchvision 新式数据增强策略在 ResNet-18/CIFAR-10 上的收益，以及增强 transform 只作用于训练集的原因。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u8-l4-gradient-checkpointing.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "理解重计算换显存的原理",
+            "会包装层应用 checkpoint",
+            "会实测显存峰值与训练时间"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "检查点原理",
+            "torch.utils.checkpoint",
+            "显存与时间实测"
+          ],
+          "order": 4,
+          "practice_task": "对 NiN 模型的部分层应用 checkpoint，实测开关前后的显存占用（torch.cuda.max_memory_allocated）与单 epoch 耗时，填一张「显存 vs 时间」对照表。",
+          "source_files": [
+            "pytorch_ipynb/mechanics/gradient-checkpointing-nin.ipynb"
+          ],
+          "title": "显存优化：梯度检查点",
+          "topic": "讲解梯度检查点用重计算换显存的原理、checkpoint 的使用方式，以及 notebook 中对显存峰值与训练时间的实测方法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u8-l5-multi-gpu-parallelism.md",
+          "id": "u8-l5",
+          "learning_goals": [
+            "理解 DataParallel 的 batch 拆分机制",
+            "了解大图像数据集的磁盘准备流程",
+            "理解按层切分的流水线并行思路"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DataParallel 数据并行",
+            "CelebA 数据准备",
+            "流水线并行"
+          ],
+          "order": 5,
+          "practice_task": "阅读并注释 cnn-vgg16-celeba-data-parallel 的关键代码；若有双卡环境则实测不同 batch_size 对吞吐的影响，否则通过 device_ids 设置与日志说明数据流向。",
+          "source_files": [
+            "pytorch_ipynb/cnn/cnn-vgg16-celeba-data-parallel.ipynb",
+            "pytorch_ipynb/cnn/cnn-resnet18-celeba-dataparallel.ipynb",
+            "pytorch_ipynb/mechanics/model-pipeline-vgg16.ipynb"
+          ],
+          "title": "多 GPU 并行：DataParallel 与流水线并行",
+          "topic": "讲解 nn.DataParallel 的数据并行用法（batch 拆分到多卡）、CelebA 大数据集的准备流程，以及用流水线并行把模型按层切分到多卡的思路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u8-l6-gnn-basics.md",
+          "id": "u8-l6",
+          "learning_goals": [
+            "理解把图像构造为图数据的思路",
+            "掌握高斯滤波邻居加权",
+            "了解谱图卷积的实现路线"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "像素图构建",
+            "高斯滤波消息传递",
+            "谱图卷积"
+          ],
+          "order": 6,
+          "practice_task": "修改 gnn-basic-1 中的高斯滤波参数与邻域半径，观察准确率与建图耗时的变化，并画出某一个数字样本的邻接结构示意图。",
+          "source_files": [
+            "pytorch_ipynb/gnn/gnn-basic-1.ipynb",
+            "pytorch_ipynb/gnn/gnn-basic-edge-1.ipynb",
+            "pytorch_ipynb/gnn/gnn-basic-graph-spectral-1.ipynb"
+          ],
+          "title": "图神经网络入门",
+          "topic": "讲解把 MNIST 像素当作图节点的高斯滤波 GNN、加边预测的版本，以及基于谱图卷积的实现，理解消息传递视角下的图卷积。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u3-l1",
+            "u5-l1"
+          ],
+          "filename": "u8-l7-tensorflow1-comparison-capstone.md",
+          "id": "u8-l7",
+          "learning_goals": [
+            "理解 TF1 的计算图与会话范式",
+            "能对照 PyTorch 理解两套框架训练循环差异",
+            "回顾整套学习路径并规划后续方向"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TF1 计算图与会话",
+            "低层 API 对照",
+            "框架概念映射"
+          ],
+          "order": 7,
+          "practice_task": "把 tensorflow1_ipynb/mlp/mlp-basic.ipynb 的关键计算图逻辑翻译成 PyTorch 并加对照注释，整理一张 PyTorch 与 TF1 概念对照表（placeholder/Variable/session ↔ tensor/nn.Module/训练循环）。",
+          "source_files": [
+            "tensorflow1_ipynb/basic-ml/perceptron.ipynb",
+            "tensorflow1_ipynb/mlp/mlp-basic.ipynb",
+            "tensorflow1_ipynb/mlp/mlp-lowlevel.ipynb",
+            "tensorflow1_ipynb/cnn/cnn-basic.ipynb",
+            "tensorflow1_ipynb/autoencoder/ae-basic.ipynb"
+          ],
+          "title": "框架对照与收官：TensorFlow 1.x 版本",
+          "topic": "对照 PyTorch 版本精读 TF1 的 session/graph 范式、低层 API 版 MLP 与 CNN/自编码器实现，总结两套框架在训练循环与变量管理上的差异，并回顾整套学习路径的进阶地图。"
+        }
+      ],
+      "level": "advanced",
+      "order": 8,
+      "title": "工程化与高级专题"
+    }
+  ]
+}
