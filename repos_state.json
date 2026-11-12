@@ -68836,8 +68836,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "84679e9d3a2582bffc53a5259d13cfc7278c9772",
-      "last_run_at": "2026-11-12T11:02:43Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-11-12T13:58:36Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"6ccf6067-1fed-4b94-a638-49b89902155c\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "triple-mu/fast-ulysses": {
       "prompt_hash": "b21aef51792b02df",
@@ -68945,7 +68945,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"8043bbc0-ec92-4315-8c7e-5196ad2f5e84\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4acb4b47-1b1d-4239-b5e9-8f9b65bc8a3b\",\"total_co"
         },
         "u5-l1": {
           "status": "pending",
@@ -69044,7 +69044,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/triple-mu/fast-ulysses/fast-ulysses-tutorial",
       "last_head": "ad1a4a06a42d8129a278f010b1d67a6e206d38e6",
-      "last_run_at": "2026-11-12T11:02:43Z",
+      "last_run_at": "2026-11-12T13:58:36Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "KellerJordan/Muon": {
@@ -69139,7 +69139,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"da2a5066-bbf6-4a62-9d12-06bd24ea8002\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"06141767-5ee0-4b0e-aeef-2eb14af7e2cd\",\"total_co"
         },
         "u4-l2": {
           "status": "pending",
@@ -69158,7 +69158,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/KellerJordan/Muon/Muon-tutorial",
       "last_head": "f98f1cacc0263b04290753e32be8d498c1efc806",
-      "last_run_at": "2026-11-12T11:02:43Z",
+      "last_run_at": "2026-11-12T13:58:36Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/open-instruct": {
@@ -69183,7 +69183,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"690ce499-d619-4b03-b1f9-f0450981f35c\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"d6672f2c-7da3-4039-b33a-cefa4d25902a\",\"total_co"
         },
         "u1-l4": {
           "status": "pending",
@@ -69407,7 +69407,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/allenai/open-instruct/open-instruct-tutorial",
       "last_head": "896a734f5152f6092a1ae2c2bccb8195a70abc42",
-      "last_run_at": "2026-11-12T11:02:43Z",
+      "last_run_at": "2026-11-12T13:58:36Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/OLMo-core": {},
