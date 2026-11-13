@@ -8,9 +8,9 @@
 2. 画出 `BF16_Optimizer` 的内存布局：bf16 扁平权重（全量）+ fp32 主权重分区（本 rank 份额）+ fp32 扁平梯度（全量），并按 DP 世界大小估算每参数字节数。
 3. 说出引擎在什么条件下会选择 `BF16_Optimizer`（专门化 ZeRO-1 路径与 DDP 式路径），以及 `data_types.grad_accum_dtype` 在其中的作用。
 4. 掌握 2025/12 引入的低精度 master states 配置：`bf16.bf16_master_weights_and_grads` 与 `bf16.bf16_optimizer_states` 的语义、依赖关系和卸载约束。
-5. 理解 `keep_in_fp32` 精度策略：为什么 MoE 路由偏置这类**缓冲区**在 bf16 训练中必须留在 fp32。
-6. 解读 PR #8892 引入的 `load_state_dict` masters 恢复语义：`load_from_fp32_weights=False` 时从 bit16 权重重建 fp32 主权重；引擎 `load_checkpoint` 正常恢复仍传 `True`；`load_optimizer_states=False` 保留 masters 并让 Adam moments 重新开始。
-7. 解读本周期（PR #9034，修 #7204）补全的销毁清理：`_update_hp_grad` 给每个 bf16 参数留下的 `_hp_grad` 视图会把整块 fp32 梯度缓冲（约 2 倍 bf16 模型大小）钉在内存里，`destroy()` 现在显式置空它——HF Trainer 这类「销毁引擎但保留模型」的用法不再泄漏。
+5. 理解 `keep_in_fp32` 精度策略的本更新周期演进（PR #8843）：`keep_buffers_in_fp32`/`buffers_to_keep_in_fp32` 更名为 **`keep_tensors_in_fp32`/`tensors_to_keep_in_fp32`** 并新增 `include_params`，名单同时覆盖参数与缓冲；但**参数级 fp32 保留仅在 ZeRO-3（无参数卸载）生效**——`BF16_Optimizer` 这类把参数组压平成单一 dtype 缓冲的优化器做不到，引擎在 ZeRO-3 以下把点名参数 cast 到训练 dtype（`auto` 告警、显式列表直接 `ValueError`），buffers 仍保留 fp32。
+6. 解读 `load_state_dict` 的 masters 恢复语义：`load_from_fp32_weights=False` 时从 bit16 权重重建 fp32 主权重；引擎 `load_checkpoint` 正常恢复仍传 `True`；`load_optimizer_states=False` 保留 masters 并让 Adam moments 重新开始。
+7. 解读上一更新周期（PR #9034，修 #7204）补全的销毁清理：`_update_hp_grad` 给每个 bf16 参数留下的 `_hp_grad` 视图会把整块 fp32 梯度缓冲（约 2 倍 bf16 模型大小）钉在内存里，`destroy()` 现在显式置空它——HF Trainer 这类「销毁引擎但保留模型」的用法不再泄漏。
 
 ## 2. 前置知识
 
@@ -39,18 +39,24 @@
 
 PyTorch 里一个张量对象由「元数据（形状/步长/dtype）+ 底层存储（storage）」组成；`narrow`/`view`/`split` 产生的**视图**是新的张量对象，但共享同一块 storage。关键规则是：**只要还有任何一个视图活着，整块 storage 就不能被回收**——哪怕你早已删掉了"原来那个"大张量。验证对象是否真正被回收的标准手法是 `weakref.ref(obj)` + `del` + `gc.collect()`：弱引用不阻止回收，回收后 `ref()` 返回 `None`。本讲 4.5 的销毁清理正是围绕"参数身上挂着一个视图"展开的。
 
+### 2.5 参数（Parameter）与缓冲（Buffer）
+
+`nn.Parameter` 参与梯度更新、会被优化器看到；`register_buffer` 登记的张量只是随模块保存/迁移的常量（如位置编码的 `inv_freq`、MoE 的路由偏置），没有梯度、优化器也不认识它。这个区别在 4.3 变得关键：**名单豁免（keep in fp32）对 buffer 与 parameter 的处理从本更新周期起不再相同**——buffer 在任何配置下都能留在 fp32，而 parameter 只有 ZeRO-3（无参数卸载）才保留。
+
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
 | --- | --- |
-| [deepspeed/runtime/bf16_optimizer.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py) | `BF16_Optimizer` 本体：内存布局、step 主循环、state_dict 保存/加载、destroy() 销毁清理（本讲主角） |
-| [deepspeed/runtime/precision_config.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/precision_config.py) | `DeepSpeedBF16Config`：bf16 配置字段的 pydantic 解析，含低精度 master states 两个开关 |
-| [deepspeed/runtime/keep_in_fp32.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/keep_in_fp32.py) | 按名字模式把指定**缓冲区**留在 fp32 的精度策略 |
-| [deepspeed/runtime/engine.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py) | 优化器包装分发（`_do_optimizer_sanity_check`）、`_configure_bf16_optimizer`、`load_checkpoint` 调用点、`destroy()`/`__del__` 生命周期 |
-| [deepspeed/runtime/base_optimizer.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/base_optimizer.py) | `_configure_master_weights`：低精度 master states 的公共校验与 master dtype 选择 |
-| [deepspeed/runtime/zero/stage_1_and_2.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/zero/stage_1_and_2.py) | ZeRO-1/2 优化器：`load_from_fp32_weights` 旧语义的参照系 |
-| [tests/unit/checkpoint/test_fp32_master_stage3_bf16.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py) | masters 恢复语义回归测试，也是本讲实践任务的模板 |
-| [tests/unit/v1/zero/test_zero.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py) | `TestDestroyReleasesEngine`：本周期新增的销毁释放回归（含 BF16_Optimizer 场景） |
+| [deepspeed/runtime/bf16_optimizer.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py) | `BF16_Optimizer` 本体：内存布局、step 主循环、state_dict 保存/加载、destroy() 销毁清理（本讲主角） |
+| [deepspeed/runtime/precision_config.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/precision_config.py) | `DeepSpeedBF16Config`：bf16 配置字段的 pydantic 解析，含低精度 master states 两个开关 |
+| [deepspeed/runtime/keep_in_fp32.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py) | 按名字模式把指定**参数与缓冲**留在 fp32 的精度策略（#8843 更名后由 `keep_tensors_in_fp32` 统一处理两种张量） |
+| [deepspeed/runtime/engine.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py) | 优化器包装分发（`_do_optimizer_sanity_check`）、`_configure_bf16_optimizer`、dtype 转换关卡（`_cast_module_mixed_precision`/`_keeps_params_in_fp32`）、`load_checkpoint` 调用点、`destroy()`/`__del__` 生命周期 |
+| [deepspeed/runtime/base_optimizer.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/base_optimizer.py) | `_configure_master_weights`：低精度 master states 的公共校验与 master dtype 选择 |
+| [deepspeed/runtime/zero/partition_parameters.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/partition_parameters.py) | `zero.Init`：模块 `__init__` 收尾时的 `_keep_in_fp32` 就地转换（参数级保留的 ZeRO-3 侧入口，深入见 u5-l9） |
+| [deepspeed/runtime/zero/stage_1_and_2.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/stage_1_and_2.py) | ZeRO-1/2 优化器：`load_from_fp32_weights` 旧语义的参照系 |
+| [tests/unit/checkpoint/test_fp32_master_stage3_bf16.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py) | masters 恢复语义回归测试，也是本讲 4.4 实践任务的模板 |
+| [tests/unit/v1/half_precision/test_keep_in_fp32_modules.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py) | keep_in_fp32 全语义回归：模式编译、buffer/参数保留、量化分区豁免、ZeRO-3 训练精度、ZeRO-3 以下的 cast 关卡（本周期大幅扩充） |
+| [tests/unit/v1/zero/test_zero.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py) | `TestDestroyReleasesEngine`：销毁释放回归（含 BF16_Optimizer 场景） |
 
 ## 4. 核心概念与源码讲解
 
@@ -60,12 +66,12 @@ PyTorch 里一个张量对象由「元数据（形状/步长/dtype）+ 底层存
 
 `BF16_Optimizer` 是 bf16 训练的包装优化器（继承 `ZeROOptimizer` 接口），它解决的问题是：**前向/反向用 bf16 保吞吐，权重更新用 fp32 保精度，同时把 fp32 主权重按数据并行维度切分以省显存**——可以理解为"轻量版 ZeRO-1"：只切分主权重和优化器状态，梯度保持全量。
 
-引擎在两个场景会选择它（见 [engine.py:L2327-L2356](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2327-L2356) 的 `_do_optimizer_sanity_check`）：
+引擎在两个场景会选择它（见 [engine.py:L2367-L2396](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2367-L2396) 的 `_do_optimizer_sanity_check`）：
 
-1. **专门化 ZeRO-1 路径**：开启了 ZeRO、stage 恰为 1、模型 dtype 是 bf16、梯度累积 dtype 是 fp32、且没有 CPU 卸载时，返回 `BFLOAT16` 分发标志——这就是 PR 描述里"dedicated ZeRO-1 BF16 optimizer"的由来。`tests/unit/checkpoint/test_fp32_master_stage3_bf16.py` 正是用 `zero_optimization.stage=1` + `data_types.grad_accum_dtype="fp32"` + `bf16.enabled=true` 组合出这条路径的。
-2. **关闭 ZeRO 的流水线 bf16 路径**：没开 ZeRO、模型 dtype 与梯度累积 dtype 相同且都是 bf16、且开启了流水线并行时，同样返回 `BFLOAT16`（同时打 warning 提示大累积步数下 bf16 累积的数值风险）。
+1. **专门化 ZeRO-1 路径**：开启了 ZeRO、stage 恰为 1、模型 dtype 是 bf16、梯度累积 dtype 是 fp32、且没有 CPU 卸载时，返回 `BFLOAT16` 分发标志——这就是"dedicated ZeRO-1 BF16 optimizer"的由来（[engine.py:L2378-L2383](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2378-L2383)；该分支同时要求 `compute_grad_norm` 保持开启，否则直接 `ValueError`）。`tests/unit/checkpoint/test_fp32_master_stage3_bf16.py` 正是用 `zero_optimization.stage=1` + `data_types.grad_accum_dtype="fp32"` + `bf16.enabled=true` 组合出这条路径的。
+2. **关闭 ZeRO 的流水线 bf16 路径**：没开 ZeRO、模型 dtype 与梯度累积 dtype 相同且都是 bf16、且开启了流水线并行时，同样返回 `BFLOAT16`（[engine.py:L2389-L2393](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2389-L2393)，同时打 warning 提示大累积步数下 bf16 累积的数值风险）。
 
-注意别混淆：**普通 DDP bf16（关 ZeRO、不开流水线）走的是 `DDP_BFLOAT16` 分发标志**，在 [engine.py:L2393-L2395](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2393-L2395) 被交给 `_configure_fp16_optimizer`（即 u4-l2 讲的 FP16 家族包装器，只是低精度 dtype 换成 bf16），不会经过本讲的 `BF16_Optimizer`。
+注意别混淆：**普通 DDP bf16（关 ZeRO、不开流水线）走的是 `DDP_BFLOAT16` 分发标志**，在 [engine.py:L2433-L2435](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2433-L2435) 被交给 `_configure_fp16_optimizer`（即 u4-l2 讲的 FP16 家族包装器，只是低精度 dtype 换成 bf16），不会经过本讲的 `BF16_Optimizer`。
 
 因为 bf16 不需要 loss scaling，这个类里与 loss scaler 相关的属性全部是为了 API 兼容而设的占位符。
 
@@ -99,29 +105,31 @@ step（梯度累积边界，每 gas 个微批次一次）
 | `fp32_groups_gradients_flat` | fp32 | 全量 | 4 |
 | 底层优化器状态（如 Adam 两个矩） | fp32 | 本 rank 分区 | \(8/N\) |
 
+请特别记住第一行：**每个参数组压平成"一块"单一 dtype 的 bf16 扁平缓冲**。这个看似平常的设计正是 4.3 中"参数级 fp32 保留为何在 ZeRO-3 以下做不到"的直接原因。
+
 #### 4.1.3 源码精读
 
-**① 构造入口与 loss scaler 占位符。** 引擎侧的构造在 [_configure_bf16_optimizer（engine.py:L2643-L2663）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2643-L2663)，把 `bfloat16_config` 与 `grad_acc_dtype=self.get_data_types()[1]` 一起传入。类内部在 [bf16_optimizer.py:L75-L79](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L75-L79) 声明这些占位属性，注释明说"BF16 不用 loss scaling，这些属性只为 API 兼容"——对照 u4-l1 的 `DynamicLossScaler`，这里 `self.overflow = False` 只是一个普通标志位。
+**① 构造入口与 loss scaler 占位符。** 引擎侧的构造在 [_configure_bf16_optimizer（engine.py:L2683-L2703）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2683-L2703)，把 `bfloat16_config` 与 `grad_acc_dtype=self.get_data_types()[1]` 一起传入。类内部在 [bf16_optimizer.py:L75-L79](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L75-L79) 声明这些占位属性，注释明说"BF16 不用 loss scaling，这些属性只为 API 兼容"——对照 u4-l1 的 `DynamicLossScaler`，这里 `self.overflow = False` 只是一个普通标志位。
 
-**② 内存布局的建立。** [_setup_for_real_optimizer（bf16_optimizer.py:L156-L241）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L156-L241) 逐参数组完成：
+**② 内存布局的建立。** [_setup_for_real_optimizer（bf16_optimizer.py:L156-L241）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L156-L241) 逐参数组完成：
 
-- [L169-L175](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L169-L175)：把组内 bf16 参数摊平成单个扁平张量，并让各参数的 `.data` 指向扁平存储的对应视图（之后 `update_lp_params` 改写扁平张量，模型参数随之更新）。
-- [L177-L183](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L177-L183)：按 DP 世界大小把扁平 bf16 权重等分为 `real_dp_world_size` 个分区（对齐填充记入 `group_paddings`）。
-- [L186-L187](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L186-L187)：**fp32 主权重分区在本行诞生**——`bf16_dp_partitions[partition_id].clone().float().detach()`，即取本 rank 的 bf16 分区、升精度到 fp32、断开计算图。
-- [L194-L206](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L194-L206)：**全量 fp32 扁平梯度缓冲与逐参数视图在本段建立**——L195-L196 分配 `fp32_groups_gradients_flat`，L203-L206 用 `_split_flat_tensor` 把它切成 `fp32_groups_gradients`（逐参数视图列表）。记住这两行的存在，4.5 的泄漏链就从这里出发。
-- [L228-L229](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L228-L229)：把底层优化器的 `param_group['params']` **重绑定为 fp32 分区**——此后 `optimizer.step()` 看到的参数就是 fp32 masters，与模型里的 bf16 参数彻底解耦。
+- [L169-L175](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L169-L175)：把组内 bf16 参数摊平成**单个**扁平张量（dtype 取决于参数本身），并让各参数的 `.data` 指向扁平存储的对应视图（之后 `update_lp_params` 改写扁平张量，模型参数随之更新）。一块缓冲一个 dtype——记住这一点，4.3 会回来引用。
+- [L177-L183](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L177-L183)：按 DP 世界大小把扁平 bf16 权重等分为 `real_dp_world_size` 个分区（对齐填充记入 `group_paddings`）。
+- [L186-L187](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L186-L187)：**fp32 主权重分区在本行诞生**——`bf16_dp_partitions[partition_id].clone().float().detach()`，即取本 rank 的 bf16 分区、升精度到 fp32、断开计算图。
+- [L194-L206](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L194-L206)：**全量 fp32 扁平梯度缓冲与逐参数视图在本段建立**——L195-L196 分配 `fp32_groups_gradients_flat`（dtype 用 `grad_acc_dtype`），L203-L206 用 `_split_flat_tensor` 把它切成 `fp32_groups_gradients`（逐参数视图列表）。记住这两行的存在，4.5 的泄漏链就从这里出发。
+- [L228-L229](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L228-L229)：把底层优化器的 `param_group['params']` **重绑定为 fp32 分区**——此后 `optimizer.step()` 看到的参数就是 fp32 masters，与模型里的 bf16 参数彻底解耦。
 
-**③ 梯度从 bf16 到 fp32 的搬运。** [backward_epilogue / update_hp_grads（bf16_optimizer.py:L507-L542）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L507-L542)：backward 结束后（或开启 `immediate_grad_update` 时在每个 autograd hook 里），[_update_hp_grad 的核心一行是 L527](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L527)：`hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype)...)`——把 bf16 梯度转成 fp32 后**累加**进全量 fp32 梯度缓冲。多次微批次的梯度在这里以 fp32 累积，这就是 `grad_accum_dtype=fp32` 的数值收益所在。注意 [L528](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L528) 顺手把这个 fp32 视图挂在了参数身上（`lp._hp_grad = hp_grad`）——训练期间这是无害的便利引用，销毁时却成为泄漏源，详见 4.5。
+**③ 梯度从 bf16 到 fp32 的搬运。** [backward_epilogue / update_hp_grads（bf16_optimizer.py:L507-L542）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L507-L542)：backward 结束后（或开启 `immediate_grad_update` 时在每个 autograd hook 里），[_update_hp_grad 的核心一行是 L527](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L527)：`hp_grad.data.add_(lp.grad.data.to(hp_grad.dtype)...)`——把 bf16 梯度转成 fp32 后**累加**进全量 fp32 梯度缓冲。多次微批次的梯度在这里以 fp32 累积，这就是 `grad_accum_dtype=fp32` 的数值收益所在。注意 [L528](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L528) 顺手把这个 fp32 视图挂在了参数身上（`lp._hp_grad = hp_grad`）——训练期间这是无害的便利引用，销毁时却成为泄漏源，详见 4.5。
 
-**④ step 主循环。** [step（bf16_optimizer.py:L387-L437）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L387-L437) 依次做：
+**④ step 主循环。** [step（bf16_optimizer.py:L387-L437）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L387-L437) 依次做：
 
-- [L392-L404](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L392-L404)：分组计算全局梯度范数（MoE 模型的专家梯度走 `get_norm_with_moe_layers`）。
-- [L406-L411](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L406-L411)：`is_invalid_grad_norm` 命中（inf/nan）则标记 `self.overflow = True` 并**跳过整个更新**——这是 bf16 版的"溢出检查"，检查的是梯度本身是否已坏，而不是 loss scale 是否越界（bf16 没有 scale 可调）。
-- [L412-L422](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L412-L422)：按全局范数裁剪，然后把本 rank 的 fp32 梯度分区赋给 fp32 主权重分区的 `.grad`（若梯度累积 dtype 不是 fp32，先 cast）。
-- [L426](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L426)：`self.optimizer.step()` 在 fp32 masters 上做真正的 Adam/SGD 更新。
-- [L435](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L435)：`update_lp_params()` 回写 bf16。
+- [L392-L404](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L392-L404)：分组计算全局梯度范数（MoE 模型的专家梯度走 `get_norm_with_moe_layers`）。
+- [L406-L411](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L406-L411)：`is_invalid_grad_norm` 命中（inf/nan）则标记 `self.overflow = True` 并**跳过整个更新**——这是 bf16 版的"溢出检查"，检查的是梯度本身是否已坏，而不是 loss scale 是否越界（bf16 没有 scale 可调）。
+- [L412-L422](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L412-L422)：按全局范数裁剪，然后把本 rank 的 fp32 梯度分区赋给 fp32 主权重分区的 `.grad`（若梯度累积 dtype 不是 fp32，先 cast）。
+- [L426](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L426)：`self.optimizer.step()` 在 fp32 masters 上做真正的 Adam/SGD 更新。
+- [L435](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L435)：`update_lp_params()` 回写 bf16。
 
-**⑤ masters → bf16 的反向同步。** [update_lp_params（bf16_optimizer.py:L596-L607）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L596-L607)：先把更新后的 fp32 分区 `copy_` 进对应的 bf16 分区（隐式降精度），再用 `all_gather_dp_groups` 分桶 all-gather 各分区，拼回全量 bf16 扁平权重。由于各 bf16 参数的 `.data` 是扁平存储的视图（见 ②），模型下一轮前向立即用上新权重。
+**⑤ masters → bf16 的反向同步。** [update_lp_params（bf16_optimizer.py:L596-L607）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L596-L607)：先把更新后的 fp32 分区 `copy_` 进对应的 bf16 分区（隐式降精度），再用 `all_gather_dp_groups` 分桶 all-gather 各分区，拼回全量 bf16 扁平权重。由于各 bf16 参数的 `.data` 是扁平存储的视图（见 ②），模型下一轮前向立即用上新权重。
 
 #### 4.1.4 代码实践
 
@@ -129,7 +137,7 @@ step（梯度累积边界，每 gas 个微批次一次）
 
 **操作步骤**：
 
-1. 阅读并复用测试 [_config（test_fp32_master_stage3_bf16.py:L30-L53）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L30-L53) 的写法，写一个最小脚本（示例代码，非项目原有文件）：
+1. 阅读并复用测试 [_config（test_fp32_master_stage3_bf16.py:L30-L53）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L30-L53) 的写法，写一个最小脚本（示例代码，非项目原有文件）：
 
    ```python
    import torch, deepspeed
@@ -158,7 +166,7 @@ step（梯度累积边界，每 gas 个微批次一次）
 
 **需要观察的现象**：四行输出分别是 `BF16_Optimizer`、`DeepSpeedZeroOptimizer`、`DeepSpeedZeroOptimizer`、`FP16_UnfusedOptimizer`（最后一行取决于底层优化器：FusedAdam 时为 `FP16_Optimizer`，普通 Adam 时为 `FP16_UnfusedOptimizer`）。
 
-**预期结果**：只有"stage=1 且 grad_accum_dtype=fp32"命中专门化路径（对应 [engine.py:L2338-L2343](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2338-L2343) 的条件）；不写 `grad_accum_dtype` 时 stage=1 落回通用 ZeRO 优化器；关闭 ZeRO 的纯 bf16 DDP 走 `DDP_BFLOAT16` → `_configure_fp16_optimizer`（[engine.py:L2393-L2395](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2393-L2395)），得到的是 FP16 家族包装器而非 `BF16_Optimizer`。具体输出待本地验证。
+**预期结果**：只有"stage=1 且 grad_accum_dtype=fp32"命中专门化路径（对应 [engine.py:L2378-L2383](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2378-L2383) 的条件）；不写 `grad_accum_dtype` 时 stage=1 落回通用 ZeRO 优化器；关闭 ZeRO 的纯 bf16 DDP 走 `DDP_BFLOAT16` → `_configure_fp16_optimizer`（[engine.py:L2433-L2435](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2433-L2435)），得到的是 FP16 家族包装器而非 `BF16_Optimizer`。具体输出待本地验证。
 
 #### 4.1.5 小练习与答案
 
@@ -170,7 +178,7 @@ step（梯度累积边界，每 gas 个微批次一次）
 
 **答案**：模型参数是 bf16，前向读的是 bf16 扁平存储；all-gather 的目标张量就是这块 bf16 存储，所以必须先把 fp32 masters 的更新结果降精度写回本 rank 的 bf16 分区，再在 bf16 精度上聚合全量权重。若直接聚合 fp32，每卡要多付出 4 字节/参数的通信量，且模型侧还得再做一次降精度拷贝。
 
-**练习 3**：`step` 中 [L406-L411](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L406-L411) 的溢出处理与 u4-l1 里 `DynamicLossScaler.update_scale` 的溢出处理有何本质区别？
+**练习 3**：`step` 中 [L406-L411](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L406-L411) 的溢出处理与 u4-l1 里 `DynamicLossScaler.update_scale` 的溢出处理有何本质区别？
 
 **答案**：fp16 路径检测到溢出后**调小 scale 重试**（损失可恢复，训练继续）；BF16 路径没有 scale，梯度 inf/nan 意味着这一步本身坏了，只能**丢弃该步**（清空梯度直接返回），不存在"缩小放大倍数再来一次"的补救手段。
 
@@ -200,13 +208,13 @@ JSON "bf16" 块
 
 #### 4.2.3 源码精读
 
-**① 配置模型。** [DeepSpeedBF16Config（precision_config.py:L41-L71）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/precision_config.py#L41-L71) 定义全部五个字段：`enabled`（L46）、`immediate_grad_update`（L51）、`check_grad_overflow`（L56）、`bf16_master_weights_and_grads`（L63）、`bf16_optimizer_states`（L68），每个字段下方 docstring 就是文档来源。[get_bfloat16_config（L34-L38）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/precision_config.py#L34-L38) 先查 `"bf16"` 键，查不到再回退旧键 `"bfloat16"`（L31 注明为兼容保留）。
+**① 配置模型。** [DeepSpeedBF16Config（precision_config.py:L41-L71）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/precision_config.py#L41-L71) 定义全部五个字段：`enabled`（L46）、`immediate_grad_update`（L51）、`check_grad_overflow`（L56）、`bf16_master_weights_and_grads`（L63）、`bf16_optimizer_states`（L68），每个字段下方 docstring 就是文档来源。[get_bfloat16_config（L34-L38）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/precision_config.py#L34-L38) 先查 `"bf16"` 键，查不到再回退旧键 `"bfloat16"`（L31 注明为兼容保留）。
 
-**② 跨字段校验。** [config.py:L706-L714](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/config.py#L706-L714)：低精度 master 开关必须搭配 ZeRO stage 1/2/3；`bf16_optimizer_states` 必须以 `bf16_master_weights_and_grads` 为前提。配置错误在引擎构造前就被拦下。
+**② 跨字段校验。** [config.py:L706-L714](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/config.py#L706-L714)：低精度 master 开关必须搭配 ZeRO stage 1/2/3；`bf16_optimizer_states` 必须以 `bf16_master_weights_and_grads` 为前提。配置错误在引擎构造前就被拦下。
 
-**③ 卸载约束。** [_configure_master_weights（base_optimizer.py:L498-L542）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/base_optimizer.py#L498-L542) 是 ZeRO stage 1/2/3 共用的收口：L513-L519 做互斥/依赖断言；L524-L532 处理卸载——若 master 用 bf16 而矩留 fp32（fp32 矩在 GPU 上放不下省下来的空间），必须走 ZeRO-Offload 且用 `DeepSpeedCPUAdam`；反过来"bf16 矩 + 卸载"则要求 `DeepSpeedCPUAdam` 以 `fp32_optimizer_states=False` 构造，否则 CPU 优化器会把矩**静默扩回 fp32**，省显存的意图落空。L537-L542 按 fp16/bf16/默认返回 master dtype。
+**③ 卸载约束。** [_configure_master_weights（base_optimizer.py:L515-L559）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/base_optimizer.py#L515-L559) 是 ZeRO stage 1/2/3 共用的收口：L530-L536 做互斥/依赖断言；L538-L549 处理卸载——若 master 用 bf16 而矩留 fp32（fp32 矩在 GPU 上放不下省下来的空间），必须走 ZeRO-Offload 且用 `DeepSpeedCPUAdam`；反过来"bf16 矩 + 卸载"则要求 `DeepSpeedCPUAdam` 以 `fp32_optimizer_states=False` 构造，否则 CPU 优化器会把矩**静默扩回 fp32**，省显存的意图落空。L554-L559 按 fp16/bf16/默认返回 master dtype。
 
-**④ 文档矩阵。** [docs/_pages/config-json.md:L363-L368](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/docs/_pages/config-json.md#L363-L368) 给出 ZeRO stage × 两个开关的支持矩阵，可作为速查表。
+**④ 文档矩阵。** [docs/_pages/config-json.md:L363-L368](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/docs/_pages/config-json.md#L363-L368) 给出 ZeRO stage × 两个开关的支持矩阵，可作为速查表。
 
 #### 4.2.4 代码实践
 
@@ -231,91 +239,146 @@ JSON "bf16" 块
 
 **需要观察的现象**：三步分别被三道不同防线拒绝/通过。
 
-**预期结果**：第 1 步在 [config.py:L714](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/config.py#L714) 断言失败（`bf16_optimizer_states requires bf16_master_weights_and_grads`）；第 2 步在 [config.py:L711-L713](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/config.py#L711-L713) 失败（stage 0 不支持）；第 3 步会因未使用 `DeepSpeedCPUAdam` 被 [base_optimizer.py:L529-L532](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/base_optimizer.py#L529-L532) 附近的卸载校验拦截（具体报错文本以运行为准，待本地验证）。
+**预期结果**：第 1 步在 [config.py:L714](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/config.py#L714) 断言失败（`bf16_optimizer_states requires bf16_master_weights_and_grads`）；第 2 步在 [config.py:L711-L713](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/config.py#L711-L713) 失败（stage 0 不支持）；第 3 步会因未使用 `DeepSpeedCPUAdam` 被 [base_optimizer.py:L546-L549](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/base_optimizer.py#L546-L549) 附近的卸载校验拦截（具体报错文本以运行为准，待本地验证）。
 
 #### 4.2.5 小练习与答案
 
 **练习 1**：`check_grad_overflow` 字段控制谁的行为？
 
-**答案**：控制 **ZeRO stage 1/2 优化器**在 bf16 模式下是否做梯度溢出检测（[engine.py:L2665-L2675](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2665-L2675) 读取后传给 `_configure_zero_optimizer`，在 stage_1_and_2.py L3134 附近消费）。专门化 `BF16_Optimizer` 的 `step` 则总是检查 `is_invalid_grad_norm`，不读这个字段。字段默认值 True 是为了与 fp16 的默认行为对齐（docstring 引用 issue #5242 / PR #6976）。
+**答案**：控制 **ZeRO stage 1/2 优化器**在 bf16 模式下是否做梯度溢出检测（[engine.py:L2711-L2715](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2711-L2715) 读取后在 [L2778](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2778) 传给 `_configure_zero_optimizer`）。专门化 `BF16_Optimizer` 的 `step` 则总是检查 `is_invalid_grad_norm`，不读这个字段。字段默认值 True 是为了与 fp16 的默认行为对齐（docstring 引用 issue #5242 / PR #6976）。
 
 **练习 2**：为什么"bf16 master + fp32 矩"必须搭配 CPU 卸载？
 
 **答案**：这个组合省的是 master 的 2 字节/参数（分区），但矩仍是 8 字节/参数（fp32）。如果不卸载，fp32 矩留在 GPU 上，显存大头没省；卸载到 CPU 后矩占用的是主机内存，GPU 上只剩 bf16 master 与梯度，显存收益才兑现——所以校验强制 `DeepSpeedCPUAdam`。反过来"全 bf16"时状态足够小，可以留在 GPU 也可以卸载（见文档矩阵）。
 
-### 4.3 keep_in_fp32 精度策略
+### 4.3 keep_in_fp32 精度策略：从 buffers 到 tensors（本周期 PR #8843）
 
 #### 4.3.1 概念说明
 
 `keep_in_fp32.py` 解决的是混合精度的一个"少数派报告"问题：**个别张量在低精度下会直接破坏模型行为，必须豁免于 dtype 转换**。最典型的是 MoE 模型的路由偏置 `e_score_correction_bias`（DeepSeek-V3、GLM-4.5/5 等都有）：它在 GLM-5.2 中取值约 5~20，相邻值差小于 0.01，而 bf16 在该量级的相邻可表示数间距是 0.03~0.125——转成 bf16 后 256 个专家只剩 3~16 个不同取值，**token 会被路由到错误的专家**。这类误差不像梯度噪声那样可平均掉，而是系统性的决策错误。
 
-两个要点：
+本更新周期（PR #8843）把这份豁免从 buffers 扩展到了**参数**，API 随之更名：
 
-- 豁免对象是 HuggingFace 模型类属性 `_keep_in_fp32_modules_strict`（bf16/fp16 下都保留）与 `_keep_in_fp32_modules`（仅 fp16 下保留）点名的**缓冲区（buffer）**；参数即使名字匹配也仍跟随训练 dtype（模块 docstring L25 明确此边界）。
-- 配置项 `data_types.keep_in_fp32_modules` 决定名单来源：`"auto"`（默认，取模型自带的两个列表）、自定义通配模式列表、`[]`（全部不保留）。
+| 旧 API（上一周期） | 新 API（本周期） |
+| --- | --- |
+| `buffers_to_keep_in_fp32(module, pattern)` → 返回 buffer 列表 | `tensors_to_keep_in_fp32(module, pattern)` → 返回 `(全名, 张量, 是否 buffer)` 三元组列表，**同时覆盖参数与缓冲** |
+| `keep_buffers_in_fp32(module, pattern)` → 返回转换计数 | `keep_tensors_in_fp32(module, pattern, include_params=True)` → 就地转换，返回 `(参数转换数, 缓冲转换数)` |
+
+但"名单覆盖参数"不等于"参数总能保留"，语义分两层：
+
+- **缓冲：任何配置下都保留 fp32**（这正是旧行为，也是 `include_params=False` 时仅存的行为）。
+- **参数：仅在 ZeRO-3 且无参数卸载时保留 fp32**。ZeRO-3 是唯一"每个 dtype 一块分区缓冲"的优化器；而 `BF16_Optimizer` 和 ZeRO-1/2 都把每个参数组压平成**一块单一 dtype 缓冲**（见 4.1.② 的 `bf16_groups_flat`），组里混入 fp32 参数无处安放。参数卸载（offload_param 到 CPU/NVMe）的 ZeRO-3 同样如此——分区躺在单一 dtype 的平坦 CPU/NVMe 缓冲里。
+
+于是引擎在 ZeRO-3 以下设了一道 cast 关卡：点名参数被 cast 到训练 dtype，**`auto` 模式打 warning，显式列表直接 `ValueError`**——显式点名意味着用户明确想要 fp32 参数，静默降级不可接受。参数级保留在 ZeRO-3 侧的完整机制（分区就地转换、按 dtype 拆子组、fp32 梯度归约）由 u5-l9 展开，本讲只讲清"为什么低于 ZeRO-3 做不到"。
 
 #### 4.3.2 核心流程
 
 ```text
-引擎构造期（bf16/fp16 启用时）
-  keep_in_fp32_pattern(model, setting, dtype)
-      → 遍历 named_modules，收集各子模块两个类属性里的名字
-      → "*" 转正则 ".*"，加上模块名前缀，合成一个交替匹配的编译正则
-  → 引擎 _cast_module_mixed_precision 转换模型 dtype 时跳过匹配的 buffer
-  → keep_buffers_in_fp32 把已转换的匹配 buffer 就地 .float() 恢复
-ZeRO-3 场景
-  → zero.Init 构建期同样调用这两个函数（partition_parameters.py）
+名单来源
+  transformers 类属性 _keep_in_fp32_modules_strict（bf16/fp16 都保留）
+            + _keep_in_fp32_modules（仅 fp16 时并入）
+  / data_types.keep_in_fp32_modules（"auto" | 显式模式列表 | []）
+      → keep_in_fp32_pattern(module, setting, dtype)：编译成一条正则；fp32 训练返回 None
+
+引擎路径（普通方式构建的模型，bf16/fp16 启用时）
+  keep_pattern = keep_in_fp32_pattern(...)
+  _cast_module_mixed_precision(..., keep_pattern, keep_params=_keeps_params_in_fp32())
+      keep_params = ZeRO-3 分区权重 且 参数未卸载到 cpu/nvme
+      ├─ kept 集合 = 匹配的 buffer（+ 匹配的参数，仅当 keep_params）
+      ├─ 参数整体 cast 到训练 dtype 时跳过 kept
+      ├─ keep_tensors_in_fp32(include_params=keep_params) 就地恢复 fp32
+      └─ keep_params=False 且名单点名了参数 → _warn_listed_params_not_kept
+            "auto" → logger.warning；显式列表 → ValueError
+
+ZeRO-3 路径（zero.Init 上下文内构建的模型）
+  每个模块 __init__ 收尾 → Init._keep_in_fp32(module)
+      include_params = not params_offloaded（remote_device 非本地 → 仅保 buffers 并告警）
+      参数就地转 ds_tensor 分区（hpZ 的 ds_secondary_tensor 同步转换；
+      zero_quantized_nontrainable_weights 的量化分区保持量化并 warning_once）
 ```
 
 #### 4.3.3 源码精读
 
-**① 名单与动机。** 模块 docstring [keep_in_fp32.py:L5-L26](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/keep_in_fp32.py#L5-L26) 完整交代了背景：transformers 自己加载模型时会尊重这两个列表，但在 ZeRO-3 下 `zero.Init` 把 `__init__` 里创建的每个浮点张量都转成训练 dtype，transformers 的加载器再把检查点拷进这些张量，名单就丢了——所以 DeepSpeed 必须在引擎侧重新实现这份豁免。
+**① 名单与动机。** 模块 docstring [keep_in_fp32.py:L5-L27](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L5-L27) 完整交代了背景：transformers 自己加载模型时会尊重这两个列表，但在 ZeRO-3 下 `zero.Init` 把 `__init__` 里创建的每个浮点张量都转成训练 dtype，transformers 的加载器再把检查点拷进这些张量，名单就丢了——所以 DeepSpeed 必须在引擎侧重新实现这份豁免。[L25-L27](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L25-L27) 写明新的分层语义：buffers 永远保留；参数仅在"ZeRO-3 无参数卸载——唯一能持有多种 dtype 分区的优化器"下保留，并举了 DeepSeek-V4 的超连接权重/attention sinks/norms、gpt-oss 的 attention sinks 这些点名参数的例子。
 
-**② 模式编译。** [keep_in_fp32_pattern（L35-L58）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/keep_in_fp32.py#L35-L58)：dtype 是 fp32 时直接返回 `None`（纯 fp32 训练无需豁免，L40-L41）；`auto` 模式下遍历模块收集名单，fp16 时额外并入 `_keep_in_fp32_modules`（L46-L47）；最后 `"|".join` 成单个正则（L58），匹配规则与 transformers 的 `build_glob_glob_alternation` + `re.search` 一致——模式可以匹配完整 buffer 名的任意位置。
+**② 模式编译（未变）。** [keep_in_fp32_pattern（L39-L62）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L39-L62)：dtype 是 fp32 时直接返回 `None`（纯 fp32 训练无需豁免，L44-L45）；`auto` 模式下遍历模块收集名单，fp16 时额外并入 `_keep_in_fp32_modules`（L50-L51）；最后 `"|".join` 成单个正则（L62），匹配规则与 transformers 的 `build_glob_alternation` + `re.search` 一致——模式可以匹配完整张量名的任意位置。
 
-**③ buffer 的筛选与就地转换。** [buffers_to_keep_in_fp32（L61-L69）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/keep_in_fp32.py#L61-L69) 只挑**浮点 buffer**（`recurse=False` 防止重复计数）；[keep_buffers_in_fp32（L72-L79）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/keep_in_fp32.py#L72-L79) 把 dtype 不是 fp32 的匹配 buffer 用 `buf.data = buf.data.float()` 就地恢复并计数。
+**③ 匹配对象从 buffer 扩到张量。** [tensors_to_keep_in_fp32（L65-L76）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L65-L76)：与旧版只遍历 `named_buffers(recurse=False)` 不同，现在**先遍历参数再遍历缓冲**，每个匹配项记为 `(全名, 张量, is_buffer)`——`is_buffer` 标志让下游能区分对待（引擎关卡正是靠它决定谁被 cast、谁报警）。
 
-**④ 两个消费点。** 非 ZeRO-3 路径在 [engine.py:L2113-L2121](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L2113-L2121)：dtype 转换只针对参数、默认保留 fp32 buffer（注释点名 rotary 的 `inv_freq`），`keep_pattern` 交给 `_cast_module_mixed_precision`；ZeRO-3 路径在 [partition_parameters.py:L1256-L1259](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/zero/partition_parameters.py#L1256-L1259) 于 `zero.Init` 期间调用同一对函数。
+**④ 就地转换。** [keep_tensors_in_fp32（L85-L120）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L85-L120) 是新核心：
 
-#### 4.3.4 代码实践（源码阅读型）
+- [L95-L96](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L95-L96)：`include_params=False` 时跳过所有参数——这就是"仅保 buffers"模式（ZeRO-3 以下与参数卸载场景的调用方式）。
+- [_stored_dtype（L79-L82）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L79-L82)：判断实际存储 dtype 的小帮手——ZeRO-3 参数的 `.data` 只是占位符，真值在 `ds_tensor` 分区里，必须看分区的 dtype。
+- [L98-L102](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L98-L102)：量化分区（`zero_quantized_nontrainable_weights` 冻结权重）**保持量化**——分区里存的是 int8 码与 scale，把码转成 fp32 并不会还原数值，反而让 scale 失配，所以只 `warning_once` 后跳过。
+- [L105-L115](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L105-L115)：ZeRO-3 参数就地转**分区**（`partition.data = partition.data.float()`），hpZ 场景下 all-gather 读取的节点本地副本 `ds_secondary_tensor` 同步转换；最后把参数本体的 `.data`（占位符或已 gather 的全量张量）也转成 fp32，保证下一次 gather/free 都保持 fp32。
+- 返回值从单一计数变成 `(num_params, num_buffers)` 二元组（L93、L116-L119）。
 
-**实践目标**：在不安装任何 MoE 模型的情况下，用一个小模块验证模式编译与 buffer 豁免逻辑。
+**⑤ 引擎侧能力判定与 cast 关卡。** 这是本周期引擎侧的三件套：
+
+- [_keeps_params_in_fp32（engine.py:L1927-L1936）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1927-L1936)：能力判定——`zero_optimization_partition_weights()`（即 ZeRO-3）且参数未卸载到 cpu/nvme 时为 True。docstring 一句话点破本讲的联系："**ZeRO-1/2 与 bf16/fp16 优化器把每个参数组压平成一块单一 dtype 缓冲**"——正是 4.1.② L169-L175 那段代码。
+- [_warn_listed_params_not_kept（engine.py:L1938-L1947）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1938-L1947)：名单点名了参数却不被支持时的两级反应——`auto` 只 `logger.warning`（模型自带的名单不该挡住用户训练），显式列表 `raise ValueError`（用户明确要 fp32 参数，静默 cast 等于欺骗）。
+- [_cast_module_mixed_precision（engine.py:L1885-L1925）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1885-L1925)：dtype 转换主体——L1896-L1902 用 `tensors_to_keep_in_fp32` 建 `kept` 集合（buffer 恒入、参数仅当 `keep_params`）；L1906-L1911 参数 cast 跳过 `kept`；L1913-L1917 调 `keep_tensors_in_fp32(include_params=keep_params)` 把抵达时已是低精度的匹配张量升回 fp32，`keep_params=False` 时随即触发 ⑤ 的告警/报错。调用点在 [engine.py:L2152-L2161](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L2152-L2161)：`keep_params` 实参就是 `self._keeps_params_in_fp32()`。
+
+**⑥ ZeRO-3 路径：zero.Init 收尾转换。** [partition_parameters.py:L1079-L1080](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/partition_parameters.py#L1079-L1080) 把配置存进 `Init`；每个模块 `__init__` 跑完后（此时 transformers 模型自己的 fp32 名单已完整、子模块已分区、任何检查点加载都还没发生），[L1250-L1253](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/partition_parameters.py#L1250-L1253) 调用 [_keep_in_fp32（L1255-L1272）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/partition_parameters.py#L1255-L1272)：`include_params=not params_offloaded`（L1262-L1263），参数卸载（`remote_device` 非本地）时只保 buffers 并 warning（L1264-L1267）。参数级保留在 ZeRO-3 训练中的完整图景（按分区 dtype 拆子组、fp32 梯度归约累积等）见 u5-l9。
+
+**⑦ 配置文档。** [docs/_pages/config-json.md:L1798](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/docs/_pages/config-json.md#L1798) 的 `data_types.keep_in_fp32_modules` 词条本周期同步改写：明确"参数与缓冲都保留"，并写清"参数仅在 ZeRO stage 3 无参数卸载下保持 fp32（梯度同样以 fp32 归约与累积）；其他 stage 或有参数卸载时跟随训练 dtype——auto 告警、显式列表报错；量化存储的冻结参数保持量化并告警"。
+
+#### 4.3.4 代码实践
+
+**实践目标**：在 ZeRO-0/1/2 下验证 cast 关卡的三条行为（参数被 cast、buffers 保留、显式列表被拒），并直接体验新 API。
 
 **操作步骤**：
 
-1. 写脚本（示例代码，仅依赖 deepspeed 可导入，不需要初始化分布式）：
+1. 运行本周期新增的回归测试（在 `tests` 目录下执行；`DistributedTest` 会自行拉起 world_size=2 的进程，CPU 上可跑——该类只有 bf16 不支持的 skipif）：
+
+   ```bash
+   cd tests && python -m pytest \
+     "unit/v1/half_precision/test_keep_in_fp32_modules.py::TestStagesBelowThreeKeptParams" -v
+   ```
+
+   对照两个用例阅读：[test_auto_casts_params_keeps_buffers（L527-L535）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py#L527-L535) 在 stage 0/1/2 下断言 `sink` 参数被 cast 成 `torch.bfloat16` 而 `router_bias` 缓冲仍是 `torch.float32`；[test_explicit_parameter_pattern_rejected（L537-L548）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py#L537-L548) 用 `keep=["sink"]` 断言 stage 2 抛 `ValueError`（测试用 try/except 而非 `pytest.raises`，注释解释了 DistributedTest 工作进程池会丢掉 BaseException）。
+
+2. 观察引擎的告警文本：把 [ToyModelWithParams（L210-L221）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py#L210-L221)（`_keep_in_fp32_modules_strict = ["sink", "router_bias"]`，`sink` 是初值全 8.0 的参数）抄进自己的脚本，用 [_params_config（L236-L272）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py#L236-L272) 的 stage=1 配置初始化，捕获日志中的 warning；再换 `keep=["sink"]` 复现 ValueError。
+
+3. 直接调用新 API 感受参数与缓冲的差别（示例代码，不需要初始化分布式）：
 
    ```python
    import torch
    from deepspeed.runtime.keep_in_fp32 import (
-       keep_in_fp32_pattern, keep_buffers_in_fp32)
+       keep_in_fp32_pattern, keep_tensors_in_fp32)
 
    m = torch.nn.Module()
-   m.register_buffer("e_score_correction_bias", torch.linspace(5, 20, 256))
-   m._keep_in_fp32_modules_strict = ["e_score_correction_bias"]
+   m.sink = torch.nn.Parameter(torch.full((8,), 8.0))
+   m.register_buffer("router_bias", torch.linspace(5, 20, 256))
+   m._keep_in_fp32_modules_strict = ["sink", "router_bias"]
 
+   m.bfloat16()                       # 模拟引擎把模块整体 cast 到训练 dtype
    pat = keep_in_fp32_pattern(m, "auto", torch.bfloat16)
-   print("pattern:", pat.pattern if pat else None)
-   n = keep_buffers_in_fp32(m.bfloat16(), pat)   # 先整体转 bf16 再恢复
-   print("converted:", n, "dtype:", m.e_score_correction_bias.dtype)
-   print("bf16 可分辨取值数:", m.e_score_correction_bias.to(torch.bfloat16).unique().numel())
+   n_params, n_buffers = keep_tensors_in_fp32(m, pat)
+   print(n_params, n_buffers, m.sink.dtype, m.router_bias.dtype)
+
+   m2 = m.bfloat16()                  # 再降回去，试 include_params=False
+   keep_tensors_in_fp32(m2, pat, include_params=False)
+   print(m2.sink.dtype, m2.router_bias.dtype)
    ```
 
-2. 对照第 2 节的数值分析，观察 `unique().numel()` 与 256 的差距。
+**需要观察的现象**：第 1/2 步里 `sink` 在 stage<3 下是 `torch.bfloat16`、`router_bias` 是 `torch.float32`；`auto` 模式日志出现 "data_types.keep_in_fp32_modules names 1 parameters (first: sink), but only ZeRO stage 3 without parameter offload can keep parameters in fp32..."；显式列表抛出的 `ValueError` 带 " Remove the parameter patterns or use ZeRO stage 3."。第 3 步第一次打印 `1 1 torch.float32 torch.float32`（参数与缓冲都恢复），第二次打印 `torch.bfloat16 torch.float32`（只有缓冲恢复）。
 
-**需要观察的现象**：pattern 是一条以模块上下文为前缀、包含 `e_score_correction_bias` 的正则；转换计数为 1，dtype 回到 `torch.float32`；bf16 化后唯一值数量骤降（量级在个位数到十几种）。
-
-**预期结果**：与 docstring 中"256 个专家只剩 3~16 个不同取值"的描述同量级，直观感受路由偏置被 bf16 压扁的后果。具体数值待本地验证。
+**预期结果**：与上述断言一致。注意第 3 步直接调 API 时参数确实被转回 fp32——这演示的是原语本身的能力；引擎路径之所以不这么做，是因为 `BF16_Optimizer`/ZeRO-1/2 的单 dtype 扁平缓冲装不下混合 dtype（见 ⑤）。具体输出待本地验证。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么豁免名单只覆盖 buffer 而不含参数？
+**练习 1**：为什么 `BF16_Optimizer` 无法保留 fp32 参数，而 ZeRO-3 可以？
 
-**答案**：参数参与梯度更新，主权重机制（fp32 masters）已经保证其更新精度，bf16 只是前向/反向的工作副本，噪声可被优化过程平均掉；而路由偏置这类 buffer 是**前向决策的只读查表输入**，没有 master 副本兜底，一旦量化就是确定性错误，所以必须整体留在 fp32。
+**答案**：`BF16_Optimizer` 在 `_setup_for_real_optimizer` 里把每个参数组压平成**一块** bf16 扁平缓冲（[L169-L175](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L169-L175)），fp32 masters 也是每组一块单一 dtype 分区——组内混入 fp32 参数意味着同一块缓冲要容纳两种 dtype，结构上不可能。ZeRO-3 的存储单元是**每个参数自己的分区**（`ds_tensor`），不同参数的分区可以各有各的 dtype，所以 `keep_tensors_in_fp32` 才能就地转分区。`_keeps_params_in_fp32` 的 docstring（[engine.py:L1927-L1936](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1927-L1936)）就是这个理由的官方表述。
 
-**练习 2**：`keep_in_fp32_pattern` 在 `dtype=torch.float32` 时返回 `None`，下游为什么不会崩？
+**练习 2**：为什么 `auto` 模式只告警，显式列表却直接 `ValueError`？
 
-**答案**：`None` 表示"无需豁免"，两个消费点拿到 `None` 后跳过匹配逻辑（`pattern.search` 不会被调用），dtype 转换本身在 fp32 训练下也是空操作，语义自洽。
+**答案**：`auto` 的名单来自模型类属性（transformers 作者为 fp32 硬件加载写的），用户未必知情、也未必有 ZeRO-3 的部署条件——挡住训练过重，告警 + 参数 cast 已是行为合理的降级。显式列表是用户手写的配置，点名参数却拿到 cast 结果属于"静默违背明确意图"，必须当场报错让用户改配置或换 stage 3。
+
+**练习 3**：`keep_tensors_in_fp32` 转换 ZeRO-3 参数时为什么连占位符 `.data` 也要 `.float()`，而不是只转 `ds_tensor` 分区？
+
+**答案**：参数本体的 `.data` 平时是 0 元素占位符，但参数被 gather 时（`GatheredParameters` 或 forward 的 all-gather）会以它为模板重建全量张量——占位符还是低精度的话，下一次 gather 出来的就是低精度张量、free 回去又会被降级。把占位符一起转成 fp32，"下一次 gather、下一次 free 都保持 fp32"才成立（[keep_in_fp32.py:L113-L115](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/keep_in_fp32.py#L113-L115) 的注释）。
 
 ### 4.4 load_state_dict 的 masters 重建（PR #8892）
 
@@ -326,7 +389,7 @@ ZeRO-3 场景
 - **无损**：从检查点里保存的 `SINGLE_PARTITION_OF_FP32_GROUPS`（fp32 分区副本）直接拷贝。
 - **有损重建**：丢弃保存的 masters，从已加载的 bf16 权重升精度重建（`_restore_from_bit16_weights`）——bf16 只有 7 位尾数，重建必然丢掉 masters 中低于 bf16 分辨率的位。
 
-PR #8892（上一更新周期）补全了这个语义矩阵，核心变化是 `BF16_Optimizer._load_legacy_checkpoint` 新增 `load_from_fp32_weights=False` 分支：**此前该参数被静默忽略（无论如何都拷贝保存的 fp32 分区），False 时改为从 bit16 权重重建**，与 ZeRO stage 1/2 的既有行为（[stage_1_and_2.py:L3799-L3808](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/zero/stage_1_and_2.py#L3799-L3808) 的 docstring 写明两种选项）对齐。ZeRO-3 的 `_rigid_load_state_dict` / `_load_universal_checkpoint` 同一 PR 也加了同样的分支（本讲聚焦 BF16 优化器，ZeRO-3 侧详见 u5-l8）。
+PR #8892 补全了这个语义矩阵，核心变化是 `BF16_Optimizer._load_legacy_checkpoint` 新增 `load_from_fp32_weights=False` 分支：**此前该参数被静默忽略（无论如何都拷贝保存的 fp32 分区），False 时改为从 bit16 权重重建**，与 ZeRO stage 1/2 的既有行为（[stage_1_and_2.py:L3799-L3808](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/stage_1_and_2.py#L3799-L3808) 的 docstring 写明两种选项）对齐。ZeRO-3 的 `_rigid_load_state_dict` / `_load_universal_checkpoint` 同一 PR 也加了同样的分支（本讲聚焦 BF16 优化器，ZeRO-3 侧详见 u5-l8）。
 
 完整的恢复矩阵（引擎 `load_checkpoint` 视角）：
 
@@ -343,7 +406,7 @@ PR #8892（上一更新周期）补全了这个语义矩阵，核心变化是 `B
 
 ```text
 engine.load_checkpoint(tag, load_optimizer_states=?, load_module_only=?)
-  │  硬编码 load_from_fp32_weights=True（engine.py L4821-L4826）
+  │  硬编码 load_from_fp32_weights=True（engine.py L4861-L4867）
   ▼
 optimizer.load_state_dict(state_dict_list, load_optimizer_states,
                           load_from_fp32_weights, ...)
@@ -360,24 +423,24 @@ optimizer.load_state_dict(state_dict_list, load_optimizer_states,
 
 #### 4.4.3 源码精读
 
-**① 重建函数本体。** [_restore_from_bit16_weights（bf16_optimizer.py:L650-L654）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L650-L654)：对本 rank 的 bf16 分区做 `fp32_partition.data.copy_(bf16_partitions[partition_id].data)`——注意这是 4.1.⑤ `update_lp_params` 的**反方向**拷贝（那边是 fp32→bf16，这边是 bf16→fp32），升精度时低 16 位尾数填零。[refresh_fp32_params（L656-L657）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L656-L657) 是它面向 ZeRO-3 接口风格的外部别名。
+**① 重建函数本体。** [_restore_from_bit16_weights（bf16_optimizer.py:L650-L654）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L650-L654)：对本 rank 的 bf16 分区做 `fp32_partition.data.copy_(bf16_partitions[partition_id].data)`——注意这是 4.1.⑤ `update_lp_params` 的**反方向**拷贝（那边是 fp32→bf16，这边是 bf16→fp32），升精度时低 16 位尾数填零。[refresh_fp32_params（L656-L657）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L656-L657) 是它面向 ZeRO-3 接口风格的外部别名。
 
-**② 分发入口。** [load_state_dict（L659-L669）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L659-L669)：`checkpoint_folder` 存在走 universal（[_load_universal_checkpoint（L695-L698）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L695-L698)），否则走 legacy。
+**② 分发入口。** [load_state_dict（L659-L669）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L659-L669)：`checkpoint_folder` 存在走 universal（[_load_universal_checkpoint（L695-L698）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L695-L698)），否则走 legacy。
 
-**③ else 分支。** [_load_legacy_checkpoint（L671-L693）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L671-L693)：
+**③ else 分支。** [_load_legacy_checkpoint（L671-L693）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L671-L693)：
 
-- [L680-L682](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L680-L682)：仅当 `load_optimizer_states=True` 才恢复 `clip_grad` 与 moments——这就是"masters 保留、moments 重开"语义的来源。
-- [L684-L688](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L684-L688)：无损路径，保存的 fp32 分区经 [_get_padded_tensor（L738-L744）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L738-L744) 处理对齐填充后拷入。
-- **[L689-L690](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L689-L690)：`else: self._restore_from_bit16_weights()`**——修复前这里什么都不做（保存的 masters 被无条件沿用，`load_from_fp32_weights=False` 形同虚设）。
+- [L680-L682](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L680-L682)：仅当 `load_optimizer_states=True` 才恢复 `clip_grad` 与 moments——这就是"masters 保留、moments 重开"语义的来源。
+- [L684-L688](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L684-L688)：无损路径，保存的 fp32 分区经 [_get_padded_tensor（L738-L744）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L738-L744) 处理对齐填充后拷入。
+- **[L689-L690](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L689-L690)：`else: self._restore_from_bit16_weights()`**——修复前这里什么都不做（保存的 masters 被无条件沿用，`load_from_fp32_weights=False` 形同虚设）。
 
-**④ 引擎侧调用点。** [engine.py:L4821-L4826](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L4821-L4826)：`load_checkpoint` 调 `optimizer.load_state_dict` 时**硬编码 `load_from_fp32_weights=True`**——所以正常恢复永远保留保存的 masters；`False` 分支只有直接调用优化器接口才会走到（这正是测试 4.4.4 的做法）。
+**④ 引擎侧调用点。** [engine.py:L4861-L4867](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L4861-L4867)：`load_checkpoint` 调 `optimizer.load_state_dict` 时**硬编码 `load_from_fp32_weights=True`**——所以正常恢复永远保留保存的 masters；`False` 分支只有直接调用优化器接口才会走到（这正是测试 4.4.4 的做法）。
 
-**⑤ 回归测试。** [test_fp32_master_stage3_bf16.py](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py) 用一个参数的迷你模型把整个矩阵钉死：
+**⑤ 回归测试。** [test_fp32_master_stage3_bf16.py](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py) 用一个参数的迷你模型把整个矩阵钉死：
 
-- [_train_and_detach_masters（L78-L87）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L78-L87) 是关键道具：训练一步后给 masters 手动加上 \(2^{-12}\)——这个增量**介于 fp32 与 bf16 分辨率之间**，使"保留的 masters"与"从 bf16 重建的 masters"可被 `torch.equal` 区分开（L86 先断言二者确实不等）。
-- [L115-L125](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L115-L125)：`load_optimizer_states=False` → masters 逐元素等于保存值（L120），moments 不存在（L121），优化器全局量未被覆盖（L123-L125）。
-- [L127-L136](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L127-L136)：`load_module_only=True` → bf16 优化器的 masters 等于"保存值经 bf16 舍入"的结果（L135），即从 bf16 权重重建；注释同时说明 ZeRO-3 因为模型检查点里存的就是 fp32 分区，module-only 仍读原值。
-- [L138-L148](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L138-L148)：直接以 `load_from_fp32_weights=False` 调 `load_state_dict`，覆盖引擎永远走不到的重建分支——L141 先再扰动一次 masters 确保它们已偏离重建值，L146-L147 断言重建后回到 bf16 舍入值。
+- [_train_and_detach_masters（L78-L87）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L78-L87) 是关键道具：训练一步后给 masters 手动加上 \(2^{-12}\)——这个增量**介于 fp32 与 bf16 分辨率之间**，使"保留的 masters"与"从 bf16 重建的 masters"可被 `torch.equal` 区分开（L86 先断言二者确实不等）。
+- [L115-L125](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L115-L125)：`load_optimizer_states=False` → masters 逐元素等于保存值（L120），moments 不存在（L121），优化器全局量未被覆盖（L123-L125）。
+- [L127-L136](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L127-L136)：`load_module_only=True` → bf16 优化器的 masters 等于"保存值经 bf16 舍入"的结果（L135），即从 bf16 权重重建；注释同时说明 ZeRO-3 因为模型检查点里存的就是 fp32 分区，module-only 仍读原值。
+- [L138-L148](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L138-L148)：直接以 `load_from_fp32_weights=False` 调 `load_state_dict`，覆盖引擎永远走不到的重建分支——L141 先再扰动一次 masters 确保它们已偏离重建值，L146-L147 断言重建后回到 bf16 舍入值。
 
 #### 4.4.4 代码实践
 
@@ -391,8 +454,8 @@ optimizer.load_state_dict(state_dict_list, load_optimizer_states,
    pytest tests/unit/checkpoint/test_fp32_master_stage3_bf16.py -v
    ```
 
-2. 精读 [_train_and_detach_masters](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L78-L87)，理解 \(2^{-12}\) 扰动为什么能把两条路径区分开：master 初值为 1 附近的更新结果，bf16 在 1 附近的间距是 \(2^{-7}\) 量级，fp32 是 \(2^{-23}\) 量级，\(2^{-12}\) 落在两者之间。
-3. 把测试抄成一个独立小脚本，改造最后一段：先 `load_optimizer_states=False, load_from_fp32_weights=True` 加载并断言 masters 保留；再对同一引擎直接调 `optimizer.load_state_dict(zero_sd_list, load_optimizer_states=False, load_from_fp32_weights=False)` 并断言 masters 变成 bf16 舍入值（对照 [L143-L147](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L143-L147)）。
+2. 精读 [_train_and_detach_masters](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L78-L87)，理解 \(2^{-12}\) 扰动为什么能把两条路径区分开：master 初值为 1 附近的更新结果，bf16 在 1 附近的间距是 \(2^{-7}\) 量级，fp32 是 \(2^{-23}\) 量级，\(2^{-12}\) 落在两者之间。
+3. 把测试抄成一个独立小脚本，改造最后一段：先 `load_optimizer_states=False, load_from_fp32_weights=True` 加载并断言 masters 保留；再对同一引擎直接调 `optimizer.load_state_dict(zero_sd_list, load_optimizer_states=False, load_from_fp32_weights=False)` 并断言 masters 变成 bf16 舍入值（对照 [L143-L147](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L143-L147)）。
 
 **需要观察的现象**：两个断言一个 `torch.equal == True`（保留）、一个对 `bf16 舍入值 == True`（重建）；两次加载后 `_has_moments` 都是 False。
 
@@ -412,13 +475,13 @@ optimizer.load_state_dict(state_dict_list, load_optimizer_states,
 
 **答案**：module-only 加载只读模型检查点（bf16 权重），不碰优化器检查点文件；bf16 专用优化器的模型权重就是 bf16，masters 只能从中重建。ZeRO-3 的参数分区本身存放在 fp32 分片文件里（模型检查点包含分区权重），所以 module-only 也读得到 fp32 原值——这正是测试 L130-L135 注释里两者断言不同的原因。
 
-### 4.5 destroy() 与 _hp_grad 视图清理（本周期 PR #9034）
+### 4.5 destroy() 与 _hp_grad 视图清理（PR #9034）
 
 #### 4.5.1 概念说明
 
 `BF16_Optimizer` 的最后一个问题是**生命周期**问题。很多调用方（最典型的是 HuggingFace Trainer）的工作模式是「创建引擎 → 训练 → `engine.destroy()` → 保留模型继续用（或换配置再包一个新引擎）」。`destroy()` 的契约是：之后 `del engine` + `gc.collect()` 应当把引擎、优化器连同它们的大块缓冲全部回收，而模型完好无损。
 
-本周期之前的 bug（issue #7204，PR #9034 修复）是：`destroy()` 之后一切仍然活着，**每次"创建 → 训练 → 销毁"循环都泄漏一整套引擎**。对 `BF16_Optimizer` 而言，独有的泄漏链就是 4.1.③ 埋下的伏笔：
+被修复的 bug（issue #7204，PR #9034）是：`destroy()` 之后一切仍然活着，**每次"创建 → 训练 → 销毁"循环都泄漏一整套引擎**。对 `BF16_Optimizer` 而言，独有的泄漏链就是 4.1.③ 埋下的伏笔：
 
 ```text
 模型参数 p（调用方保留，活着）
@@ -429,17 +492,17 @@ optimizer.load_state_dict(state_dict_list, load_optimizer_states,
 
 按 2.4 的规则，只要模型参数活着、参数身上还挂着这个视图，**整块** fp32 梯度缓冲就无法释放。账本很好算：fp32 梯度每参数 4 字节、全量；bf16 模型每参数 2 字节——缓冲恰为 **2 倍 bf16 模型大小**，每个销毁周期都被钉死一次。PR 实测（2 rank、`Sequential` 套 16 个 `Linear(4096,4096)`、bf16、AdamW、4 个周期取平均）：`BF16_Optimizer` 场景修复前每周期泄漏 +3072.8 MiB 显存，修复后只剩调用方主动保留的模型本身（+512.1 MiB）。
 
-本周期修复：`destroy()` 在清 `_hp_mapping` 的同时，把每个参数的 `p._hp_grad` 也置为 `None`。同一次提交还修了引擎与 ZeRO 侧的同类反向引用（forward hooks、`__del__` 二次拆除、ZeRO-1/2 的 `p._zero_optimizer`、ZeRO-3 的 `p._z3_optimizer` 与 `FWD_MODULE_STACK`）——完整销毁链在 u2-l3 展开，本讲只聚焦 bf16 侧的 `_hp_grad`。
+修复内容：`destroy()` 在清 `_hp_mapping` 的同时，把每个参数的 `p._hp_grad` 也置为 `None`。同一次提交还修了引擎与 ZeRO 侧的同类反向引用（forward hooks、`__del__` 二次拆除、ZeRO-1/2 的 `p._zero_optimizer`、ZeRO-3 的 `p._z3_optimizer` 与 `FWD_MODULE_STACK`）——完整销毁链在 u2-l3 展开，本讲只聚焦 bf16 侧的 `_hp_grad`。
 
 #### 4.5.2 核心流程
 
 ```text
-engine.destroy()                          # engine.py L1266 起
-  ├─ self._destroyed = True               # 让 __del__ 跳过二次拆除（L1255-L1264）
-  ├─ optimizer.destroy()                  # L1279-L1281 转发
+engine.destroy()                          # engine.py L1267 起
+  ├─ self._destroyed = True               # 让 __del__ 跳过二次拆除（L1256-L1265）
+  ├─ optimizer.destroy()                  # L1280-L1282 转发
   │     BF16_Optimizer.destroy()          # bf16_optimizer.py L126-L139
   │       ├─ 逐参数 p._hp_mapping = None  # 原有清理
-  │       ├─ 逐参数 p._hp_grad = None     # ← 本周期新增（L133-L136）
+  │       ├─ 逐参数 p._hp_grad = None     # ← 本修复新增（L133-L136）
   │       └─ 移除 _grad_acc_hooks         # immediate_grad_update 的 autograd hooks
   └─ 摘除模块 forward hooks 等引擎级引用   # 详见 u2-l3
 
@@ -452,18 +515,18 @@ engine.destroy()                          # engine.py L1266 起
 
 #### 4.5.3 源码精读
 
-**① 视图的诞生与挂载。** [_update_hp_grad（bf16_optimizer.py:L511-L529）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L511-L529)：L523 取出的 `hp_grad` 是 `fp32_groups_gradients[group_idx][param_idx]`——即 4.1.② L203-L206 里从扁平缓冲 split 出来的**逐参数视图**；L527 把 bf16 梯度累加进去之后，L528 `lp._hp_grad = hp_grad` 把视图挂到参数上。训练期间它无害（下次 backward 覆盖、step 后 `clear_hp_grads` 只清零不释放）；问题只出现在"参数活得比优化器久"的销毁场景。
+**① 视图的诞生与挂载。** [_update_hp_grad（bf16_optimizer.py:L511-L529）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L511-L529)：L523 取出的 `hp_grad` 是 `fp32_groups_gradients[group_idx][param_idx]`——即 4.1.② L203-L206 里从扁平缓冲 split 出来的**逐参数视图**；L527 把 bf16 梯度累加进去之后，L528 `lp._hp_grad = hp_grad` 把视图挂到参数上。训练期间它无害（下次 backward 覆盖、step 后 `clear_hp_grads` 只清零不释放）；问题只出现在"参数活得比优化器久"的销毁场景。
 
-**② destroy() 本体。** [BF16_Optimizer.destroy（bf16_optimizer.py:L126-L139）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L126-L139)：原有的 `_hp_mapping` 清理之后，[新增的 L133-L136](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/bf16_optimizer.py#L133-L136) 用 `getattr` 防御式检查 `_hp_grad` 并置空，注释直接写明动机："`_update_hp_grad()` leaves a view of the fp32 gradient buffer here; a model kept after destroy() would otherwise keep the whole buffer alive."（`_update_hp_grad()` 在这里留下 fp32 梯度缓冲的视图；destroy() 之后被保留的模型否则会钉住整块缓冲。）最后移除 `_grad_acc_hooks`。
+**② destroy() 本体。** [BF16_Optimizer.destroy（bf16_optimizer.py:L126-L139）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L126-L139)：原有的 `_hp_mapping` 清理之后，[L133-L136](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/bf16_optimizer.py#L133-L136) 用 `getattr` 防御式检查 `_hp_grad` 并置空，注释直接写明动机："`_update_hp_grad()` leaves a view of the fp32 gradient buffer here; a model kept after destroy() would otherwise keep the whole buffer alive."（`_update_hp_grad()` 在这里留下 fp32 梯度缓冲的视图；destroy() 之后被保留的模型否则会钉住整块缓冲。）最后移除 `_grad_acc_hooks`。
 
-**③ 引擎侧的转发与防重入。** [engine.destroy（engine.py:L1266-L1292）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L1266-L1292)：L1267 先置 `_destroyed`；[L1279-L1281](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L1279-L1281) 调 `optimizer.destroy()`；随后摘除闭包引用引擎的模块 hooks（这段属于 u2-l3 的主线）。[__del__（L1255-L1264）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/engine.py#L1255-L1264) 看到该标记即直接返回，注释点明原因：显式销毁的引擎可能在新引擎包装同一模型后才被回收，二次拆除会清掉新引擎的状态。
+**③ 引擎侧的转发与防重入。** [engine.destroy（engine.py:L1267-L1303）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1267-L1303)：L1268 先置 `_destroyed`；[L1280-L1282](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1280-L1282) 调 `optimizer.destroy()`；随后摘除闭包引用引擎的模块 hooks（这段属于 u2-l3 的主线）。[__del__（L1256-L1265）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/engine.py#L1256-L1265) 看到该标记即直接返回，注释点明原因：显式销毁的引擎可能在新引擎包装同一模型后才被回收，二次拆除会清掉新引擎的状态。
 
-**④ 回归测试。** [TestDestroyReleasesEngine（test_zero.py:L2277-L2375）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py#L2277-L2375) 把销毁契约钉死，7 个参数化场景（[L2280-L2291](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py#L2280-L2291)）：ZeRO-1/2/3 各带/不带 CPU 卸载，再加 `(1, False, "fp32")`——注释明确写着"With bf16 parameters, this selects BF16_Optimizer"。与 `_hp_grad` 直接相关的两段：
+**④ 回归测试。** [TestDestroyReleasesEngine（test_zero.py:L2495-L2593）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2495-L2593) 把销毁契约钉死，7 个参数化场景（[L2498-L2509](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2498-L2509)）：ZeRO-1/2/3 各带/不带 CPU 卸载，再加 `(1, False, "fp32")`——注释明确写着"With bf16 parameters, this selects BF16_Optimizer"。与 `_hp_grad` 直接相关的两段：
 
-- [L2334-L2344](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py#L2334-L2344)：`destroy()` 之后记录 `fp32_groups_gradients_flat` 各缓冲的 `untyped_storage().data_ptr()`，`del` + `gc.collect()` 后断言 `engine_ref()`/`optimizer_ref()` 为 `None`，且**没有任何参数还持有这些缓冲的 storage**。注释解释了为什么比较 storage 而不是张量对象：视图会在缓冲自己的张量对象被回收后继续钉住其 storage。
-- [_storages_held_by_params（L2369-L2375）](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py#L2369-L2375)：遍历每个参数的 `param.grad` 与 `vars(param)` 里所有张量值，收集它们的 storage 指针——`_hp_grad` 就藏在 `vars(param)` 里，这正是能抓到本 bug 的原因。
+- [L2550-L2563](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2550-L2563)：`destroy()` 之后记录 `fp32_groups_gradients_flat` 各缓冲的 `untyped_storage().data_ptr()`，`del` + `gc.collect()` 后断言 `engine_ref()`/`optimizer_ref()` 为 `None`，且**没有任何参数还持有这些缓冲的 storage**。注释解释了为什么比较 storage 而不是张量对象：视图会在缓冲自己的张量对象被回收后继续钉住其 storage。
+- [_storages_held_by_params（L2586-L2593）](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2586-L2593)：遍历每个参数的 `param.grad` 与 `vars(param)` 里所有张量值，收集它们的 storage 指针——`_hp_grad` 就藏在 `vars(param)` 里，这正是能抓到本 bug 的原因。
 
-测试后半段（L2346-L2366）还验证了两条衍生契约：被销毁的旧引擎在被回收时不得破坏接替它包装同一模型的新引擎（`safe_get_full_fp32_param` 前后一致）；最后一个引擎销毁后模型本身也可被回收。
+测试后半段（[L2565-L2584](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2565-L2584)）还验证了两条衍生契约：被销毁的旧引擎在被回收时不得破坏接替它包装同一模型的新引擎（`safe_get_full_fp32_param` 前后一致）；最后一个引擎销毁后模型本身也可被回收。
 
 #### 4.5.4 代码实践
 
@@ -511,7 +574,7 @@ engine.destroy()                          # engine.py L1266 起
    print("挂回视图后缓冲是否复活:", buf_ref() is not None)     # 预期 True（泄漏复现）
    ```
 
-3. 对照 [L2334-L2344](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/v1/zero/test_zero.py#L2334-L2344) 的断言方式，把第 2 步改成「比较 `storage_before` 与 `_storages_held_by_params(model)` 收集的指针集合」再验一遍。
+3. 对照 [L2550-L2563](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/zero/test_zero.py#L2550-L2563) 的断言方式，把第 2 步改成「比较 `storage_before` 与 `_storages_held_by_params(model)` 收集的指针集合」再验一遍。
 
 **需要观察的现象**：`destroy()` + `gc.collect()` 后弱引用变 `None`（缓冲真正释放）；把视图挂回参数后，同样的 `del` + `gc.collect()` 不再释放——同一个视图、两种结局，唯一差别是参数身上那个属性。
 
@@ -533,29 +596,32 @@ engine.destroy()                          # engine.py L1266 起
 
 ## 5. 综合实践
 
-把本讲的对比线索（bf16 vs fp16）与生命周期线索（销毁不泄漏）落成一次可复现实验（GPU 环境最佳，CPU 可跑 bf16 部分）：
+把本讲的对比线索（bf16 vs fp16）、精度豁免线索（keep_in_fp32 的 stage 关卡）与生命周期线索（销毁不泄漏）落成一次可复现实验（GPU 环境最佳，CPU 可跑 bf16 部分）：
 
-1. **搭建对照脚本**：以 [tests/unit/checkpoint/test_fp32_master_stage3_bf16.py 的 _OneParam](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L20-L27) 为蓝本放大成一个两层 MLP（隐藏维 1024），写两份配置：`"fp16": {"enabled": true}` 与 `"bf16": {"enabled": true}` + `"data_types": {"grad_accum_dtype": "fp32"}`，其余字段（优化器、lr、batch size）完全相同，ZeRO stage=1。
+1. **搭建对照脚本**：以 [tests/unit/checkpoint/test_fp32_master_stage3_bf16.py 的 _OneParam](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/checkpoint/test_fp32_master_stage3_bf16.py#L20-L27) 为蓝本放大成一个两层 MLP（隐藏维 1024），再仿照 [ToyModelWithParams](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/tests/unit/v1/half_precision/test_keep_in_fp32_modules.py#L210-L221) 加一个 `sink` 参数（`_keep_in_fp32_modules_strict` 点名它）。写两份配置：`"fp16": {"enabled": true}` 与 `"bf16": {"enabled": true}` + `"data_types": {"grad_accum_dtype": "fp32"}`，其余字段（优化器、lr、batch size）完全相同，ZeRO stage=1。
 2. **记录显存**：每步前后调用 `torch.cuda.max_memory_allocated()`，跑 50 步，输出两列峰值曲线。
 3. **记录数值行为**：fp16 路径打印每步 loss scale（`engine.optimizer.cur_scale`，属性名以运行时为准）；bf16 路径确认没有任何 scale 变量参与。对比两者最终 loss。
 4. **解释差异**：预期 bf16 峰值略高（fp32 梯度缓冲 4 字节/参数 vs fp16 的 2 字节，且 bf16 路径持有全量 fp32 梯度），但省去溢出重试；把每项差异对应回 4.1.② 的内存布局表逐项记账。
-5. **收尾（检查点）**：对 bf16 引擎 `save_checkpoint` 后，按 4.4.4 第 3 步分别验证保留/重建两种加载，把三条断言结果贴进实验报告。
-6. **收尾（生命周期）**：训练结束后调用 `engine.destroy()`，按 4.5.4 第 2 步用 `weakref` 验证引擎、优化器、fp32 梯度缓冲都被回收且模型仍可前向；再循环「initialize → 训练 10 步 → destroy → del → gc.collect」4 次，用 `torch.cuda.max_memory_allocated` 对比第 1 轮与第 4 轮的增量，确认没有周期性泄漏。
+5. **验证 cast 关卡**：在两份配置里都保留 `data_types.keep_in_fp32_modules` 的默认 `auto`，观察 stage=1 下 `sink` 被 cast 到训练 dtype 的告警、`router_bias` 类 buffer 仍为 fp32；再换显式列表复现 `ValueError`（对照 4.3.4 第 2 步）。
+6. **收尾（检查点）**：对 bf16 引擎 `save_checkpoint` 后，按 4.4.4 第 3 步分别验证保留/重建两种加载，把三条断言结果贴进实验报告。
+7. **收尾（生命周期）**：训练结束后调用 `engine.destroy()`，按 4.5.4 第 2 步用 `weakref` 验证引擎、优化器、fp32 梯度缓冲都被回收且模型仍可前向；再循环「initialize → 训练 10 步 → destroy → del → gc.collect」4 次，用 `torch.cuda.max_memory_allocated` 对比第 1 轮与第 4 轮的增量，确认没有周期性泄漏。
 
-报告模板：一页对照表（每步峰值显存、最终 loss、loss scale 轨迹、加载语义断言、销毁后弱引用状态），加一段"差异来源"分析。全部数值待本地验证。
+报告模板：一页对照表（每步峰值显存、最终 loss、loss scale 轨迹、`sink`/buffer 的最终 dtype 与告警文本、加载语义断言、销毁后弱引用状态），加一段"差异来源"分析。全部数值待本地验证。
 
 ## 6. 本讲小结
 
 - bf16 的 8 位指数带来与 fp32 等宽的动态范围，梯度不下溢，因此 **bf16 训练不需要 loss scaling**；`BF16_Optimizer` 里的 scaler 属性全是 API 兼容占位符，溢出处理退化为"梯度 inf/nan 即丢步"。
 - `BF16_Optimizer` 的内存布局是"bf16 全量扁平权重 + 本 rank 的 fp32 master 分区 + fp32 全量梯度缓冲"，底层优化器的参数组被重绑定到 fp32 分区，更新后再降精度写回并 all-gather。
 - 专门化路径的触发条件是 **ZeRO stage=1 + bf16 模型 + fp32 梯度累积 + 无卸载**（关 ZeRO 的 bf16 只有搭配流水线并行才走它；普通 DDP bf16 走 FP16 家族包装器）。
-- 低精度 master states（`bf16_master_weights_and_grads` / `bf16_optimizer_states`）作用于 ZeRO 优化器，有"依赖 + stage 范围 + 卸载后端"三重校验；`keep_in_fp32` 则反向保护少数必须留在 fp32 的 buffer（如 MoE 路由偏置）。
+- 低精度 master states（`bf16_master_weights_and_grads` / `bf16_optimizer_states`）作用于 ZeRO 优化器，有"依赖 + stage 范围 + 卸载后端"三重校验。
+- 本周期 #8843 让 `keep_in_fp32` 家族从 buffers 扩展到参数：`keep_tensors_in_fp32(include_params)` 统一处理两种张量，但**参数级 fp32 保留仅在 ZeRO-3 无参数卸载时成立**（唯一的多种 dtype 分区持有者）；ZeRO-3 以下引擎把点名参数 cast 到训练 dtype——`auto` 告警、显式列表 `ValueError`——buffers 在任何配置下都保留 fp32，量化分区保持量化。
 - PR #8892 补全了 masters 恢复语义：`load_from_fp32_weights=False` 现在真正从 bit16 权重重建 masters（与 ZeRO-1/2 对齐）；引擎正常恢复硬编码 `True`；`load_optimizer_states=False` 保留 masters、重开 moments、不动优化器全局量。
-- 本周期 PR #9034 补全了销毁语义：`_update_hp_grad` 挂在参数上的 `_hp_grad` 视图会替被保留的模型钉住整块 fp32 梯度缓冲（约 2 倍 bf16 模型大小），`destroy()` 现在显式置空它——配合引擎级 hooks 摘除与 `_destroyed` 防重入，"创建 → 训练 → 销毁"循环不再泄漏。
+- PR #9034 补全了销毁语义：`_update_hp_grad` 挂在参数上的 `_hp_grad` 视图会替被保留的模型钉住整块 fp32 梯度缓冲（约 2 倍 bf16 模型大小），`destroy()` 现在显式置空它——配合引擎级 hooks 摘除与 `_destroyed` 防重入，"创建 → 训练 → 销毁"循环不再泄漏。
 
 ## 7. 下一步学习建议
 
-- **u5-l1（ZeRO 总览）**：`BF16_Optimizer` 本质是"只切 master/优化器状态"的极简 ZeRO-1，进入 ZeRO 单元后可以对照 `stage_1_and_2.py` 理解完整版实现（IPG bucket、overlap 通信）多了什么；本周期 ZeRO-1/2 CPU 卸载的梯度累计器也重构成"按分区组的 pinned 缓冲"，与本讲的 fp32 梯度缓冲是同类设计。
+- **u5-l1（ZeRO 总览）**：`BF16_Optimizer` 本质是"只切 master/优化器状态"的极简 ZeRO-1，进入 ZeRO 单元后可以对照 `stage_1_and_2.py` 理解完整版实现（IPG bucket、overlap 通信）多了什么。
+- **u5-l9（本周期新增：ZeRO-3 混合 dtype）**：本讲 4.3 只讲了"为什么低于 ZeRO-3 保留不了 fp32 参数"；参数级保留的完整机制——`zero.Init` 收尾就把点名参数的 `ds_tensor` 分区转 fp32、stage3 按分区 dtype 拆子组、按累积 dtype 分平坦梯度缓冲与 IPG bucket、fp32 参数的梯度全程 fp32 归约累积——在那篇系统展开。
 - **u5-l8（ZeRO 检查点与权重导出）**：本讲 4.4 只讲了 BF16 优化器的加载语义，ZeRO-3 的 `_rigid_load_state_dict`、流水线串行加载的分片预检查（同属 PR #8892）在那篇展开。
 - **u2-l3（引擎构造与销毁）**：本讲 4.5 只讲了 `BF16_Optimizer` 侧的 `_hp_grad` 清理；完整的 destroy 链——forward hooks 摘除、`__del__` 防重入、ZeRO-1/2 的 `p._zero_optimizer`、ZeRO-3 的 `p._z3_optimizer` 与 `FWD_MODULE_STACK` 弹栈、协调器 `lru_cache` 的实例化——在那篇系统展开。
-- **源码延伸**：对照读 [stage_1_and_2.py 的 _load_legacy_checkpoint docstring](https://github.com/deepspeedai/DeepSpeed/blob/b9100c541ac1b8e25148bc8000d1ad45c4c095db/deepspeed/runtime/zero/stage_1_and_2.py#L3799-L3808)，看"fp32 无损拷贝 vs bit16 有损重建"两种选项在完整 ZeRO 优化器里如何与弹性加载（改 DP 数量）交互。
+- **源码延伸**：对照读 [stage_1_and_2.py 的 _load_legacy_checkpoint docstring](https://github.com/deepspeedai/DeepSpeed/blob/84481c333875abc8a47f1b0d07fdadddb8d70fd8/deepspeed/runtime/zero/stage_1_and_2.py#L3799-L3808)，看"fp32 无损拷贝 vs bit16 有损重建"两种选项在完整 ZeRO 优化器里如何与弹性加载（改 DP 数量）交互。

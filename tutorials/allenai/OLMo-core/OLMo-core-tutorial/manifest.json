@@ -1,0 +1,1141 @@
+{
+  "head": "2289b819b8f709e37e3e042ebb019f411fb6b742",
+  "project": "OLMo-core",
+  "rationale": "OLMo-core 是 AI2 用于训练 OLMo 系列大模型的核心训练库，规模大、模块多（配置系统、Transformer 模型、数据加载、优化器、训练循环、多维并行、评测生成、脚本部署、多模态与内核），因此采用 10 个单元、37 篇讲义的三层路线。第一单元让读者从零认识项目并跑通第一个训练示例；第二单元先讲贯穿全库的 Config/Registrable 配置模式，因为后续所有模块都建立在这一模式上；第三到六单元按\"模型 → 数据 → 优化 → 训练循环\"的依赖顺序深入核心调用链；第七到九单元进入专家层的分布式并行、评测生成与真实训练脚本/Beaker 部署；第十单元覆盖 float8、CUDA 内核、多模态、checkpoint 转换与测试贡献等二次开发主题。每篇讲义只讲一个主题、引用 1-6 个真实源码文件，并配一个可动手的代码实践任务，讲义之间通过 depends_on 形成清晰的学习路径。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 OLMo-core 在 OLMo 生态（训练库、Docker 镜像、官方脚本、HF 集成）中的位置",
+            "区分库源码 src/olmo_core、测试 src/test、脚本 src/scripts、示例 src/examples 四个区域",
+            "了解可选依赖（flash-attn、TransformerEngine、grouped_gemm 等）分别对应哪些功能"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README.md",
+            "项目定位与生态"
+          ],
+          "order": 1,
+          "practice_task": "克隆仓库并通读 README，列出 OLMo-core 提供的四类能力（组件库、训练脚本、Docker 镜像、推理集成），并写下你对'用 OLMo-core 训练一个 190M 模型需要哪几个组件'的初步猜想，留到后续讲义验证。",
+          "source_files": [
+            "README.md",
+            "CHANGELOG.md",
+            "AGENTS.md"
+          ],
+          "title": "OLMo-core 是什么：项目定位与全景图",
+          "topic": "介绍 OLMo-core 的定位：AI2 的 OLMo 系列模型训练库，覆盖 Transformer 组件、分布式训练、数据加载与评测；梳理它与 OLMo 模型发布、Docker 镜像、官方训练脚本之间的关系。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-setup-and-run-tests.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "从源码 pip install -e '.[all]' 完成开发安装",
+            "用 pytest -v src/ 跑测试并理解 GPU 测试自动跳过机制",
+            "使用 make style / make checks 保持代码风格"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pyproject.toml",
+            "Makefile",
+            "pytest 与 make"
+          ],
+          "order": 2,
+          "practice_task": "完成开发安装，运行 pytest -v src/test/olmo_core/config_test.py（或任一非 GPU 测试文件）确认环境可用，再运行 make style-check 观察格式检查输出。",
+          "source_files": [
+            "pyproject.toml",
+            "Makefile",
+            "src/Dockerfile"
+          ],
+          "title": "环境搭建：安装、测试与代码检查",
+          "topic": "讲解如何安装 OLMo-core（含可选依赖）、如何用 pytest 运行测试（GPU 测试无 GPU 时自动跳过）、以及 make style/lint/type-check 等代码检查工具链。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-source-tree-map.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "画出 src/olmo_core 下各子包的职责一览图",
+            "说明 src/test 如何镜像源码结构",
+            "在源码树中快速定位'模型、数据、训练、分布式'四类代码的位置"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录结构",
+            "src 布局"
+          ],
+          "order": 3,
+          "practice_task": "对照本讲的结构图，在本地仓库中找到 TransformerConfig、TrainerConfig、NumpyDatasetConfig 三个类的定义文件，并记录它们的文件路径和行号。",
+          "source_files": [
+            "src/olmo_core/__init__.py",
+            "src/olmo_core/train/__init__.py",
+            "src/test/train/trainer_test.py"
+          ],
+          "title": "源码地图：目录结构与测试布局",
+          "topic": "带读者走一遍 src/olmo_core 的目录结构：config.py、nn/（模型）、data/（数据）、train/（训练）、distributed/（并行与 checkpoint）、optim/（优化器）、eval/、generate/、launch/、kernels/，以及 src/test 与源码一一镜像的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-first-training-example.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "读懂 ExperimentConfig 如何把 model/dataset/data_loader/train_module/trainer 组合成一次实验",
+            "理解 build() 模式：从 Config 构建真实组件",
+            "了解 torchrun 启动与 prepare_training_environment/teardown_training_environment 的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "examples/llm/train.py",
+            "Trainer.fit"
+          ],
+          "order": 4,
+          "practice_task": "通读 src/examples/llm/train.py，画出从 ExperimentConfig 到 trainer.fit() 的调用流程图；然后尝试用 torchrun --nproc-per-node=1 以最小配置 dry-run 该脚本（或解释它需要哪些数据与环境前提）。",
+          "source_files": [
+            "src/examples/llm/train.py",
+            "src/olmo_core/train/__init__.py"
+          ],
+          "title": "跑通第一个训练例子：examples/llm/train.py",
+          "topic": "精读自包含示例 src/examples/llm/train.py，理解一个完整训练实验如何由 model、dataset、data_loader、train_module、trainer 五个 Config 组装而成，并用 torchrun 启动。"
+        }
+      ],
+      "order": 1,
+      "title": "单元一：初识 OLMo-core"
+    },
+    {
+      "id": "u2",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-config-base-class.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 Config 的 as_dict/save/load/merge 等核心方法",
+            "理解为什么所有配置都是可序列化的嵌套 dataclass",
+            "能自定义一个继承 Config 的实验配置类"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Config 基类",
+            "yaml/json 序列化"
+          ],
+          "order": 1,
+          "practice_task": "定义一个继承 Config 的 MyExperimentConfig（含一个嵌套的 TransformerConfig 字段），将它保存为 YAML 再加载回来，验证往返一致；再用 merge() 用 dotlist 覆盖某个嵌套字段。",
+          "source_files": [
+            "src/olmo_core/config.py"
+          ],
+          "title": "Config 基类：一切配置的基石",
+          "topic": "讲解 src/olmo_core/config.py 中的 Config dataclass 基类：YAML/JSON 序列化、嵌套组合、以及为什么整个库都用 @dataclass 配置类。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-registrable-polymorphism.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解 Registrable 注册机制与 type 字段反序列化",
+            "解释优化器、调度器、attention backend、data loader 为何都设计成多态 Config 字段",
+            "能为自定义子类注册名称并通过 YAML 选择它"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Registrable",
+            "多态反序列化"
+          ],
+          "order": 2,
+          "practice_task": "阅读 AdamWConfig 的注册代码，然后自定义一个注册到同一基类的优化器配置（例如带权重衰减开关的 MyAdamWConfig），验证用 save/load 往返后 build() 得到的是你的子类实例。",
+          "source_files": [
+            "src/olmo_core/config.py",
+            "src/olmo_core/optim/__init__.py",
+            "src/olmo_core/optim/adamw.py"
+          ],
+          "title": "Registrable 与多态配置字段",
+          "topic": "讲解来自 dataclass-extensions 的 Registrable 混入：基类 Config 如何通过 type 字段在运行时解析到不同子类，这是优化器、调度器、注意力后端、数据加载器可插拔的基础。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-cli-overrides-and-script-utils.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握 --train_module.optim.lr=6e-3 形式的命令行覆盖原理",
+            "读懂 script_utils.py 中官方脚本的通用 CLI 与训练流程",
+            "能写出接受 dotlist 覆盖的自定义入口脚本"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "ExperimentConfig",
+            "get_cli_parser"
+          ],
+          "order": 3,
+          "practice_task": "基于 script_utils.get_cli_parser 写一个最小入口脚本：从 YAML 加载 ExperimentConfig，接受命令行 dotlist 覆盖，打印最终配置并保存为 YAML。",
+          "source_files": [
+            "src/olmo_core/script_utils.py",
+            "src/olmo_core/config.py",
+            "src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py"
+          ],
+          "title": "命令行覆盖与 dotlist 合并：官方脚本入口的秘密",
+          "topic": "讲解 --train_module.optim.lr=6e-3 这类命令行覆盖如何通过 Config.merge() 的 dotlist 机制实现，以及 src/olmo_core/script_utils.py 提供的 ExperimentConfig 与 main() 入口模式。"
+        }
+      ],
+      "order": 2,
+      "title": "单元二：配置系统——贯穿全库的设计模式"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-transformer-architecture.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "跟踪一次 forward 中数据的流动路径",
+            "理解 Transformer 与 TransformerBlock 的职责划分",
+            "对比 OLMo-core 实现与经典 Transformer 的差异点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Transformer",
+            "TransformerBlock"
+          ],
+          "order": 1,
+          "practice_task": "从 model.py 的 forward 出发手绘数据流图（embedding → N 个 block → norm → lm_head → loss），标注每个张量的形状变化；再写一小段代码构建 olmo2_14M 配置的模型并打印每层输出形状。",
+          "source_files": [
+            "src/olmo_core/nn/transformer/model.py",
+            "src/olmo_core/nn/transformer/block.py",
+            "src/olmo_core/nn/transformer/__init__.py"
+          ],
+          "title": "Transformer 总体架构：从 token 到 logits",
+          "topic": "精读 nn/transformer/model.py 的 Transformer 类与 block.py 的 TransformerBlock，理解残差流、block 堆叠和前向传播主链路。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-transformer-config-and-presets.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "读懂 TransformerConfig 中每个字段对应的模型结构含义",
+            "使用 olmo2_190M/olmo3_7B 等工厂方法快速构建模型配置",
+            "理解 Config 工厂方法 + kwargs 覆盖的复用模式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TransformerConfig",
+            "工厂方法"
+          ],
+          "order": 2,
+          "practice_task": "对比 olmo2_1B 与 olmo3_1B 工厂方法的差异（层数、头数、注意力类型等），并用 kwargs 把 olmo2_14M 改造成自定义小模型，build 后统计参数量。",
+          "source_files": [
+            "src/olmo_core/nn/transformer/config.py"
+          ],
+          "title": "TransformerConfig 与预置架构工厂方法",
+          "topic": "讲解 TransformerConfig 的字段含义与 olmo2_1M 到 olmo2_32B、olmo3 系列等预置工厂方法，以及 build() 如何初始化一个模型。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-attention-and-backends.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 Attention 基类与 MultiHeadAttention 的接口约定",
+            "说明各 attention backend 的适用场景与依赖",
+            "通过 Config 切换 attention 实现并验证输出一致"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Attention",
+            "AttentionBackend"
+          ],
+          "order": 3,
+          "practice_task": "分别用默认 backend 与 flash attention backend 构建同一 TransformerConfig 的模型，对比前向输出是否一致（容差内），并记录两者的内存与速度差异（无 GPU 可用 CPU 可跑的 backend 对比）。",
+          "source_files": [
+            "src/olmo_core/nn/attention/base.py",
+            "src/olmo_core/nn/attention/backend.py",
+            "src/olmo_core/nn/attention/flash_attn_api.py",
+            "src/olmo_core/nn/attention/ring.py"
+          ],
+          "title": "注意力机制与可插拔后端",
+          "topic": "讲解 nn/attention/ 的抽象：base.py 的注意力基类、backend.py 的后端枚举、flash attention/ring attention 等实现，以及后端如何通过 Registrable 配置切换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l4-core-nn-components.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 SwiGLU 前馈、LayerNorm/RMSNorm、RoPE 的实现细节",
+            "弄清权重共享与非共享 lm_head 的配置方式",
+            "能替换或自定义其中任一组件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FeedForward",
+            "LayerNorm",
+            "RotaryEmbedding",
+            "LMHead"
+          ],
+          "order": 4,
+          "practice_task": "实现一个自定义 FeedForward 变体（如把 SwiGLU 换成 GeGLU），注册进 Registrable 体系，并验证它能被 TransformerConfig 选中且前向形状正确。",
+          "source_files": [
+            "src/olmo_core/nn/feed_forward.py",
+            "src/olmo_core/nn/layer_norm.py",
+            "src/olmo_core/nn/rope.py",
+            "src/olmo_core/nn/lm_head.py",
+            "src/olmo_core/nn/embedding.py"
+          ],
+          "title": "核心组件：前馈网络、LayerNorm、RoPE 与 LM Head",
+          "topic": "逐一讲解 feed_forward.py（SwiGLU 等）、layer_norm.py、rope.py（旋转位置编码）、lm_head.py 与 embedding.py 这些标准组件的实现与配置项。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-mixture-of-experts.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "说明 MoE层的路由、专家计算与负载均衡损失如何协作",
+            "对比 dropless MoE 与普通 MLP 的取舍",
+            "用 MoE TransformerConfig 构建一个小模型"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "MoE",
+            "Router",
+            "load balancing loss"
+          ],
+          "order": 5,
+          "practice_task": "把一个 dense 的 olmo2 小模型配置改造成 MoE 版本（如 8 专家 top-2），build 后打印专家路由分布，并解释负载均衡 loss 的数值含义。",
+          "source_files": [
+            "src/olmo_core/nn/moe/moe.py",
+            "src/olmo_core/nn/moe/router.py",
+            "src/olmo_core/nn/moe/mlp.py",
+            "src/olmo_core/nn/moe/loss.py",
+            "src/examples/moe/train.py"
+          ],
+          "title": "混合专家（MoE）：路由、专家与负载均衡",
+          "topic": "讲解 nn/moe/ 的 MoE 实现：router 的负载均衡路由、专家 MLP、并行专家（parallel_mlp.py）与 MoE 辅助损失。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l6-model-initialization.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解 init 功能（标准差缩放等）如何按参数类型应用",
+            "复现同一 seed 下的确定性初始化",
+            "自定义新参数类型的初始化方案"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "init",
+            "参数初始化"
+          ],
+          "order": 6,
+          "practice_task": "用相同 init_seed 构建两次模型验证权重完全一致；再修改初始化配置观察参数分布（均值/方差）的变化，并用 seed_all() 解释全局可复现性。",
+          "source_files": [
+            "src/olmo_core/nn/transformer/init.py",
+            "src/olmo_core/utils.py",
+            "src/olmo_core/nn/transformer/config.py"
+          ],
+          "title": "模型初始化：权重从哪里来",
+          "topic": "讲解 nn/transformer/init.py 的参数初始化方案（normal init、缩放策略等）与 init_seed 如何保证可复现。"
+        }
+      ],
+      "order": 3,
+      "title": "单元三：Transformer 模型架构"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1",
+            "u3-l2"
+          ],
+          "filename": "u4-l1-numpy-dataset.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "解释 .npy 预分词数据格式与内存映射的收益",
+            "区分 FSL/TSL/padded 等数据集变体",
+            "用 NumpyDataLoaderConfig 组装训练与验证数据加载"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "NumpyDataset",
+            "NumpyDataLoader",
+            "collator"
+          ],
+          "order": 1,
+          "practice_task": "用随机 token 构造一个小型 .npy 数据集文件，通过 NumpyDatasetConfig + NumpyDataLoaderConfig 构建加载器，遍历打印几个 batch 的形状。",
+          "source_files": [
+            "src/olmo_core/data/numpy_dataset.py",
+            "src/olmo_core/data/data_loader.py",
+            "src/olmo_core/data/collator.py",
+            "src/olmo_core/data/tokenizer.py"
+          ],
+          "title": "NumpyDataset：预分词数据的内存映射加载",
+          "topic": "讲解 data/numpy_dataset.py 的内存映射 .npy 数据集家族与 data_loader.py 的 NumpyDataLoader，包括 TokenizerConfig 与 collator 的配合。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-composable-data-pipeline.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 TokenSource → InstanceSource → ComposableDataLoader 三层抽象",
+            "掌握切片、采样、按比例混合、按阶段切分的组合用法",
+            "能用 visualize() 调试自己的数据源树"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TokenSource",
+            "InstanceSource",
+            "ComposableDataLoader"
+          ],
+          "order": 2,
+          "practice_task": "用 composable API 搭建一个包含两个数据源、按 3:1 混合、再切出前 80% 做训练的数据管线，用 InstanceSource.visualize() 打印源树并验证采样比例。",
+          "source_files": [
+            "src/olmo_core/data/composable/__init__.py",
+            "src/olmo_core/data/composable/token_source.py",
+            "src/olmo_core/data/composable/instance_source.py",
+            "src/olmo_core/data/composable/data_loader.py",
+            "src/olmo_core/data/composable/packing_instance_source.py",
+            "src/olmo_core/data/composable/mixing_token_source.py"
+          ],
+          "title": "Composable 数据管线：TokenSource → InstanceSource → DataLoader",
+          "topic": "讲解新一代数据 API data/composable/：TokenSource、InstanceSource 的切片/采样/混合/packing 组合子，以及 ComposableDataLoader 的拼装与 visualize 可视化。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-data-mixtures.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "读懂 source mixture 配置如何把多个数据源按权重组合",
+            "了解 dolma17 等预置 mix 与 curriculum（分阶段）用法",
+            "为自定义语料编写一个 mixture 配置"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "SourceMixture",
+            "mixes 预置配方"
+          ],
+          "order": 3,
+          "practice_task": "阅读一个预置 .txt mixture 文件的格式，然后为你自己的两个 .npy 数据源编写等价的 mixture 配置，并用它构建 ComposableDataLoader 验证各源的实际占比。",
+          "source_files": [
+            "src/olmo_core/data/source_mixture.py",
+            "src/olmo_core/data/composable/mixing_instance_source.py",
+            "src/olmo_core/data/composable/sampling_instance_source.py"
+          ],
+          "title": "数据混合：source_mixture 与预置 mixes",
+          "topic": "讲解 source_mixture.py 的数据混合机制、data/mixes/ 中 OLMo 官方训练配方的组织方式，以及如何用混合比例与课程学习式切分组织多源数据。"
+        }
+      ],
+      "order": 4,
+      "title": "单元四：数据加载"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2",
+            "u3-l2"
+          ],
+          "filename": "u5-l1-optimizer-configs.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "掌握 OptimConfig 家族的公共字段与参数组覆盖机制",
+            "理解 build() 如何从配置生成真实优化器实例",
+            "为不同参数组设置不同超参"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OptimConfig",
+            "AdamWConfig",
+            "OptimGroupOverride"
+          ],
+          "order": 1,
+          "practice_task": "创建 AdamWConfig 并用 OptimGroupOverride 给 embedding 与 lm_head 设置不同的权重衰减，build 后打印优化器的参数组划分验证生效。",
+          "source_files": [
+            "src/olmo_core/optim/__init__.py",
+            "src/olmo_core/optim/config.py",
+            "src/olmo_core/optim/adamw.py",
+            "src/olmo_core/optim/lion.py"
+          ],
+          "title": "优化器配置体系：AdamW、Lion 与参数组覆盖",
+          "topic": "讲解 optim/ 包：OptimConfig 基类、AdamWConfig/LionConfig/MuonConfig 等实现，以及 OptimGroupOverride 如何对特定参数组覆盖超参。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-lr-schedulers.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 warmup + cosine decay 等调度曲线的参数化方式",
+            "说明调度器与 step/总步数的联动关系",
+            "绘制并验证自定义调度曲线"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LRScheduler",
+            "CosWithWarmup"
+          ],
+          "order": 2,
+          "practice_task": "构建 CosWithWarmup 调度器，绘制 0 到总步数的完整学习率曲线，并与官方训练脚本中的调度参数对照，解释 anneal 阶段为何要重设 lr。",
+          "source_files": [
+            "src/olmo_core/optim/scheduler.py",
+            "src/olmo_core/optim/__init__.py"
+          ],
+          "title": "学习率调度器",
+          "topic": "讲解 optim/scheduler.py 的 CosWithWarmup 等学习率调度器：如何按 step 计算即时学习率、warmup 与衰减的配置方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-skip-step-and-grad-debug.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 loss spike 检测触发的跳步逻辑",
+            "掌握梯度裁剪在优化器层的实现位置",
+            "用 grad_debug 工具检查异常梯度"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "SkipStepOptimizer",
+            "梯度裁剪",
+            "grad_debug"
+          ],
+          "order": 3,
+          "practice_task": "用一个小模型构造一次人为的 loss spike（注入异常梯度），观察 SkipStepOptimizer 是否触发跳步，并打印其内部计数状态。",
+          "source_files": [
+            "src/olmo_core/optim/skip_step_optimizer.py",
+            "src/olmo_core/optim/grad_debug.py",
+            "src/olmo_core/optim/adamw.py"
+          ],
+          "title": "SkipStepOptimizer：loss spike 检测与梯度裁剪",
+          "topic": "讲解 SkipStepOptimizer 包装器：梯度裁剪、loss spike 检测与跳步策略，以及 grad_debug.py 的梯度诊断工具。"
+        }
+      ],
+      "order": 5,
+      "title": "单元五：优化器"
+    },
+    {
+      "id": "u6",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4",
+            "u5-l2"
+          ],
+          "filename": "u6-l1-trainer-loop.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "跟踪 Trainer.fit() 中一个 step 的完整执行顺序",
+            "理解 Duration、LoadStrategy 等核心枚举的语义",
+            "说明指标收集与跨 rank 归约（ReduceType）机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Trainer",
+            "TrainerConfig",
+            "Duration"
+          ],
+          "order": 1,
+          "practice_task": "阅读 Trainer.fit() 源码，列出一个训练 step 内所有关键阶段（数据获取、前向、反向、优化器 step、指标、checkpoint）的先后顺序，并标出回调钩子插入的位置。",
+          "source_files": [
+            "src/olmo_core/train/trainer.py",
+            "src/olmo_core/train/config.py",
+            "src/olmo_core/train/common.py"
+          ],
+          "title": "Trainer 训练循环剖析",
+          "topic": "精读 train/trainer.py 的 Trainer 类与 TrainerConfig：训练主循环、step 管理、指标收集与归约、Duration（按 step/token/epoch 停训）语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-transformer-train-module.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 TrainModule 抽象与 TransformerTrainModule 的分工",
+            "说明并行配置为何挂在 train module 上",
+            "梳理一次 forward/backward/optimizer step 的代码路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "TrainModule",
+            "TransformerTrainModule"
+          ],
+          "order": 2,
+          "practice_task": "构建一个最小 TransformerTrainModuleConfig（单卡 DP），配合随机数据手动执行一次 train_step，打印 loss 与优化器状态，验证你理解的调用链与源码一致。",
+          "source_files": [
+            "src/olmo_core/train/train_module/train_module.py",
+            "src/olmo_core/train/train_module/config.py",
+            "src/olmo_core/train/train_module/transformer/train_module.py",
+            "src/olmo_core/train/train_module/transformer/config.py",
+            "src/olmo_core/train/train_module/transformer/common.py"
+          ],
+          "title": "TransformerTrainModule：前向、反向与并行设置的汇聚点",
+          "topic": "讲解 train/train_module/ 的 TrainModule 抽象与 TransformerTrainModule：它包装模型、优化器与并行策略（DP/TP/PP/CP/EP 配置都存放在此），并实现 forward/backward 逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-callback-system.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 Callback 基类的全部钩子及其触发时机",
+            "理解内置回调（checkpointer、evaluator、speed monitor 等）的组合方式",
+            "编写自定义回调并挂载到 Trainer"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Callback",
+            "callbacks 包"
+          ],
+          "order": 3,
+          "practice_task": "实现一个自定义 Callback，在每个 step 结束时打印当前 step、loss 与吞吐，挂到 TrainerConfig 上跑一次小训练，验证钩子触发顺序与你的预期一致。",
+          "source_files": [
+            "src/olmo_core/train/callbacks/callback.py",
+            "src/olmo_core/train/callbacks/__init__.py",
+            "src/olmo_core/train/callbacks/checkpointer.py",
+            "src/olmo_core/train/callbacks/evaluator_callback.py",
+            "src/olmo_core/train/callbacks/speed_monitor.py",
+            "src/olmo_core/train/callbacks/console_logger.py"
+          ],
+          "title": "回调系统：如何扩展训练循环",
+          "topic": "讲解 train/callbacks/ 的 Callback 钩子体系与丰富的内置回调：checkpoint、评估、日志（WandB/Comet/console）、速度与显存监控、序列长度调度等。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u6-l4-checkpointing.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "理解分布式 checkpoint 的保存/恢复与重分片",
+            "掌握 LoadStrategy 各取值的使用场景",
+            "实现一次完整的训练中断与续训"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Checkpointer",
+            "分布式 checkpoint"
+          ],
+          "order": 4,
+          "practice_task": "跑一个小训练到第 N 步保存 checkpoint，模拟中断后用 LoadStrategy.new_cmd 改变配置续训，对比两次运行的 loss 曲线是否无缝衔接。",
+          "source_files": [
+            "src/olmo_core/train/checkpoint.py",
+            "src/olmo_core/train/callbacks/checkpointer.py",
+            "src/olmo_core/distributed/checkpoint/__init__.py",
+            "src/olmo_core/distributed/checkpoint/filesystem.py",
+            "src/olmo_core/distributed/checkpoint/utils.py"
+          ],
+          "title": "Checkpoint 体系：保存、恢复与断点续训",
+          "topic": "讲解 train/checkpoint.py 的 Checkpointer 与 distributed/checkpoint/ 的分布式保存/加载（含不同文件系统后端）、异步 checkpoint 与 LoadStrategy 恢复策略。"
+        }
+      ],
+      "order": 6,
+      "title": "单元六：训练循环"
+    },
+    {
+      "id": "u7",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u7-l1-data-parallel.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "区分 DDP、FSDP、HSDP 的分片与梯度同步差异",
+            "通过 DataParallelConfig 切换并行策略",
+            "理解 gradient reduction 与 fsdp wrap policy 的配置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DataParallelConfig",
+            "FSDP",
+            "HSDP"
+          ],
+          "order": 1,
+          "practice_task": "分别用 DDP 与 FSDP 配置（单进程模拟或 CPU 多进程）构建训练设置，对比优化器状态中参数分片的差异，并解释 HSDP 与 FSDP 的参数量取舍。",
+          "source_files": [
+            "src/olmo_core/distributed/parallel/data_parallel.py",
+            "src/olmo_core/train/train_module/transformer/ddp_train_module.py",
+            "src/olmo_core/train/train_module/transformer/config.py"
+          ],
+          "title": "数据并行：DDP、FSDP 与 HSDP",
+          "topic": "讲解 distributed/parallel/data_parallel.py 的 DataParallelType（DDP/FSDP/HSDP）与对应的 train module 设置，理解分片策略与梯度归约。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-tp-pp-cp-ep.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "说明张量/流水线/上下文/专家并行各自切分的对象",
+            "理解多维并行组合时的进程组划分",
+            "为模型配置组合并行策略"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TensorParallelConfig",
+            "PipelineParallelConfig",
+            "ContextParallelConfig",
+            "ExpertParallelConfig"
+          ],
+          "order": 2,
+          "practice_task": "阅读官方 OLMo-2 32B 脚本中的并行配置组合，画出 8 卡情况下各并行维度的进程组划分示意图，并解释为何 attention 适合 TP 而 MoE 专家适合 EP。",
+          "source_files": [
+            "src/olmo_core/distributed/parallel/tensor_parallel.py",
+            "src/olmo_core/distributed/parallel/pipeline_parallel.py",
+            "src/olmo_core/distributed/parallel/context_parallel.py",
+            "src/olmo_core/distributed/parallel/expert_parallel.py",
+            "src/olmo_core/train/train_module/transformer/pipeline_train_module.py"
+          ],
+          "title": "张量、流水线、上下文与专家并行",
+          "topic": "总览其余并行维度：tensor_parallel、pipeline_parallel（含 pipeline train module）、context_parallel（ring attention）、expert_parallel，以及它们如何与 DP 组合成多维并行。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l2"
+          ],
+          "filename": "u7-l3-distributed-utils.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解进程组创建与 world/rank 的管理方式",
+            "使用 olmo_core.testing.distributed 编写多进程测试",
+            "排查常见的分布式初始化问题"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "distributed utils",
+            "distributed 测试工具"
+          ],
+          "order": 3,
+          "practice_task": "基于 olmo_core.testing/distributed.py 的工具写一个双进程的小测试：各自持有一半数据，all-gather 后验证合并结果，并用 pytest 跑通它。",
+          "source_files": [
+            "src/olmo_core/distributed/utils.py",
+            "src/olmo_core/distributed/nn.py",
+            "src/olmo_core/testing/distributed.py",
+            "src/olmo_core/utils.py"
+          ],
+          "title": "分布式工具与测试基础设施",
+          "topic": "讲解 distributed/utils.py 的进程组管理（init_distributed、get_rank 等）、distributed/nn.py 的分布式原语，以及 testing/distributed.py 提供的多进程测试工具。"
+        }
+      ],
+      "order": 7,
+      "title": "单元七：分布式训练"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l3"
+          ],
+          "filename": "u8-l1-evaluation.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 Evaluator 抽象接口与 LMEvaluator 的评估循环",
+            "理解 task groups 如何组织下游评测",
+            "用 DownstreamEvaluatorCallback 在训练中周期性评测"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Evaluator",
+            "LMEvaluator",
+            "evaluator callback"
+          ],
+          "order": 1,
+          "practice_task": "构建一个迷你 LMEvaluator（用小模型 + 少量随机 prompt 计算 loss 与 ppl），通过 evaluator callback 挂到训练循环，观察每轮评估指标的变化。",
+          "source_files": [
+            "src/olmo_core/eval/evaluator.py",
+            "src/olmo_core/eval/lm_evaluator.py",
+            "src/olmo_core/eval/metrics.py",
+            "src/olmo_core/eval/task_groups.py",
+            "src/olmo_core/train/callbacks/evaluator_callback.py"
+          ],
+          "title": "评测框架：Evaluator 与 LMEvaluator",
+          "topic": "讲解 eval/ 包的 Evaluator 抽象、LMEvaluator 的困惑度评估、task_groups 与训练中的 DownstreamEvaluatorCallback/LMEvaluatorCallback。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u8-l2-generation.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "理解 generation module 的采样与 KV cache 机制",
+            "用 olmo_core.generate.chat 交互式加载 checkpoint 推理",
+            "对比 OLMo-core 生成与 HF/vLLM 推理的适用场景"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GenerationModule",
+            "sampling",
+            "chat"
+          ],
+          "order": 2,
+          "practice_task": "阅读 generate/generation_module/transformer/generation_module.py 的循环逻辑，用随机初始化的小模型（或公开 checkpoint）跑一次自回归生成，并调整 sampling 参数观察输出变化。",
+          "source_files": [
+            "src/olmo_core/generate/chat.py",
+            "src/olmo_core/generate/sampling.py",
+            "src/olmo_core/generate/generation_module/generation_module.py",
+            "src/olmo_core/generate/generation_module/transformer/generation_module.py",
+            "src/olmo_core/nn/attention/kv_cache.py"
+          ],
+          "title": "生成与 Chat：在 OLMo-core 里做自回归推理",
+          "topic": "讲解 generate/ 包：generation_module 的自回归生成循环、sampling.py 的采样策略（temperature/top-p）以及 chat.py 的交互式聊天入口。"
+        }
+      ],
+      "order": 8,
+      "title": "单元八：评测与生成"
+    },
+    {
+      "id": "u9",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u6-l4"
+          ],
+          "filename": "u9-l1-official-scripts.md",
+          "id": "u9-l1",
+          "learning_goals": [
+            "读懂 ExperimentConfig + main() 的官方脚本骨架",
+            "理解预训练、midtrain、anneal、long-context 各阶段的配置差异",
+            "通过命令行 dotlist 复现/修改官方训练配置"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "official scripts",
+            "ExperimentConfig"
+          ],
+          "order": 1,
+          "practice_task": "选一个 OLMo-3 7B pretrain 脚本，画出其配置树（模型/数据/优化器/并行/回调），找出 5 个你能通过命令行安全覆盖的字段并实际覆盖跑 dry-run。",
+          "source_files": [
+            "src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py",
+            "src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py",
+            "src/scripts/official/README.md",
+            "src/olmo_core/script_utils.py"
+          ],
+          "title": "官方训练脚本解析：如何复现 OLMo-2/OLMo-3",
+          "topic": "以 scripts/official/ 下的 OLMo-2 32B 与 OLMo-3 7B/32B 脚本为例，讲解官方脚本如何用 ExperimentConfig 组装完整配方并用 torchrun 启动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l1"
+          ],
+          "filename": "u9-l2-internal-script-template.md",
+          "id": "u9-l2",
+          "learning_goals": [
+            "掌握 launch/train/train_single/prep/dry_run 子命令的工作方式",
+            "理解 prepare_cli_environment 与官方脚本模式的差异",
+            "从 template.py 出发定制自己的训练脚本"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "内部脚本 CLI",
+            "template.py"
+          ],
+          "order": 2,
+          "practice_task": "复制 template.py 为自己的脚本，定义一个最小 ExperimentConfig，依次跑通 dry_run 命令（无需真实集群），观察生成的配置输出与日志。",
+          "source_files": [
+            "src/scripts/train/template.py",
+            "src/scripts/train/README.md",
+            "src/olmo_core/utils.py"
+          ],
+          "title": "内部训练脚本模板：launch/train/dry_run 工作流",
+          "topic": "讲解 scripts/train/ 的内部脚本模式：prepare_cli_environment 与 launch、train、train_single、prep、dry_run 子命令，以及 template.py 作为起点的用法。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u9-l2"
+          ],
+          "filename": "u9-l3-beaker-launch-and-docker.md",
+          "id": "u9-l3",
+          "learning_goals": [
+            "理解 Gantry recipe 的四步启动流程",
+            "掌握 OLMoCoreBeakerImage 与 torch/CUDA 版本的对应关系",
+            "用 BeakerLaunchConfig 定制多节点任务（replicas、挂载、pre/post setup）"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "BeakerLaunchConfig",
+            "Dockerfile",
+            "gantry"
+          ],
+          "order": 3,
+          "practice_task": "阅读 beaker.py 中 OLMoCoreBeakerImage 枚举与 launch() 流程，写出一次 2 节点训练所需的 launch 配置（含 Weka 挂载与 torchrun 包装），并解释 dirty 工作树为何会被拒绝。",
+          "source_files": [
+            "src/olmo_core/launch/beaker.py",
+            "src/olmo_core/launch/beaker_presets.py",
+            "src/Dockerfile",
+            "Makefile"
+          ],
+          "title": "Beaker 启动与 Docker 镜像",
+          "topic": "讲解 launch/beaker.py 的 BeakerLaunchConfig/Gantry 启动流程（镜像选择、clone 仓库、pip install、torchrun 包装）、Dockerfile 两阶段构建与 make docker-image。"
+        }
+      ],
+      "order": 9,
+      "title": "单元九：训练脚本与部署"
+    },
+    {
+      "id": "u10",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u10-l1-float8-training.md",
+          "id": "u10-l1",
+          "learning_goals": [
+            "理解 float8/mxfp8 训练的收益与风险",
+            "掌握通过 Config 启用低精度线性的方式",
+            "评估低精度对 loss 稳定性的影响"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "float8",
+            "mxfp8_linear"
+          ],
+          "order": 1,
+          "practice_task": "对比同一小模型在 fp32 与 mxfp8 线性层配置下的前向输出误差与显存占用，记录数值差异并总结何时值得启用 float8。",
+          "source_files": [
+            "src/olmo_core/float8/ao.py",
+            "src/olmo_core/nn/mxfp8_linear.py",
+            "src/olmo_core/nn/fp8_weight.py",
+            "src/olmo_core/mxfp8_config.py"
+          ],
+          "title": "低精度训练：float8 与 mxfp8",
+          "topic": "讲解 float8/ao.py 基于 torchao 的 float8 训练支持与 nn/mxfp8_linear.py 的 mxfp8 线性层，以及 mxfp8_config.py 的配置入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u10-l2-custom-cuda-kernels.md",
+          "id": "u10-l2",
+          "learning_goals": [
+            "理解 MoE 相关 CUDA 内核（permute/drop、grouped GEMM）要解决的问题",
+            "掌握 CUDA 扩展的构建与调用模式",
+            "判断一个算子何时值得下沉到自定义内核"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "kernels",
+            "CUDA 扩展",
+            "grouped GEMM"
+          ],
+          "order": 2,
+          "practice_task": "追踪 MoE 前向中 token 路由到专家计算的完整数据搬运路径（permute → grouped GEMM → unpermute），用小规模张量验证 kernels/moe.py 中工具函数与朴素 PyTorch 实现的输出一致性。",
+          "source_files": [
+            "src/olmo_core/kernels/moe.py",
+            "src/olmo_core/kernels/grouped_mm.py",
+            "src/olmo_core/kernels/cuda_build_utils.py",
+            "src/olmo_core/nn/moe/moe.py"
+          ],
+          "title": "自定义 CUDA 内核：kernels 与 _csrc",
+          "topic": "讲解 kernels/ 包与 nn/_csrc 的自定义 CUDA 扩展：grouped GEMM、MoE token 重排等，以及扩展的构建方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2",
+            "u3-l2"
+          ],
+          "filename": "u10-l3-vision-encoder.md",
+          "id": "u10-l3",
+          "learning_goals": [
+            "理解 ViT 视觉编码器与连接器如何把图像特征注入语言模型",
+            "掌握 image processor 与 token 化的配合",
+            "说明 Molmo2 式多模态模型的组件构成"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "VisionTransformer",
+            "connector",
+            "image processor"
+          ],
+          "order": 3,
+          "practice_task": "阅读 vision/config.py 与 image_vit.py，梳理'图像张量 → patch → ViT → connector → 语言模型输入'的形状变化链，用随机图像张量跑通一次视觉侧前向并记录各阶段形状。",
+          "source_files": [
+            "src/olmo_core/nn/vision/config.py",
+            "src/olmo_core/nn/vision/image_vit.py",
+            "src/olmo_core/nn/vision/connector.py",
+            "src/olmo_core/nn/vision/multimodal.py",
+            "src/olmo_core/nn/vision/molmo2_image_processor.py"
+          ],
+          "title": "视觉编码器与多模态模型组件",
+          "topic": "讲解 nn/vision/ 的 ViT 视觉编码器、connector、Molmo2 图像处理器与 multimodal.py 如何把视觉能力接入 Transformer。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u10-l3"
+          ],
+          "filename": "u10-l4-multimodal-data.md",
+          "id": "u10-l4",
+          "learning_goals": [
+            "理解 message sequence → packing → collator 的多模态数据流",
+            "掌握 mixture weights 与多源多模态数据加载的组织方式",
+            "为自定义多模态数据源接入训练管线"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "sequence builder",
+            "packing",
+            "multimodal collator"
+          ],
+          "order": 4,
+          "practice_task": "阅读 scripts/train/Molmo2-Stage1.py，画出 stage-1 训练的数据与模型配置全景图；再模仿 data/multimodal/ 下任一数据集模块，为一个假设的'图像+文本'数据源写出接入骨架代码。",
+          "source_files": [
+            "src/olmo_core/data/multimodal/sequence_builder.py",
+            "src/olmo_core/data/multimodal/packing.py",
+            "src/olmo_core/data/multimodal/collator.py",
+            "src/olmo_core/data/multimodal/data_loader.py",
+            "src/olmo_core/data/multimodal/mixture_data_loader.py",
+            "src/scripts/train/Molmo2-Stage1.py"
+          ],
+          "title": "多模态数据管线：sequence builder、packing 与 collator",
+          "topic": "讲解 data/multimodal/ 的核心：message sequence 构建、多模态 packing、collator 与 mixture data loader，对应近期合入的 Multimodal 系列改动。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4"
+          ],
+          "filename": "u10-l5-checkpoint-conversion.md",
+          "id": "u10-l5",
+          "learning_goals": [
+            "理解 OLMo-core 与 HF/MaxText 权重的命名与结构映射",
+            "掌握 conversion 框架（state converter/mapping）的扩展方式",
+            "完成一次双向 checkpoint 转换并验证数值一致"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "state_converter",
+            "HF 转换",
+            "MaxText 转换"
+          ],
+          "order": 5,
+          "practice_task": "用 convert_checkpoint_to_hf.py 把一个小型 OLMo-core checkpoint 转成 HF 格式，再用 convert_checkpoint_from_hf.py 转回来，对比两次转换后模型参数是否逐项一致。",
+          "source_files": [
+            "src/examples/huggingface/convert_checkpoint_to_hf.py",
+            "src/examples/huggingface/convert_checkpoint_from_hf.py",
+            "src/olmo_core/nn/conversion/state_converter.py",
+            "src/olmo_core/nn/conversion/state_mapping.py",
+            "src/olmo_core/nn/maxtext/__init__.py"
+          ],
+          "title": "Checkpoint 转换：OLMo-core ↔ Hugging Face ↔ MaxText",
+          "topic": "讲解 examples/huggingface/ 的双向转换脚本、nn/conversion/ 的状态转换框架与 nn/maxtext/ 的 MaxText checkpoint 转换。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2",
+            "u6-l3"
+          ],
+          "filename": "u10-l6-testing-and-contributing.md",
+          "id": "u10-l6",
+          "learning_goals": [
+            "按项目规范编写参数化测试与 GPU/分布式测试",
+            "用 make style/checks 走完贡献前检查",
+            "写出一个符合 Sphinx 规范的公共 API 文档字符串"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "pytest 约定",
+            "olmo_core.testing",
+            "贡献流程"
+          ],
+          "order": 6,
+          "practice_task": "为你在 u6-l3 写的自定义回调补充一个 pytest 测试（含 parametrize），补全 Sphinx 风格 docstring，并依次通过 make style-check、make lint-check、make type-check。",
+          "source_files": [
+            "CONTRIBUTING.md",
+            "src/test/train/callbacks",
+            "src/olmo_core/testing/distributed.py",
+            "src/test/data/composable/data_loader_test.py",
+            "Makefile"
+          ],
+          "title": "测试体系与贡献流程",
+          "topic": "讲解 src/test 的组织约定（test_* 命名、parametrize、@pytest.mark.gpu、分布式测试工具）、olmo_core/testing 工具与贡献时的格式/lint/类型检查要求。"
+        }
+      ],
+      "order": 10,
+      "title": "单元十：高级主题与二次开发"
+    }
+  ]
+}
