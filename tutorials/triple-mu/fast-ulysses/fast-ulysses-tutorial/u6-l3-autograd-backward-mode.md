@@ -1,432 +1,589 @@
-# 自动微分：backward 是另一个 mode
+# u6-l3 自动微分：backward 是另一个 mode
 
 ## 1. 本讲目标
 
 学完本讲，你应该能够：
 
-1. 读懂 `A2AFunction` 这个 C++ `torch::autograd::Function`：它在 `saved_data` 里保存了什么、为什么必须保存这些东西。
-2. **从数学上证明**「排列的 vjp 是逆排列」，从而理解为什么 backward 就是 `1 - mode` 的前向调用，且逐字节位精确。
-3. 说清 `seq_splits` / `head_splits` 在 backward 中**原样传递而不交换**的道理，并与 `all_to_all_single` 的 backward **交换** split sizes 的语义做对比。
-4. 解释 forward AD（jvp）为什么让 tangent 走**第二条集合通信**，以及 reverse-mode functorch（`grad` / `vjp` / `jacrev`）为什么不可用。
-5. 写一个验证脚本，把上述结论在真实集群（或单卡退化情形）上逐条跑通，并对照 `examples/dit_attention.py` 的梯度校验。
+1. 说出 `A2AFunction` 这个 C++ `torch::autograd::Function` 在 `saved_data` 里保存了什么、为什么保存 group 本身，以及 `backward` 为什么必须用 `apply()` 而不是裸函数。
+2. 用排列矩阵的数学证明「排列的 vjp 是逆排列」，从而理解 backward 就是 `1 - mode` 的前向调用。
+3. 对比 `all_to_all_single` 的 backward 交换 split sizes 与本库 splits **原样传递**的语义差异，并能解释为什么交换在这里是错的。
+4. 解释 forward AD（jvp）为什么让 tangent 走**第二条集合通信**、为什么这件事必须在 Autograd 内核里手工做，以及 reverse functorch（`grad`/`vjp`/`jacrev`）不可用的边界。
+
+本讲承接 u6-l2 的调用流水线（prepare → 屏障 → 传输 → 屏障 → copy_out）：autograd 公式套在这条流水线外面，backward 复用的正是同一条流水线。
 
 ## 2. 前置知识
 
-本讲默认你已读过 u6-l2（`prepare` → 屏障 → 传输 → 屏障 → `copy_out` 的流水线）。在此之上，还需要几个自动微分的基础概念，用通俗语言过一遍：
+### 2.1 vjp 与 jvp：两种自动微分
 
-- **双射与排列（permutation）**：一个函数把集合中每个元素一一对应地搬到另一个位置、且不增不减，它就是双射；有限集合上的双射就是「重排」。mode 0 的 all-to-all 不做任何计算，只把全局元素集合重排一次——它是一个排列。
-- **Jacobian 与 vjp**：对函数 \( f: \mathbb{R}^N \to \mathbb{R}^M \)，Jacobian 是 \( M \times N \) 的偏导矩阵。反向传播需要的不是 Jacobian 本身，而是 **vjp**（vector-Jacobian product）：给定上游梯度 \( \bar{y} \in \mathbb{R}^M \)，算 \( \bar{x} = J^{\mathsf T} \bar{y} \in \mathbb{R}^N \)。`backward(upstream)` 做的就是这件事。
-- **排列矩阵**：排列 \( \pi \) 对应的矩阵 \( P_\pi \)，每行每列恰有一个 1。它满足
-  \[ P_\pi^{\mathsf T} = P_\pi^{-1} = P_{\pi^{-1}} \]
-  ——转置、求逆、取逆排列，三件事是同一件事。这是本讲全部数学的支点。
-- **forward AD 与 tangent**：前向模式把导数和数值一起推。输入写成「对偶数」\( x + \dot{x} \)（\( \dot{x} \) 叫 tangent），输出得到 \( y + \dot{y} \)，其中 \( \dot{y} = J\dot{x} \)。torch 里对应 `torch.autograd.forward_ad` 的 dual tensor。
-- **`create_graph=True` 与双重 backward**：`torch.autograd.grad(..., create_graph=True)` 让一阶梯度本身带计算图，于是可以对梯度再求梯度（grad-of-grad）。这个开关决定了 backward 内部的调用会不会再建图——第 4.2 节会看到它如何依赖 `A2AFunction::apply` 的递归。
-- **torch dispatcher 的 Autograd key**（u6-l1 已建立）：一个 op 注册了 Autograd 内核后，带梯度的调用先进入这个内核，由它负责建图，再「往下」分发到真正干活的内核。
+- **reverse mode（反向模式）**：torch 默认的 `backward()`。对一个函数 \( f: \mathbb{R}^n \to \mathbb{R}^m \)，它计算 **vjp**（vector-Jacobian product）：给定上游梯度 \( g \in \mathbb{R}^m \)，算 \( J_f^{\top} g \in \mathbb{R}^n \)。一次反向传播能把一个标量 loss 对所有参数的梯度一起算完，适合训练。
+- **forward mode（前向模式）**：计算 **jvp**（Jacobian-vector product）：给定输入方向 \( \dot{x} \in \mathbb{R}^n \)，算 \( J_f \dot{x} \in \mathbb{R}^m \)。torch 里通过 `torch.autograd.forward_ad` 的 **dual tensor**（对偶张量）使用：一个 dual tensor 携带 primal（原值）与 tangent（方向）两份数据，每个算子负责让 tangent 跟着 primal 一起传播。
+
+### 2.2 排列的 Jacobian 是排列矩阵
+
+`all_to_all_4d` 不做任何算术——它只把元素搬家。把所有 rank 的输入拼成一个全局向量 \( x \)，输出拼成 \( y \)，则 \( y = Px \)，\( P \) 是一个**排列矩阵**（每行每列恰有一个 1）。排列矩阵是正交阵：
+
+\[ P^{\top} = P^{-1} \]
+
+所以 vjp 是 \( J^{\top} g = P^{\top} g = P^{-1} g \)——**逆排列作用于梯度**。而 jvp 是 \( J \dot{x} = P\dot{x} \)——**同一个排列作用于方向**。这两条性质分别决定了本讲的两个结论：backward 是另一个 mode，forward AD 是同一个 mode 再跑一遍。
+
+### 2.3 C++ 的 torch::autograd::Function
+
+torch 允许用 C++ 写自定义可微算子：继承 `torch::autograd::Function<子类>`，实现静态 `forward(ctx, ...)` 与 `backward(ctx, grads)`。与 Python 的 `torch.autograd.Function` 相比：
+
+- `ctx->saved_data` 是一个 `std::map<std::string, c10::IValue>`，可以存张量以外的对象（整数、整数向量、乃至本库的 `intrusive_ptr<UlyssesGroup>` 智能指针）。
+- **它没有 C++ jvp 钩子**——这是本讲 4.4 节一切绕行设计的根源。
+- 调用必须经 `子类::apply(...)`：这才是建图入口，返回的张量带 `grad_fn`；直接调 forward 函数则完全不进图。
+
+### 2.4 functorch 的「 lifting 」边界
+
+`torch.func`（functorch）通过把 autograd 节点「提升」为自己的解释器指令来工作。它只能提升 **Python** 的 autograd 节点；一个 C++ `torch::autograd::Function` 产生的节点它无法拆开，于是 `torch.func.grad` / `vjp` / `jacrev` 对本库直接 raise。这不是 bug 而是明确的能力边界，docs/api.md 把它写成契约。
 
 ## 3. 本讲源码地图
 
 | 文件 | 在本讲中的角色 |
 | --- | --- |
-| `src/bindings.cc` | 核心战场：`A2AFunction`（forward/backward）、`dispatch_below_autograd`、`with_reverse_ad`、`all_to_all_4d_autograd`（forward AD），以及 Autograd key 的注册 |
-| `python/fast_ulysses/group.py` | Python 门面：`out=` 带梯度输入时的提前拒绝（跨语言两级校验的 Python 侧） |
-| `docs/api.md` | 可微性契约的权威表述：backward 是另一 mode、splits 不交换、forward AD 边界、集体契约中关于 backward 顺序的一条 |
-| `docs/migration.md` | 从 DeepSpeed `_SeqAllToAll` / yunchang `SeqAllToAll4D` 的 autograd.Function 包装迁移到本库的对照 |
-| `examples/dit_attention.py` | 端到端样例：无任何 autograd.Function 包装的可训练注意力块，输出 + 输入梯度双校验 |
-| `test/distributed/correctness.py` | 本讲实践的直接参照：backward 位精确断言、skewed splits 断言、forward AD 断言、双重 backward 断言 |
+| [src/bindings.cc](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc) | 全部核心：`A2AFunction`、`dispatch_below_autograd`、`with_reverse_ad`、`all_to_all_4d_autograd`（forward AD）、Autograd key 注册 |
+| [python/fast_ulysses/group.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py) | Python 门面：`out=` 与 async 形式对梯度输入的显式拒绝 |
+| [src/a2a_plan.cc](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/a2a_plan.cc) | `build_plan` 的两个分支；mode 1 分支的注释自称 "The inverse" |
+| [src/group.cc](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/group.cc) | `make_dims` 的 splits-形状交叉校验（4.3 实践要用） |
+| [test/distributed/correctness.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py) | backward、splits 原样传递、forward AD、双重 backward 的位精确测试 |
+| [test/distributed/validation.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/validation.py) | 「`out=` 对梯度输入必须 raise」的断言 |
+| [test/test_plan.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/test_plan.py) | 无 GPU 的 round trip 证据：两个 plan 用同一对不均匀 splits |
+| [docs/api.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md) / [docs/migration.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md) | 可微性契约、与 DeepSpeed/yunchang wrapper 的对照 |
+| [examples/dit_attention.py](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py) | 无 wrapper 的可训练模块 + 输出/梯度双校验 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 A2AFunction：把 group、mode、splits 存进图
+### 4.1 A2AFunction：用 C++ autograd::Function 包装集合通信
 
 #### 4.1.1 概念说明
 
-`A2AFunction` 是一个 C++ 的 `torch::autograd::Function<A2AFunction>`——也就是你在 Python 里写 `class MyFn(torch.autograd.Function)` 时的 C++ 对应物。它解决的问题是：`all_to_all_4d` 的正向计算由 `run()`（屏障→传输→屏障→拷出）完成，但要让 torch 的反向引擎知道「梯度怎么穿过这次集合通信」，就必须有一个节点向引擎登记两件事——**正向怎么算**（`forward`）和**梯度怎么回传**（`backward`）。
+DeepSpeed 的 `_SeqAllToAll`、yunchang 的 `SeqAllToAll4D` 都是 **Python** 的 `torch.autograd.Function`，包住一个不可微的通信调用。fast-ulysses 把这层 wrapper 直接搬进 C++（`A2AFunction`），因为通信本身就在 C++ 里——wrapper「被删除而不是被翻译」，这是 [docs/migration.md](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md) 的原话（见 [docs/migration.md:147-155](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md#L147-L155)：那些库的 backward 是「交换两个索引」，本库是「另一个 mode 加同一对 splits」）。
 
-DeepSpeed 和 yunchang 的做法是在 Python 侧包一层 `torch.autograd.Function`（`_SeqAllToAll` / `SeqAllToAll4D`），backward 里重新调用前向、交换两组索引；本库把这件事做进了 C++ 算子层，**包装被删除而不是被翻译**——这也是 u6-l1 讲过的 schema 拆分的回报：functional 形式（无 `Tensor(a!)` 别名）才允许携带 autograd 公式。
+`A2AFunction` 要解决三个问题：
 
-forward 需要为 backward 保存四样上下文：
-
-- **group**：`UlyssesGroup` 的 `intrusive_ptr`（torchbind 自定义类）。真正执行集合通信的有状态对象——窗口、plan 缓存、rank、world_size 都在它身上。backward 时不可能「重建」一个组：那等于再做一次集合性的对称内存分配。
-- **mode**：backward 要用 `1 - mode`，必须记住正向是哪个方向。
-- **seq_splits / head_splits**：组的切分几何（u2-l3），backward 原样复用。
-
-把 group 存进 `saved_data` 有一个重要副作用：**计算图持有组的引用**。一张在 `destroy()` 之后才重放的图会在 backward 里抛错——文档认为这是正确行为：「there is nothing left to run the collective on」。
+1. **建图**：让 `all_to_all_4d` 的输出带 `grad_fn`，能进任何更大的计算图。
+2. **保存上下文**：backward 时刻需要 group（传输资源）、mode、两张 splits 表——它们必须原样存进 `ctx->saved_data`。
+3. **不重复建图**：推理或 `no_grad` 下走快速路径，跳过节点分配——注释说这个算子「每步每注意力层跑两次」，死节点是纯开销。
 
 #### 4.1.2 核心流程
 
-一次无 `out=`、输入带梯度的调用，从 Python 到设备再回来的完整路径：
-
-```text
-Python: group.all_to_all_4d(x, mode=0)              # x.requires_grad，GradMode 开
-  └─ dispatcher 命中 Autograd key
-       └─ all_to_all_4d_autograd()
-            └─ input 无 tangent（不是 dual）？
-                 └─ with_reverse_ad()
-                      ├─ GradMode 关 或 x 不 requires_grad
-                      │    → dispatch_below_autograd()   # 快路径：不建图，直接执行
-                      └─ 否则 → A2AFunction::apply(group, x, mode, seq, head)
-                           ├─ forward: saved_data 存 group/mode/seq/head
-                           │          → dispatch_below_autograd() → 真正的 all_to_all_4d
-                           │            （CompositeExplicitAutograd 内核 → run()）
-                           └─ (反传时) backward: 读 saved_data → apply(1-mode) → 梯度
 ```
-
-两个非平凡的设计决定：
-
-1. **`forward` 不直调 `all_to_all_4d()`，而是重新进入 dispatcher**（`dispatch_below_autograd`）。直调会「离开 dispatcher 一去不回」，Autograd 之下的所有 key——Python dispatcher、FakeTensorMode、Meta——都永远不会被咨询，一个 fake tensor 会直接撞进真内核死在 `cudaMemcpy3DAsync`。`AutoDispatchBelowADInplaceOrView` guard 负责挡住 `op.call` 绕回 Autograd 内核：光靠关 GradMode 不够，GradMode 管的是建不建图，不是 dispatcher 选哪个内核。
-2. **`with_reverse_ad` 的快路径**。推理（`no_grad`）或输入根本不要梯度时，`apply()` 分配的 autograd 节点是纯粹的死重——而本算子「每层每步跑两次」，所以值得在入口处分流。
+torch.ops.fast_ulysses.all_to_all_4d(...)          # Autograd key 命中
+        │
+        ▼
+all_to_all_4d_autograd                             # 4.4 节：先摘 tangent
+        │  无 tangent
+        ▼
+with_reverse_ad
+        ├─ GradMode 关 或 input 不需要梯度 ──► dispatch_below_autograd ──► 真内核（无图）
+        └─ 否则 ──► A2AFunction::apply ──► forward:
+                          ├─ ctx->saved_data ← {group, mode, seq, head}
+                          └─ dispatch_below_autograd(group, input, mode, splits)
+                                    │
+                                    ▼
+                       u6-l2 讲过的流水线：prepare → 屏障 → 传输 → 屏障 → copy_out
+```
 
 #### 4.1.3 源码精读
 
-`A2AFunction` 的 forward，把四个上下文写进 `saved_data` 后经 `dispatch_below_autograd` 执行正向（注意注释里「图持有组存活」那三行）：
+**保存什么**——[src/bindings.cc:512-529](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L512-L529)：`forward` 把四个对象写进 `ctx->saved_data`，然后经 `dispatch_below_autograd` 执行真正的传输。
 
-- [src/bindings.cc:512-529](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L512-L529) —— `A2AFunction` 类与 `forward`：`ctx->saved_data["group"] = group` 保存 torchbind 类的 `intrusive_ptr`，`mode` 存整数，两个 splits 存成 `IValue` 向量（缺省时存 `IValue()`，即 None，backward 里据此区分「没传」和「传了空」）。
+```cpp
+ctx->saved_data["group"] = group;   // intrusive_ptr 存进 IValue：图持有 group 的生命周期
+ctx->saved_data["mode"]  = mode;
+ctx->saved_data["seq"]   = seq_splits.has_value() ? c10::IValue(*seq_splits) : c10::IValue();
+ctx->saved_data["head"]  = head_splits.has_value() ? c10::IValue(*head_splits) : c10::IValue();
+```
 
-- [src/bindings.cc:478-493](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L478-L493) —— `dispatch_below_autograd`：加 guard 后用 `Dispatcher::findSchemaOrThrow(...).typed<...>()` 拿到 op 句柄再 `op.call(...)`，重新走一遍 Autograd 以下的分发。
+两个细节值得停下来看：
 
-- [src/bindings.cc:565-577](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L565-L577) —— `with_reverse_ad`：`!at::GradMode::is_enabled() || !input.requires_grad()` 时走免建图路径；注释点明动机是「节点在没人用它时是死重」。
+- **group 进图**。[src/bindings.cc:522](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L522) 的注释写明：「图把 group 握在手里。一张活过 `destroy()` 的图会在 backward 里 raise——这正是对的答案，因为已经没有东西可以跑集合通信了」。`intrusive_ptr` 存进 `saved_data` 意味着引用计数被图持有；这同时是 [docs/api.md:15-17](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L15-L17) 集合契约的第五条：「开 autograd 时，每个 rank 的引擎必须以相同顺序到达 backward 节点」——序列并行下天然成立（所有 rank 跑同一张图），但它是挂起的一个新入口。
+- **splits 的 None 语义**。`std::optional<vector<int64_t>>` 有三态（无值 / 空表 / 有值），而 `IValue()` 默认构造是 None。backward 时用 `isNone()` 还原（[src/bindings.cc:541-547](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L541-L547)），「不传 splits」这一信息必须原样穿越图，否则 backward 会把偶均分特例误当成显式表。
 
-- [src/bindings.cc:718-726](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L718-L726) —— 注册表：`all_to_all_4d` 的 schema 无别名，`CompositeExplicitAutograd` 挂执行内核、`Autograd` 挂 `all_to_all_4d_autograd`、`Meta` 显式挂形状传播（u6-l4 详解）、`refuse_batching` 双键拒绝 vmap。
+**为什么不直接调 `all_to_all_4d`**——[src/bindings.cc:478-493](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L478-L493)：`dispatch_below_autograd` 用 `AutoDispatchBelowADInplaceOrView` 守卫后**重新进入 dispatcher**。直接调函数会永久离开调度器，Autograd 以下的所有 key——Python、FakeTensorMode、Meta——都不再被咨询，fake tensor 会一路冲进真内核死在 `cudaMemcpy3DAsync`。守卫才是阻止 `op.call` 绕回 Autograd 内核的东西；「GradMode 关着」不够，它管建图，不管 dispatcher 选哪个内核。这条路径 u6-l1 已建立，这里是它的唯一消费者。
 
-#### 4.1.4 代码实践（源码阅读型，无需 GPU）
+**快速路径**——[src/bindings.cc:565-577](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L565-L577)：
 
-1. **实践目标**：把 4.1.2 的调用链落在具体文件与函数上，形成一张可反复对照的「autograd 路径图」。
-2. **操作步骤**：
-   - 打开 `src/bindings.cc`，从 [L721](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L721) 的 Autograd 注册处出发，依次找到 `all_to_all_4d_autograd` → `with_reverse_ad` → `A2AFunction::forward` → `dispatch_below_autograd` → `all_to_all_4d`（CompositeExplicitAutograd）→ `run`。
-   - 再看 [python/fast_ulysses/group.py:129-149](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L129-L149)：Python 侧在 `out is None` 时直接转发到 functional op——autograd 路径由此进入。
-   - 在每个节点旁标注：它运行在训练图里还是推理里、它建不建 autograd 节点。
-3. **需要观察的现象**：从 Python 到 CUDA 拷贝，中间恰好只有一次「建图决策」（`with_reverse_ad` 的分支）和一次「重新分发」（`dispatch_below_autograd`）。
-4. **预期结果**：一张与 4.1.2 文本图一一对应的调用链图。本实践为纯阅读，无需运行命令。
+```cpp
+if (!at::GradMode::is_enabled() || !input.requires_grad()) {
+    return dispatch_below_autograd(group, input, mode, seq_splits, head_splits);
+}
+return A2AFunction::apply(group, input, mode, seq_splits, head_splits);
+```
+
+两个条件任一成立就不建节点——注释（[src/bindings.cc:565-566](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L565-L566)）：`apply()` 分配的节点在没人用它时是死重，而这个算子每步每注意力层跑两次。
+
+**注册点**——[src/bindings.cc:718-726](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L718-L726)：functional schema 注册了三个内核——`CompositeExplicitAutograd`（真内核，L720）、`Autograd`（指向 `all_to_all_4d_autograd`，L721）、`Meta`（形状传播，L725）。其中 Autograd 内核是全库**唯一**的（`empty_output`/`timed` 用 fallthrough，见 u6-l1）——forward AD 与 reverse AD 都从 `all_to_all_4d_autograd` 这一个函数进门。
+
+#### 4.1.4 代码实践
+
+**实践目标**：亲眼看到「建图 / 不建图」两条路径的分界，并确认它们搬同一份字节。
+
+**操作步骤**（示例代码，`torchrun --nproc_per_node=1` 即可运行；ws=1 是合法一等公民）：
+
+```python
+# 示例代码：practice_gradfn.py
+import os
+import torch
+import torch.distributed as dist
+from fast_ulysses import UlyssesGroup
+
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+ws = dist.get_world_size()
+g = UlyssesGroup(require_nvlink=False)
+
+x = torch.randn(2, 16, 4 * ws, 128, device="cuda", dtype=torch.bfloat16)
+
+# 路径一：需要梯度 -> A2AFunction::apply -> 输出带 grad_fn
+xg = x.clone().requires_grad_(True)
+y = g.all_to_all_4d(xg, mode=0)
+print("grad_mode on :", y.grad_fn)            # 非 None，C++ 节点（具体 repr 待本地验证）
+
+# 路径二：no_grad -> with_reverse_ad 快速路径 -> 无节点
+with torch.no_grad():
+    y2 = g.all_to_all_4d(xg, mode=0)
+print("no_grad     :", y2.grad_fn)            # None
+
+assert torch.equal(y2, y.detach())            # 两条路径搬的是同一份字节
+
+g.destroy()
+dist.destroy_process_group()
+```
+
+**需要观察的现象**：第一行打印非 `None`（C++ `torch::autograd::Function` 的节点，repr 形如 `CppNode<...>`——具体显示待本地验证）；第二行是 `None`；断言通过。
+
+**预期结果**：`grad_fn` 的有无精确对应 `with_reverse_ad` 的两个分支；字节相等说明快速路径没有省略任何传输。若第一行也是 `None`，说明 Autograd key 没有被命中，需要检查注册（不应发生）。
 
 #### 4.1.5 小练习与答案
 
-1. **问：为什么 backward 必须从 `saved_data` 里取出 group，而不能在 backward 里新建一个？**
-   答：其一，组身上挂着窗口、plan 缓存、rank/world_size——重建组等于重做一次集合性的对称内存 bootstrap 分配；其二，反向传播的执行位置由 autograd 引擎的节点顺序决定而非调用方的程序决定，在 backward 里发起集合分配等于把 rendezvous 的位置交给引擎（源码注释对 `out=` 路径的拒绝正是同一个理由，见 4.2.3）。
-2. **问：如果 `forward` 直接调用 `all_to_all_4d()` 函数而不是 `dispatch_below_autograd`，哪类输入会坏、坏在哪？**
-   答：fake tensor / Meta 路径。直调离开 dispatcher 后，Autograd 之下的 key 不再被咨询，假张量会一路进到真内核，死在 `cudaMemcpy3DAsync` 里，报出一条与真实病因（不可 trace）无关的错误。
-3. **问：`with_reverse_ad` 的快路径在什么条件下生效？为什么值得专门写一个分流函数？**
-   答：`GradMode` 关闭（推理或 `no_grad`）或输入 `requires_grad` 为假时生效。值得是因为该算子「每层每步跑两次」，免掉一个永远无人使用的 autograd 节点分配是实打实的开销削减。
+**练习 1**：如果把 group 存进 `saved_data` 改成存裸指针（或只存 rank/world_size），会坏什么？
+
+**答案**：存裸指针则图的存活期不再延长 C++ 对象——`destroy()` 后 group 被释放，backward 解引用悬垂指针是未定义行为而非干净报错；只存 rank/world_size 则 backward 无法访问窗口、plan 缓存与传输流，等价于重造一个 group，而对称内存 rendezvous 是集合操作，放进 backward 会让所有 rank 的引擎节点顺序变成新的挂起来源。源码选择存 `intrusive_ptr`，让「活过 destroy() 的图在 backward 里 raise」成为受支持的错误路径（[src/bindings.cc:521-523](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L521-L523)）。
+
+**练习 2**：`with_reverse_ad` 为什么检查 `input.requires_grad()`，而不是只检查 `GradMode`？
+
+**答案**：即使 GradMode 开着，一个不需要梯度的输入（例如推理张量、常量）在它上面建节点也不会产生任何梯度——节点是死重。反过来 GradMode 关着时建图本身就被禁止。两个条件是「节点可能有用」的两个必要方面，任一不满足都走 `dispatch_below_autograd`。
 
 ### 4.2 backward = 1 − mode：排列的 vjp 是逆排列
 
 #### 4.2.1 概念说明
 
-这是本讲的数学核心。mode 0 不做任何算术，只把全局元素集合重排一遍——它是双射。用排列矩阵写成：
+backward 需要把上游梯度 \( g \)（形状同输出）变换回输入侧梯度。2.2 节已给出数学：\( y = Px \Rightarrow \text{vjp}(g) = P^{\top}g = P^{-1}g \)。剩下的问题是：**逆排列 \( P^{-1} \) 在本库的算子表里是哪一个？** 答案：mode 1、同一对 splits 的前向。于是 backward 不需要任何新代码——它就是一次方向相反的合法调用。
 
-\[ y = P_\pi x \]
-
-其中 \( P_\pi \) 每行每列恰一个 1。对它求 vjp：
-
-\[ \bar{x} = P_\pi^{\mathsf T}\,\bar{y} \]
-
-而排列矩阵的转置就是它的逆：
-
-\[ P_\pi^{\mathsf T} = P_\pi^{-1} = P_{\pi^{-1}} \]
-
-「mode 1 用**同一对** splits」恰好实现 \( P_{\pi^{-1}} \)——u3-l2 已建立：mode 1 的 gather 分支正是 mode 0 的 scatter 分支「从右往左读」。于是：
-
-\[ \bar{x} = \text{mode1}(\bar{y}),\qquad \text{backward} = \text{forward}(1 - \text{mode}) \]
-
-两个直接推论：
-
-- **位精确**。backward 搬的是同样的字节、不做任何重算，所以梯度对照必须用 `equal` 而不是 `allclose`——「close」反而会掩盖一个错误的 plan（测试注释原话）。
-- **不产生额外内核**。没有为梯度另写传输代码，反向复用正向的全部机制（窗口、plan、屏障），只是 mode 换了个值。
+对偶地，mode 1 的 backward 是 mode 0，所以统一写成 `1 - mode`。
 
 #### 4.2.2 核心流程
 
-`backward` 被引擎调用时的步骤：
+先把 mode 0 写成显式的元素映射。记 \( S_r = \sum_{i<r} \text{seq\_splits}[i] \)（序列前缀和）、\( H_p = \sum_{i<p} \text{head\_splits}[i] \)（头前缀和）、\( \mathrm{owner}(n) \) 为唯一满足 \( n \in [H_p, H_p + \text{head\_splits}[p]) \) 的 \( p \)。mode 0 是全局元素集上的双射：
 
-1. 参数 `grads` 是对 **forward 输出**（这里只有一个张量）的梯度。若 `grads[0]` 未定义（本节点的输出没有参与最终图），直接返回 5 个未定义梯度。
-2. 从 `saved_data` 恢复 `group`（`toCustomClass<UlyssesGroup>()`）、`mode`（`toInt`）、两个 splits（`isNone()` 判断缺省，再 `toIntVector()`）。
-3. 调 `A2AFunction::apply(group, grads[0].contiguous(), 1 - mode, seq, head)`——注意是 **`apply()` 而非裸调用**：`apply` 会正常建图，于是「梯度的梯度」能递归地回到这里（见 4.2.4 的实践三）。
-4. 返回值是 **5 个元素的列表，对应 forward 的 5 个非 ctx 参数**（group、input、mode、seq_splits、head_splits），只有 `input` 可微，其余 4 个返回未定义张量。
+\[
+\sigma:\quad \underbrace{(b,\, s,\, n,\, k)}_{\text{rank } r \text{ 的输入本地坐标}}
+\;\longmapsto\;
+\underbrace{(b,\, S_r+s,\, n-H_{\mathrm{owner}(n)},\, k)}_{\text{rank } \mathrm{owner}(n) \text{ 的输出本地坐标}}
+\]
 
-还有一个容易忽略的契约细节：**backward 永远走 copying 路径，绝不用 `out=` + `empty_output()` 的零拷贝**。理由写在注释里，有两条：`empty_output()` 是集合分配，放进 backward 会把 rendezvous 位置交给引擎的节点顺序；而且梯度属于引擎——它可能被累加、可能被长期持有——而窗口是单缓冲的（u4-l2），两者生命周期模型不兼容。
+即输出 rank \( p \) 上 \( y_p[b, t, n, k] = x_r[b,\, t - S_r,\, n + H_p,\, k] \)，其中 \( r = \mathrm{seq\_owner}(t) \)。全局拼接后 \( y = Px \)。三个推论：
+
+1. \( P \) 与方向无关地由两张 splits 表完全决定，\( P^{-1} \) 对应**同一对表**下方向相反的搬运——即 `build_plan` 的 mode 1 分支。源码注释在 [src/a2a_plan.cc:194-198](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/a2a_plan.cc#L194-L198) 直接以 "The inverse" 开头描述该分支。
+2. vjp：\( \text{grad}_x = P^{\top} g = P^{-1} g \)——把 \( g \) 当数据做一次 mode 1 前向即可。位精确，不是近似：排列不改变字节的值，只改变位置。
+3. 双重 backward 有干净的闭式：对 \( L = \sum_i y_i^2,\ y = Px \)，一阶梯度 \( g_1 = \nabla_x L = P^{\top}(2y) = 2x \)，二阶 \( \partial g_1 / \partial x = 2I \)——**处处等于 2**。这正是 [test/distributed/correctness.py:348-358](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L348-L358) 断言的常量。
 
 #### 4.2.3 源码精读
 
-- [src/bindings.cc:495-511](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L495-L511) —— 类前的数学注释，是全段论证的权威表述：mode 0 是全局元素集上的双射，「rank r 的 (batch, s, n, k) 落到 rank owner(n) 的 (batch, seq_offset[r]+s, n−head_offset[p], k)」；mode 1 with the SAME splits 是 scatter 分支从右往左读，即其逆；「The Jacobian of a permutation is a permutation matrix, whose transpose is its inverse, so the vjp is `1 - mode`」。
+**理论注释即规格**——[src/bindings.cc:495-511](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L495-L511)：「集合通信的伴随（adjoint）是反方向的集合通信」；「排列的 Jacobian 是排列矩阵，其转置即逆，故 vjp 是 `1 - mode`」。这段注释是全库数学密度最高的六行，逐句对应 4.2.2 的推导。
 
-- [src/bindings.cc:531-560](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L531-L560) —— `backward` 本体。关键三处：
-  ```cpp
-  if (!grads[0].defined()) {
-      return {at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor()};
-  }
-  ```
-  输出梯度未定义时短路；随后
-  ```cpp
-  return {at::Tensor(),
-          A2AFunction::apply(group, grads[0].contiguous(), 1 - mode, seq, head),
-          at::Tensor(), at::Tensor(), at::Tensor()};
-  ```
-  只有 `input` 的梯度是实值，方向取 `1 - mode`，splits 原样传入；`.contiguous()` 显式保证上游梯度（可能来自转置等视图操作）是连续的。注释同时说明为何「The copying form, never `out`」。
+**backward 本体**——[src/bindings.cc:531-560](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L531-L560)：
 
-- [test/distributed/correctness.py:296-308](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L296-L308) —— 正确性证据：对 mode 0 和 mode 1 各做一次 `backward(upstream)`，断言 `xg.grad` 与 `all_to_all_4d(upstream, mode=1-mode)` **位精确相等**；测试注释强调「backward moves the same bytes, it does not recompute anything」。
+```cpp
+if (!grads[0].defined()) {                       // 上游没给梯度：五路全空
+    return {at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor()};
+}
+...
+return {at::Tensor(),
+        A2AFunction::apply(group, grads[0].contiguous(), 1 - mode, seq, head),
+        at::Tensor(), at::Tensor(), at::Tensor()};
+```
 
-- [docs/api.md:54-58](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L54-L58) —— 文档表述：「The vjp of a permutation is the inverse permutation, so the backward is the other `mode` with the **same** splits……Backward always takes the copying path, never `out=`」。
+四个关键决定：
 
-#### 4.2.4 代码实践（推导型，纸面即可完成）
+1. **返回五个元素**（[src/bindings.cc:534](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L534)）：forward 有五个非 ctx 参数（group、input、mode、seq、head），torch 要求 backward 逐参返回梯度；只有 `input` 可微，其余四路返回未定义张量。
+2. **`1 - mode`**：本讲的全部数学浓缩成的两个字。
+3. **`grads[0].contiguous()`**：上游梯度可能是任意跨步视图，而传输层要求连续（u6-l2 的 prepare 会做 `contiguous()`，这里提前做省一次隐式拷贝的疑惑）。
+4. **`apply()` 而非裸函数**（[src/bindings.cc:554-556](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L554-L556)）：注释只有一句——「用 apply() 而不是普通函数，这样 grad-of-grad 会路由回这里」。递归进 `A2AFunction` 意味着一阶梯度的结果带 `grad_fn`，二阶 `torch.autograd.grad` 才能继续穿过多一层的排列节点。若用 `dispatch_below_autograd`，一阶梯度成叶节点，双重 backward 直接 raise。
 
-1. **实践目标**：亲手完成「backward = 1 − mode」和「双重 backward」两步推导，为综合实践的脚本提供预期值。
-2. **操作步骤**：
-   - 设 \( y = P x \)（mode 0），证明 \( \text{sum}(y^2) = \text{sum}(x^2) \)。（提示：排列只是把元素换个位置，平方和不变。）
-   - 由此推出：\( \partial\,\text{sum}(y^2)/\partial x = 2x \)（逐元素），再对 \( \text{sum}(2x) \) 求导，得二阶导数。
-   - 对照 [test/distributed/correctness.py:348-358](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L348-L358) 的断言核对你的答案。
-3. **需要观察的现象**：断言名是「double backward of sum(y**2) is 2」。
-4. **预期结果**：一阶梯度 \( = 2x \)（作为 \( x \) 的函数，`create_graph=True` 下带图）；二阶梯度 \( = 2 \)（处处常数 2）。`create_graph=True` 之所以能让图延续，是因为 backward 内部走的是 `A2AFunction::apply`——`apply` 在 GradMode 开时照样建节点，于是「backward 里那次 1-mode 集合通信」本身又是一个可微节点，二阶求导再次回到 `backward`。这是递归保证，不是特判。
+**backward 永走 copying 路径**——[src/bindings.cc:549-554](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L549-L554) 的注释给出两个理由，值得逐条读：
+
+> "The copying form, never `out` from empty_output(): that is a collective allocation, and putting one inside backward would hand the rendezvous position to the autograd engine's node order rather than to the caller's own program. A gradient also belongs to the engine, which may accumulate into it or hold it, while a window is single-buffered."
+
+- `empty_output()` 是集合分配，把它放进 backward 等于把 rendezvous 的位置交给 autograd 引擎的节点执行顺序——这是 [docs/api.md:15-17](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L15-L17) 契约的新违反面。
+- 梯度属于引擎：引擎可能向它累加、也可能长期持有它；而窗口是单缓冲（u4-l2），下一次调用就会覆写。零拷贝路径的结果语义与梯度语义根本不兼容。
+
+于是 backward 的输出走 u6-l2 的默认路径：`at::empty` 分配 + 一条平坦 copy_out——梯度是调用者侧的普通张量，没有任何生命周期规则。
+
+**测试证据**——[test/distributed/correctness.py:296-308](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L296-L308) 对两个方向断言位精确（注释强调：backward 搬同样字节、不重算任何东西，「close」会掩盖错误的 plan）：
+
+```python
+group.all_to_all_4d(xg, mode=mode).backward(upstream)
+check.equal(f"backward mode={mode} is forward mode={1 - mode}",
+            xg.grad, group.all_to_all_4d(upstream, mode=1 - mode))
+```
+
+#### 4.2.4 代码实践
+
+**实践目标**：验证「mode 0 前向 + mode 1 前向串联」与 backward 的效果等价——这正是任务规格要求的脚本，也是 [test/distributed/correctness.py:162](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L162) round trip 与 [test_plan.py:236-257](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/test_plan.py#L236-L257) 无 GPU 重放在 GPU 上的合流点。
+
+**操作步骤**（示例代码，`torchrun --nproc_per_node=<N>` 运行；ws≥2 时序列轴才真正跨 rank，ws=1 时退化为恒等但仍验证机制）：
+
+```python
+# 示例代码：practice_backward_equiv.py
+import os
+import torch
+import torch.distributed as dist
+from fast_ulysses import UlyssesGroup
+
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+rank, ws = dist.get_rank(), dist.get_world_size()
+g = UlyssesGroup(require_nvlink=False)
+
+s_total = 97 * ws + 13                              # 故意不整除
+seq_splits = [s_total // ws + (1 if p < s_total - (s_total // ws) * ws else 0) for p in range(ws)]
+head_splits = [4] * ws
+kw = {"seq_splits": seq_splits, "head_splits": head_splits}
+
+x = torch.randn(2, seq_splits[rank], sum(head_splits), 128,
+                device="cuda", dtype=torch.bfloat16)
+xg = x.clone().requires_grad_(True)
+
+# (a) backward 的效果：一次 mode 0 + backward
+upstream = torch.randn_like(g.all_to_all_4d(x.detach(), mode=0, **kw))
+g.all_to_all_4d(xg, mode=0, **kw).backward(upstream)
+
+# (b) 等价的前向串联：mode 0 -> mode 1（把 upstream 当第一次的输入）
+chained = g.all_to_all_4d(g.all_to_all_4d(upstream, mode=0, **kw), mode=1, **kw)
+
+assert torch.equal(xg.grad, chained), "backward 与 mode1(mode0(g)) 不一致"
+print(f"rank {rank}: backward == mode1(mode0(upstream)), bit-exact")
+g.destroy()
+dist.destroy_process_group()
+```
+
+**需要观察的现象**：断言通过；`upstream` 的形状与 mode 0 输出一致（`(2, s_total, 4, 128)`），`chained` 回到本 rank 分片形状 `(2, seq_splits[rank], 16, 128)`。
+
+**预期结果**：三个断言全部位精确。若把 (b) 里第二个调用的 splits 故意改错（例如换成别的表），要么在 `make_dims` 的交叉校验处 raise（形状对不上），要么结果错位——见 4.3 的实践。
+
+**运行前提**：需要安装好的 `_C` 扩展与 CUDA 设备；输出数值本身待本地验证。
 
 #### 4.2.5 小练习与答案
 
-1. **问：为什么梯度对照必须位精确（`torch.equal`）而不能 `allclose`？**
-   答：backward 复用正向的 CopyOp 重排，不重算任何数值，唯一的失败模式是「搬错了字节」——错了就是全错，没有「差一点」；容差会掩盖错误的寻址。对照：`examples/dit_attention.py` 里整块注意力模块的校验用的是 `allclose`（容差 5e-2），因为 SDPA 归约顺序不同带来的差异是真实的。
-2. **问：`backward` 返回 5 个元素，分别对应什么？为什么 4 个是未定义？**
-   答：对应 forward 的 5 个非 ctx 参数（group、input、mode、seq_splits、head_splits）。只有 `input` 是张量且可微；group 是自定义类、mode 和两个 splits 是整数——它们没有梯度可言，返回未定义张量占位。
-3. **问：上游梯度传入时为什么显式 `.contiguous()`？`prepare` 内部不是已经会做 `input.contiguous()` 吗？**
-   答：`prepare` 确实会再做一次（u6-l2 的 `call.x = input.contiguous()`），所以这是显式而非必需——它把「backward 的输入必须连续」这一契约写在调用点上，避免依赖下游实现细节。（说「冗余但无害的防御」是准确表述。）
+**练习 1**：为什么 `backward` 对 `grads[0].defined()` 为假的情形要返回五个未定义张量，而不是直接报错？
 
-### 4.3 splits 不交换：组几何 vs 单次收发量
+**答案**：torch 的 autograd 引擎在计算大图时会对不需要梯度的分支传入未定义梯度张量（例如 `Tensor.requires_grad=False` 混合在图中）。返回五个未定义张量是 `torch::autograd::Function` 的标准协议：告诉引擎「这条路没有梯度可传」，图的其他分支照常收敛。报错会把正常的不依赖路径变成异常。
+
+**练习 2**：\( L = \sum_i y_i^2 \)、\( y = Px \)。不用源码，推出 \( \partial^2 L / \partial x^2 \) 并说明哪个测试断言了它。
+
+**答案**：\( \nabla_y L = 2y \)，\( \nabla_x L = P^{\top} 2y = 2P^{\top}Px = 2x \)，再对 \( x \) 求导得 \( 2I \)——Hessian 是常量 2 乘单位阵。[test/distributed/correctness.py:348-358](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L348-L358) 用 `create_graph=True` 取一阶梯度后再求一次，断言 `second == 2`。这个测试同时覆盖了 4.2.3 的第 4 点：能算二阶，说明 backward 真的经 `apply()` 回到了 `A2AFunction`。
+
+**练习 3**：mode 0 的双射性在某个 rank 的 `seq_splits[r] == 0` 时还成立吗？
+
+**答案**：成立。零长度分片意味着该 rank 输入为空、没有任何元素需要映射，双射定义在**全局元素集**上，与某侧定义域为空集不冲突；`build_plan` 对 `s_me == 0` / `s_p == 0` 有显式跳过守卫（[src/a2a_plan.cc:181-183](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/a2a_plan.cc#L181-L183)、[src/a2a_plan.cc:201-203](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/a2a_plan.cc#L201-L203)）。逆映射同样不受影响。
+
+### 4.3 splits 不交换：与 all_to_all_single 的语义差异
 
 #### 4.3.1 概念说明
 
-「backward 是 `1 - mode` 且 **splits 原样传递**」这句话里，最反直觉的是后半句——因为 `torch.distributed.all_to_all_single` 的 backward **确实交换** split sizes。为什么相反？因为两个 API 的 splits 是**两种不同的对象**：
+这是最容易踩的迁移陷阱，也是 [docs/migration.md:153-155](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md#L153-L155) 特意点名的差异：偶均分时「交换索引」与「同一对 splits」给出相同结果，**一旦不均分就分道扬镳**。根源是两个库的参数描述的是不同的对象：
 
-| | `all_to_all_single` 的 `split_sizes` | 本库的 `seq_splits` / `head_splits` |
+| | `dist.all_to_all_single` | fast-ulysses |
 | --- | --- | --- |
-| 描述什么 | **这一次调用**各 rank 的发送量 / 接收量 | **组本身的几何**：rank p 拥有的序列分片与头分片 |
-| 方向反转后 | 收发角色互换 → 数值必须跟着交换 | 「谁拥有什么」与数据往哪流无关 → 原样成立 |
-| `mode` 的角色 | 无（方向由收发表隐含） | 只选择哪根轴到达时已分片，不改变两张表的含义 |
+| 参数含义 | **本次调用**每个 rank 的发送量 / 接收量（`split_sizes`） | **组的切分几何**：`seq_splits[p]`/`head_splits[p]` 是 rank p 的序列/头分片 |
+| 方向反转时 | 收发角色互换 → **split sizes 必须交换** | 几何是组的属性，与数据流向无关 → **同一对表原样传递** |
+| 谁持有 | 只有被调用轴的切分 | 两根轴的完整所有权表（每 rank 持全表，前缀和免通信算偏移） |
 
-u2-l3 与 u3-l1 已建立：每个 rank 持有**完整的**两张表，用排他前缀和免通信地算出全组偏移。正因为它描述的是所有权而非流量，反向传输（mode 1）与梯度传输（backward）复用的是**同一对表**。
-
-一个重要的历史注脚（[docs/migration.md:149-155](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md#L149-L155)）：DeepSpeed 的 `_SeqAllToAll` 和 yunchang 的 `SeqAllToAll4D` 用「交换 scatter/gather 两个索引」表达 backward。**偶均分时两种约定等价**——这正是旧写法长期没出错的原因；一旦分片不均匀，交换版就错了。这就是 migration 文档那句「Identical while shards are even, not once they are not」。
-
-缺省（不传 splits）的情形也自洽：mode 0 无 splits 从形状反推出 `seq=[s_local]*ws`、`head=[n_global/ws]*ws`；mode 1 在那个输出形状上无 splits 反推出**同一对**——而且它检查整除性的那根轴是「ws 乘以某个数」，所以 backward 永远不会失败一个前向没失败过的检查（注释见 [src/bindings.cc:509-511](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L509-L511)）。
+`mode` 选择的是「哪根轴到达时已分片」，而不是「两张表谁是发送谁是接收」。
 
 #### 4.3.2 核心流程
 
-把「不交换」放进一次训练迭代的时间线：
+为什么交换在这里必然出错，可以用 4.2 的映射直接论证：\( P \) 由 \( (S_r, H_p) \) 两组前缀和决定，\( P^{-1} \) 用**同一组**前缀和；若把表交换，前缀和全部错位，得到的既不是 \( P^{-1} \) 也不是任何合法搬运的逆。不均匀时第一个失败点是形状：mode 1 期望输入的序列轴长为 \( \sum_p \text{seq\_splits}[p] \)，交换后这个和变成 \( \sum_p \text{head\_splits}[p] \)，一般不相等。
 
-```text
-前向：  y  = all_to_all_4d(x,  mode=0, seq_splits=S, head_splits=H)   # 集合调用 #1
-        ...  注意力（本地计算）...
-        z  = all_to_all_4d(y', mode=1, seq_splits=S, head_splits=H)   # 集合调用 #2
-反传：  ȳ  经节点 #2 的 backward → apply(mode=0, S, H)                # 集合调用 #3
-        ...
-        z̄  经节点 #1 的 backward → apply(mode=1, S, H)                # 集合调用 #4
-```
-
-四次调用用**同一对** splits；方向全部由 `mode` 一个整数表达。每个 rank 发出的形状序列自动一致——因为每个 rank 从同一对表推出同样的全局布局（u3-l2 的「免通信算出同一最大值」是同一性质在窗口尺寸上的体现）。
+另一个方向的论证（不传 splits 的情形，[src/bindings.cc:509-511](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L509-L511)）：mode 0 无 splits 从形状反推 `seq=[x1]*ws, head=[x2/ws]*ws`；在这个输出形状上做 mode 1 且同样不传，反推出**同一对表**；且 mode 1 检查整除的是序列轴——它是 ws 的倍数（`ws * x1` 的商再乘 ws），「forward 已通过的检查 backward 不可能失败」。
 
 #### 4.3.3 源码精读
 
-- [src/bindings.cc:502-507](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L502-L507) —— 「splits 不交换」的论证原文：`all_to_all_single` 的 backward 交换收发量是因为那些数「describe one call's send and receive counts, so reversing the direction reverses their roles」；而本库的表是「a property of the GROUP that holds whichever way the data moves」。
+**规格注释**——[src/bindings.cc:502-507](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L502-L507)：
 
-- [src/bindings.cc:541-547](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L541-L547) —— backward 里恢复 splits 的代码：`isNone()` 判断缺省后原样 `toIntVector()`，随后在第 556 行原样传给 `apply`——代码路径上根本**不存在**交换的机会。
+> "The splits do NOT swap. That is worth stating because all_to_all_single's backward DOES swap its input and output split sizes: those describe one call's send and receive counts, so reversing the direction reverses their roles. seq_splits[p] / head_splits[p] are a different object -- rank p's sequence and head shard, a property of the GROUP that holds whichever way the data moves."
 
-- [test/distributed/correctness.py:310-325](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L310-L325) —— 防回归断言：用真正不均匀的 `seq_splits = [s_total-(ws-1)] + [1]*(ws-1)`、`head_splits = [4]*ws` 做 backward，断言梯度等于 `all_to_all_4d(up, mode=1, **kw)`。注释点名了这个断言的对手：「This is the check that fails if someone "fixes" the backward by swapping them the way all_to_all_single's backward does」——而且用了 skewed split 之后，「it fails on the shape, not just the values」：交换会让 mode 1 期待的输入形状整个对不上，在 `make_dims` 的交叉校验（u2-l3）处就炸，而不是悄悄算错数。
+**文档契约**——[docs/api.md:54-58](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L54-L58)：「vjp of a permutation is the inverse permutation, so the backward is the other mode with the **same** splits」。
 
-- [docs/api.md:54-58](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L54-L58) —— 文档把两件事写在同一段：vjp 是逆排列（backward = 另一 mode）与 splits 是组几何（不交换），因为它们是同一个论证的两半。
+**防「好心修复」的测试**——[test/distributed/correctness.py:310-325](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L310-L325) 用一组**严重倾斜**的 splits（`[s_total - (ws-1)] + [1]*(ws-1)` 配 `[4]*ws`）断言 `xu.grad == all_to_all_4d(up, mode=1, **kw)`。注释说明这是「有人按 all_to_all_single 的方式交换 splits『修复』backward 时会挂掉的检查——而且用倾斜切分，它挂在形状上，不只是数值上」。
 
-#### 4.3.4 代码实践（预测型，纸面完成，可选手工验证）
+**形状交叉校验**——[src/group.cc:88-109](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/group.cc#L88-L109)：`make_dims` 按模式核对「本 rank 可见的两根轴」——mode 1 期望输入形状为 `(b, seq_total(), head_splits[rank], d)`，与实际张量不符即 `TORCH_CHECK` 失败，消息形如 `input is [...] but the splits imply [...]`。它先于第一个屏障（u6-l2 的纪律），所以被拒的 rank 不拖累同伴——前提是**所有 rank** 都被拒，4.3.4 的实践会验证这一点。
 
-1. **实践目标**：用一个小例子看清「交换版 backward」错得多明显。
-2. **操作步骤**：
-   - 取 ws=2，`seq_splits=[13, 1]`、`head_splits=[4, 4]`，`d=128`、`b=1`。写出 rank 0 的：输入形状（mode 0）、输出形状、上游梯度形状、以及正确 backward 应产生的 `x.grad` 形状。
-   - 再假设有人按 `all_to_all_single` 的习惯把 backward 的 splits 交换成 `seq=[4,4]`、`head=[13,1]`：推演 mode 1 期待的输入形状，与真实梯度形状对比。
-3. **需要观察的现象**：交换版期待的形状与真实梯度张量的形状完全对不上。
-4. **预期结果**：rank 0 输入 `(1, 13, 8, 128)`，mode 0 输出 `(1, 14, 4, 128)`，上游梯度同输出形状，正确 backward 给出 `(1, 13, 8, 128)` 的 `x.grad`。交换版下 mode 1 期待输入 `(1, sum(seq)=8, head_splits[0]=13, 128)`——与 `(1, 14, 4, 128)` 矛盾，`make_dims` 交叉校验抛 RuntimeError。这正是 correctness.py 注释说的「fails on the shape」。（如要在真机复现，可临时改脚本传入交换后的 splits——但不要改库源码。）
+**无 GPU 侧的旁证**——[test/test_plan.py:236-257](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/test_plan.py#L236-L257)：`test_round_trip` 对真正不均匀的 `seq_splits=[5,3,4,2]`、`head_splits=[2,3,1,2]` 分别以 `SCATTER_HEAD` 与 `GATHER_HEAD` 建两套 plan——**同一对表**——numpy 重放后逐 rank 断言 `gather(scatter(x)) == x`。往返还原是「mode 1 是 mode 0 的精确逆」的最直接证据，且完全不需要 GPU。
+
+#### 4.3.4 代码实践
+
+**实践目标**：亲手让「交换 splits」失败，看清失败发生在形状上；再对照 `all_to_all_single` 的语义总结差异。
+
+**操作步骤**（示例代码，任一 ws 可运行）：
+
+```python
+# 示例代码：practice_no_swap.py
+import os
+import torch
+import torch.distributed as dist
+from fast_ulysses import UlyssesGroup
+
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+rank, ws = dist.get_rank(), dist.get_world_size()
+g = UlyssesGroup(require_nvlink=False)
+
+s_total = 97 * ws + 13
+seq_splits = [s_total - (ws - 1)] + [1] * (ws - 1)   # 严重倾斜
+head_splits = [4] * ws
+kw = {"seq_splits": seq_splits, "head_splits": head_splits}
+
+upstream = torch.randn(2, s_total, 4, 128, device="cuda", dtype=torch.bfloat16)
+
+# 正确用法：同一对表，mode 1
+y = g.all_to_all_4d(upstream, mode=1, **kw)
+print("same splits ok:", tuple(y.shape))             # (2, seq_splits[rank], 4*ws, 128)
+
+# 错误用法：模仿 all_to_all_single 的 backward 交换两张表
+swapped = {"seq_splits": head_splits, "head_splits": seq_splits}
+try:
+    g.all_to_all_4d(upstream, mode=1, **swapped)
+except RuntimeError as e:
+    print("swapped raises:", str(e).splitlines()[0]) # input is [...] but the splits imply [...]
+
+g.destroy()
+dist.destroy_process_group()
+```
+
+**需要观察的现象**：正确用法输出形状为 `(2, seq_splits[rank], 16, 128)`；交换用法在每个 rank 上都 raise，消息指出形状与 splits 隐含形状矛盾（交换后期望的序列轴长是 `sum(head_splits) == 4*ws`，而实际是 `s_total`）。
+
+**预期结果**：因为 `s_total != 4*ws` 对每个 rank 都成立，`make_dims` 的交叉校验在**所有** rank 上、于第一个屏障之前失败——没有任何 rank 进入屏障等待，进程组干净退出。这也是一条工程教训：若某次误用只在**部分** rank 上触发形状矛盾（想象各 rank 分片恰好巧合相等），其余 rank 会进入屏障自旋——本地可判定的错误要抢在集合操作之前，正是 u6-l2 的纪律。
+
+**纸面部分**：写出 `dist.all_to_all_single(output, input, output_split_sizes=..., input_split_sizes=...)` 反向传播时两个列表如何互换（发送量与接收量角色对调），然后各用一句话回答：为什么那个库必须换、这个库不能换。
+
+**运行前提**：数值输出待本地验证。
 
 #### 4.3.5 小练习与答案
 
-1. **问：DeepSpeed/yunchang 的「交换索引」写法为什么在偶均分下碰巧正确？**
-   答：偶均分时 `seq_splits=[s/w]*w`、`head_splits=[n/w]*w`，两张表数值上对称（交换后仍是各自的全 1 常数表乘不同因子），「交换两根轴的切分」与「方向取逆、表不变」落到了同一个重排上；不均分时两种约定给出不同的布局，才分出对错。
-2. **问：backward 复用 sync 窗口（u4-l2 的单缓冲）为什么是安全的？**
-   答：backward 永走 copying 路径、在调用者流上执行；autograd 引擎按节点顺序在同一条流上发起反向调用，同流调用被流顺序排好，满足 u4-l2「单缓冲窗口只有被同一条流排序才可共享」的条件。这也是「不用 `out=` 零拷贝」之外的第三重保障。
-3. **问：不传 splits 时，mode 0 前向推出的一对表与 mode 1 backward 推出的一对一定相同吗？**
-   答：一定相同。mode 0 从 `(b, s_local, n_global, d)` 推出 `seq=[s_local]*ws`、`head=[n_global/ws]*ws`；mode 1 的输入形状是 `(b, s_local*ws, n_global/ws, d)`，无 splits 时按被散射轴（序列轴）整除反推，得到的仍是同一对。且它检查整除的轴是前向已检查轴的 ws 倍，不可能新失败。
+**练习 1**：偶均分时「交换」与「不交换」结果相同吗？为什么迁移代码常在测试里发现不了这个 bug？
 
-### 4.4 forward AD 双通道与 functorch 边界
+**答案**：迁移语境里的「交换」指上游库的约定「backward 时交换 `scatter_idx` / `gather_idx`（或收发表）」，不是字面互换本库的两张表——后者在偶均分下也几乎必挂在形状校验上（交换后 `sum(seq_splits)` 与实际序列轴长不再相等）。偶均分时「交换索引」与「同一对 splits」两种约定给出**相同的字节**：均匀块的分发与汇合是对称操作，方向反转恰好互逆，谁也不需要知道切分几何。所以只用偶均分形状做迁移验证时，把上游的「交换」约定照搬过来结果照样正确；不均分一出现，两种约定分道扬镳——[docs/migration.md:153-155](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/migration.md#L153-L155) 的原话是 "Identical while shards are even, not once they are not"。本库的测试特意用倾斜切分让这个错误显形（[test/distributed/correctness.py:313](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L313)）。
+
+**练习 2**：backward 里 `seq`/`head` 从 `saved_data` 还原时为什么必须区分 `isNone()` 与空向量？
+
+**答案**：`std::optional` 的「调用方没传」与「传了空表」是两个语义：没传意味着走偶均分特例，由 backward 自己的输入形状反推同一对表（4.3.2 的论证保证这反推结果与 forward 一致）；空表则会被 `validate()` 拒绝。`IValue` 把「没传」编码为 None，还原时用 `isNone()` 区分，避免把「没传」误变成「传了空表」而在 backward 里抛错。
+
+### 4.4 forward AD 双通道：tangent 走第二条集合通信
 
 #### 4.4.1 概念说明
 
-torch 的 C++ `torch::autograd::Function` **没有 jvp 钩子**——这决定了 forward AD 不能做进 `A2AFunction`，只能做在 Autograd 内核的门口。若不做任何处理，一个带 tangent 的 dual 输入会有两种坏结局：进 `apply()` 直接 raise，或走 `with_reverse_ad` 的快路径被**静默丢掉 tangent**——后者更糟，因为没有任何报错。
+forward AD 与集合通信的组合有个别的库很少处理的坑：**C++ `torch::autograd::Function` 没有 jvp 钩子**。一个携带 tangent 的 dual tensor 如果直接进 `A2AFunction::apply()` 会 raise；如果走了 `with_reverse_ad` 的快速路径，tangent 会被**静默丢弃**——dual 出来时 tangent 是 None，什么都不报。本库的选择是在唯一的 Autograd 内核 `all_to_all_4d_autograd` 里**手工搬运 tangent**：
 
-出路来自同一个数学事实：排列的 jvp 还是这个排列，
-
-\[ \dot{y} = P_\pi\,\dot{x} \]
-
-所以 tangent 只需**再走一次同一条集合通信**。这带来一个必须写进使用契约的事实：**一个带 tangent 的调用发出两条集合通信，流量翻倍**；又因为每个 rank 跑同一张图，每个 rank 都会发出第二条——不会有人掉队。
-
-反方向的能力边界（[docs/api.md:64-71](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L64-L71)）：
-
-| API | 结果 | 原因 |
-| --- | --- | --- |
-| `torch.autograd.forward_ad` / `torch.func.jvp` / `torch.func.linearize` | 可用，流量 ×2 | tangent 走第二条集合通信 |
-| `torch.func.grad` / `torch.func.vjp` / `torch.func.jacrev` | raise | backward 是 C++ `torch::autograd::Function`，functorch 无法 lift |
-| `torch.vmap` / `torch.func.jacfwd` | raise（显式拒绝） | vmap 会按 batch 逐元素循环调用集合通信，rank 间 batch 数不一致即挂起（u6-l4 详解） |
-| `torch.autograd.grad(..., is_grads_batched=True)` | raise（显式拒绝） | 经 legacy `Batched` key 走进同一个逐元素循环，被同一拒绝拦下 |
-
-对 batch 的建议是把批维 reshape 进 `b`——集合通信本来就搬运它。
+- jvp 的数学：\( \dot{y} = P\dot{x} \)——排列对自己的方向向量做的就是同一个排列。所以 tangent 走**同 mode** 的第二次集合通信。
+- 代价是每层每步多一倍通信量；收益是 `torch.autograd.forward_ad`、`torch.func.jvp`、`torch.func.linearize` 全部可用。
+- 集合维度：每个 rank 都跑同一张图，所以「tangent 触发的第二条集合通信」也是所有 rank 一致发出的——不违反 SPMD 契约。
 
 #### 4.4.2 核心流程
 
-`all_to_all_4d_autograd`（注册在 Autograd key 上）的分支逻辑：
-
-```text
-tangent = input._fw_grad(kFwLevel)          # kFwLevel = 0：torch 唯一的 forward AD level
-├─ tangent 未定义（普通张量）
-│    → with_reverse_ad(...)                  # 纯反向路径（4.1 的流程）
-└─ tangent 已定义（dual 输入）
-     → result    = with_reverse_ad(primal)   # primal 保留反向历史、不携带 tangent
-     → result._set_fw_grad(with_reverse_ad(tangent), 0, /*is_inplace_op=*/false)
-                                              # tangent 也走一遍同一集合通信
+```
+all_to_all_4d_autograd(group, input, ...)
+    │
+    ├─ tangent = input._fw_grad(0)          # 摘出 level-0 方向
+    │
+    ├─ tangent 未定义（普通调用）
+    │       └─ with_reverse_ad(...)          # 4.1 的路径，reverse mode 专属
+    │
+    └─ tangent 已定义（dual 输入）
+            ├─ result = with_reverse_ad(primal)          # 原值：保留 reverse 历史
+            ├─ result._set_fw_grad(with_reverse_ad(tangent))  # 方向：第二条集合通信
+            └─ return result                             # 仍是 dual，primal+tangent 都对
 ```
 
-细节：primal 与 tangent 都经过 `with_reverse_ad`——如果 tangent 自身 `requires_grad`（对对偶数再求反向导数的场景），它同样会挂上 `A2AFunction` 节点；注释特别强调「The primal keeps the reverse-mode history and carries no tangent, so apply() may see it」——先把 primal 从 dual 里剥出来（`_fw_primal`），`apply()` 才不会因为见到 dual 而 raise。
+注意两个分支复用 `with_reverse_ad`：tangent 与 primal 各自可能建图（tangent 若 `requires_grad`，其对偶传播也进 reverse 图）。
 
 #### 4.4.3 源码精读
 
-- [src/bindings.cc:584-605](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L584-L605) —— `all_to_all_4d_autograd`：入口先取 `input._fw_grad(kFwLevel)`；注释解释 forward mode 为何在这里处理而不是 `A2AFunction`（无 C++ jvp 钩子、快路径会静默丢 tangent），以及「the jvp of a permutation is the permutation, so the tangent goes through the same call -- one more collective, which every rank issues」。
+**唯一的 forward-AD 级**——[src/bindings.cc:579-580](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L579-L580)：`constexpr uint64_t kFwLevel = 0;`——torch 目前只有 level 0 这一个前向 AD 层级。
 
-- [src/bindings.cc:579-580](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L579-L580) —— `kFwLevel = 0`，注释：「The only forward-AD level torch has」。
+**手工搬运**——[src/bindings.cc:584-605](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L584-L605)：
 
-- [src/bindings.cc:58-67](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L58-L67) —— `refuse_vmap` 的报错文本，末尾点名 `torch.autograd.grad(is_grads_batched=True)` 也会到达这里——batched backward 就是按 batch 逐元素的循环，与本讲 backward 主题的直接交点。
+```cpp
+const at::Tensor tangent = input._fw_grad(kFwLevel);
+if (!tangent.defined()) {
+    return with_reverse_ad(group, input, mode, seq_splits, head_splits);   // 普通调用
+}
+at::Tensor result = with_reverse_ad(group, input._fw_primal(kFwLevel), mode, seq_splits, head_splits);
+result._set_fw_grad(with_reverse_ad(group, tangent, mode, seq_splits, head_splits),
+                    kFwLevel, /*is_inplace_op=*/false);
+return result;
+```
 
-- [test/distributed/correctness.py:330-346](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L330-L346) —— forward AD 的断言：`make_dual` 后调用，断言 jvp 等于 `all_to_all_4d(tangent, mode=0)`、primal 不受影响；若 `jvp is None` 则直接记 FAIL——「the tangent was dropped」正是没有这段内核代码时会发生的静默错误。
+入口注释（[src/bindings.cc:590-594](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L590-L594)）逐条说明动机：C++ Function 无 jvp 钩子、dual 进 `apply()` 会 raise、走快速路径会被静默丢弃、排列的 jvp 是排列本身所以「tangent 走同一条调用——多一次集合通信，每个 rank 都发出，因为每个 rank 都跑这张图」。第二个细节：primal 走 `with_reverse_ad` 时**保留 reverse 历史**（注释：primal 不携带 tangent，所以 `apply()` 可以看到它）。
 
-#### 4.4.4 代码实践（需 ≥1 张 GPU；无 GPU 环境标注：待本地验证）
+**可用与不可用的边界**——[docs/api.md:64-71](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L64-L71) 把边界写成契约：
 
-1. **实践目标**：亲手看到「tangent 走第二条集合通信」与 functorch 的三类 raise。
-2. **操作步骤**（接综合实践的进程环境，单卡 ws=1 即可）：
+| 入口 | 结果 | 原因 |
+| --- | --- | --- |
+| `torch.autograd.forward_ad` / `torch.func.jvp` / `torch.func.linearize` | **可用**，流量 ×2 | tangent 走第二条集合通信 |
+| `torch.func.grad` / `vjp` / `jacrev` | **raise** | backward 是 C++ `torch::autograd::Function`，functorch 无法 lift |
+| `torch.vmap` / `jacfwd` | **raise**（显式检查） | vmap 会按 batch 逐元素循环集合通信 → rank 挂起；u6-l4 详述 |
 
-   ```python
-   import torch
-   import torch.autograd.forward_ad as fwd_ad
+**测试证据**——[test/distributed/correctness.py:330-346](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L330-L346)：在 `fwd_ad.dual_level()` 里把 `make_dual(x, tangent)` 喂进调用，断言三件事——jvp 非 None（tangent 没被丢）、`jvp == all_to_all_4d(tangent)`（同 mode 前向，位精确）、primal 等于普通调用的结果。注释点明负控制的意义：「没有手工搬运时 dual 出来没有 tangent 且什么都不 raise」。
 
-   x = torch.randn(1, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev)
-   with fwd_ad.dual_level():
-       t = torch.randn_like(x)
-       out = group.all_to_all_4d(fwd_ad.make_dual(x, t), mode=0)
-       primal, jvp = fwd_ad.unpack_dual(out)
-   print("jvp defined:", jvp is not None)
-   print("jvp == a2a(t):", torch.equal(jvp, group.all_to_all_4d(t, mode=0)))
-   ```
+**与 `out=` / async 的对照**：可微性只属于普通 functional 调用。`out=` 变体是可变 schema、无 autograd 公式，Python 侧对「grad 模式 + 需梯度输入」显式 raise（[python/fast_ulysses/group.py:133-143](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L133-L143)：返回值就是调用者自己的缓冲，静默丢梯度与「调用者本来就不想要梯度」无法区分，所以 raise）；async 形式因 `AsyncCollectiveTensor` 是叶节点同样 raise（[python/fast_ulysses/group.py:188-197](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L188-L197)）。两者的拒绝都被 [test/distributed/validation.py:186-192](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/validation.py#L186-L192) 断言，`no_grad` 下的 `out=` 则被显式接受（[test/distributed/validation.py:350-357](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/validation.py#L350-L357)）。
 
-   再依次尝试（每条单独捕获异常、打印消息）：
+#### 4.4.4 代码实践
 
-   ```python
-   torch.func.jvp(lambda v: group.all_to_all_4d(v, mode=0), (x,), (t,))   # 预期：正常返回
-   torch.func.grad(lambda v: group.all_to_all_4d(v, mode=0).sum())(x)     # 预期：raise
-   torch.vmap(lambda v: group.all_to_all_4d(v, mode=0))(x.unsqueeze(0))   # 预期：raise
-   ```
-3. **需要观察的现象**：`jvp` 非 None 且与直接对 tangent 做一次集合通信位精确相等；`torch.func.grad` 与 `torch.vmap` 抛 RuntimeError，且两者消息**不同**——前者是 functorch 无法 lift C++ Function 的报错，后者是本库 `refuse_vmap` 的主动拒绝（消息里含 "does not support torch.vmap"）。
-4. **预期结果**：如上。若无 GPU，本实践的每一条均为待本地验证——但三条 raise 的消息文本可先在 [src/bindings.cc:58-67](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L58-L67) 与 [docs/api.md:64-71](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/api.md#L64-L71) 里预习。
+**实践目标**：验证 tangent 确实走了第二条集合通信、primal 不受污染；同时确认 functorch 边界与文档一致。
 
-#### 4.4.5 小练习与答案
-
-1. **问：为什么 forward AD 不能像 backward 一样写进 `A2AFunction`，而要放在 Autograd 内核里？**
-   答：`torch::autograd::Function` 在 C++ 里没有 jvp 钩子：dual 输入进 `apply()` 会 raise；而如果 dual 恰好走了 `with_reverse_ad` 的快路径（no_grad 下），tangent 会被静默丢弃、没有任何报错。放在内核入口处先拆 dual，两条路径才都受控。
-2. **问：`torch.func.jacrev` 与 `torch.func.jacfwd` 都求雅可比，为什么失败原因不同？**
-   答：`jacrev` 是 vmap over vjp——走 reverse 路径，撞上「functorch 无法 lift C++ autograd::Function」；`jacfwd` 是 vmap over jvp——jvp 本身可用，但外层的 vmap 触发本库对 batched 输入的显式拒绝（逐元素循环集合通信会挂起）。
-3. **问：一个 dual 输入的调用发出两条集合通信，为什么不会破坏「各 rank 形状序列一致」的集体契约？**
-   答：因为每个 rank 跑的是同一张图、在同一处代码携带 tangent，于是每个 rank 都在同一程序点发出第二条形状相同的集合通信；契约要求的是「相同形状序列」，而非「相同条数以外的任何局部决定」。
-
-## 5. 综合实践
-
-把本讲四个模块串成一个可运行的验证脚本。**需要 CUDA；两张卡能看到不均匀分片的效果，单卡（`--nproc_per_node=1`）是合法的退化情形（ws=1，splits 各只有一项，逻辑全部照跑）。**
-
-实践目标：一次性验证 (a) mode 0 + mode 1 串联还原（backward 的效果）、(b) backward == forward(1-mode) 且 splits 原样、(c) 双重 backward 经 `apply` 递归成立、(d) forward AD 的双通道。
-
-将以下内容保存为 `practice_grad.py`（放在仓库外或临时目录均可，**不要**放进被分析的仓库源码树）：
+**操作步骤**（示例代码）：
 
 ```python
-"""practice_grad.py — backward 是另一个 mode 的四重验证。
-
-torchrun --nproc_per_node=2 practice_grad.py      # 单卡用 --nproc_per_node=1
-"""
+# 示例代码：practice_forward_ad.py
 import os
-
 import torch
 import torch.autograd.forward_ad as fwd_ad
 import torch.distributed as dist
-
 from fast_ulysses import UlyssesGroup
 
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+ws = dist.get_world_size()
+g = UlyssesGroup(require_nvlink=False)
 
-def main() -> None:
-    dist.init_process_group("nccl")
-    rank, ws = dist.get_rank(), dist.get_world_size()
-    torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", rank)))
-    dev = torch.device("cuda", torch.cuda.current_device())
-    group = UlyssesGroup(require_nvlink=False)
+x = torch.randn(2, 16, 4 * ws, 128, device="cuda", dtype=torch.bfloat16)
+tangent = torch.randn_like(x)
 
-    # ---- 1) mode 0 + mode 1 串联还原 == backward 做的事（splits 不交换的直接证据）
-    s_total = 12 + ws                                  # ws=2 -> [13, 1]，真正不均匀
-    seq_splits = [s_total - (ws - 1)] + [1] * (ws - 1)
-    head_splits = [4] * ws
-    kw = dict(seq_splits=seq_splits, head_splits=head_splits)
+with fwd_ad.dual_level():
+    dual = fwd_ad.make_dual(x, tangent)
+    out = g.all_to_all_4d(dual, mode=0)
+    primal, jvp = fwd_ad.unpack_dual(out)
 
-    x = torch.randn(1, seq_splits[rank], sum(head_splits), 128, dtype=torch.bfloat16, device=dev)
-    back = group.all_to_all_4d(group.all_to_all_4d(x, mode=0, **kw), mode=1, **kw)
-    assert torch.equal(back, x), "mode 0 与 mode 1 不是互逆"
-    print(f"rank={rank} [1] round trip bit-exact")
+assert torch.equal(jvp, g.all_to_all_4d(tangent, mode=0))   # tangent 走了同一条路
+assert torch.equal(primal, g.all_to_all_4d(x, mode=0))      # primal 不受污染
+print("forward AD: jvp == a2a(tangent), primal == a2a(x)")
 
-    # ---- 2) backward == forward(mode=1, 同一对 splits)，位精确
-    xg = x.detach().clone().requires_grad_(True)
-    # 上游梯度取 mode 0 输出的形状；这次额外前向本身也是各 rank 对称发出的集合调用
-    up = torch.randn_like(group.all_to_all_4d(xg.detach(), mode=0, **kw))
-    group.all_to_all_4d(xg, mode=0, **kw).backward(up)
-    want = group.all_to_all_4d(up, mode=1, **kw)       # up 不 requires_grad -> 快路径
-    assert xg.grad is not None and torch.equal(xg.grad, want), \
-        "backward 不是 1-mode，或 splits 被交换了"
-    print(f"rank={rank} [2] backward == forward(mode=1, same splits), bit-exact")
+# torch.func.jvp 走同一条手工搬运路径（流量 ×2）
+import torch.func
+_, j2 = torch.func.jvp(lambda t: g.all_to_all_4d(t, mode=0), (x,), (tangent,))
+assert torch.equal(j2, jvp)
 
-    # ---- 3) 双重 backward：backward 内部走 apply()，图不断
-    xd = torch.randn(1, 16, 4 * ws, 128, dtype=torch.bfloat16, device=dev, requires_grad=True)
-    y = group.all_to_all_4d(xd, mode=0)                # y = P xd，偶均分
-    (first,) = torch.autograd.grad((y ** 2).sum(), xd, create_graph=True)
-    assert first.grad_fn is not None, "一阶梯度没有 grad_fn：backward 走了不建图的调用"
-    (second,) = torch.autograd.grad(first.sum(), xd)
-    # sum(y^2) = sum(x^2)（排列不改平方和）-> 一阶 = 2*xd -> 二阶 = 2
-    assert torch.allclose(second.float(), torch.full_like(second.float(), 2.0))
-    print(f"rank={rank} [3] double backward == 2.0 everywhere")
+# reverse functorch 的边界：应当 raise（具体消息待本地验证）
+try:
+    torch.func.vjp(lambda t: g.all_to_all_4d(t, mode=0), x)
+    print("vjp did NOT raise -- unexpected!")
+except Exception as e:
+    print("vjp raises:", type(e).__name__)
 
-    # ---- 4) forward AD：tangent 走第二条集合通信
-    with fwd_ad.dual_level():
-        t = torch.randn_like(xd.detach())
-        out = group.all_to_all_4d(fwd_ad.make_dual(xd.detach(), t), mode=0)
-        primal, jvp = fwd_ad.unpack_dual(out)
-    assert jvp is not None and torch.equal(jvp, group.all_to_all_4d(t, mode=0)), \
-        "tangent 被丢弃，或没走同一条集合通信"
-    print(f"rank={rank} [4] jvp == a2a(tangent), bit-exact")
-
-    group.destroy()
-    dist.destroy_process_group()
-
-
-if __name__ == "__main__":
-    main()
+g.destroy()
+dist.destroy_process_group()
 ```
 
-操作步骤与观察点：
+**需要观察的现象**：两个位精确断言通过；`torch.func.jvp` 与手工 dual 的结果一致；`torch.func.vjp` raise（类型与消息待本地验证，文档预告它「自己 raise」）。
 
-1. `torchrun --nproc_per_node=2 practice_grad.py`，观察四行 `[1]`–`[4]` 依次打印——任何一条 assert 失败都精确对应本讲的一个论断被破坏。
-2. 把 `kw` 里的 `seq_splits` 临时改成对称的 `[6, 6]` 之类再跑 `[2]`：它仍应通过（偶均分是特例），体会「不均分才区分两种约定」。
-3. 跑示例做模块级对照：`torchrun --nproc_per_node=2 examples/dit_attention.py`（[examples/dit_attention.py:96-116](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L96-L116)）。注意两处校验的容差差异：本脚本的集合通信校验全部位精确；示例对整块注意力只有 `allclose`（5e-2），因为 SDPA 在两条路径上归约顺序不同——**交换本身位精确，注意力不是**。
-4. 对照 [examples/dit_attention.py:50-63](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L50-L63) 的两次调用注释（「Differentiable; its backward is mode 1」/「Its backward is mode 0」）：示例整个模块没有一行 autograd 代码，梯度仍正确回流——那就是 `A2AFunction` 在起作用。
+**预期结果**：dual 进、dual 出，tangent 与 primal 各自等于独立的普通调用。如果某个实现丢掉了 tangent，`unpack_dual` 返回的 `jvp` 会是 `None`——correctness.py 的负控制检查的正是这个。
 
-预期结果：四个断言全部通过；`dit_attention.py` 的 `output max |diff|` 与 `d/dinput max |diff|` 均小于 5e-2 且打印 OK，五个优化步的 loss 有变化。若在无 GPU 环境操作，以上运行结果均为**待本地验证**；脚本逻辑可先对照 [test/distributed/correctness.py:296-358](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L296-L358) 逐段核对——它就是这些断言的「正式版」。
+**运行前提**：需要 GPU 与已安装扩展；结果待本地验证。
+
+#### 4.4.5 小练习与答案
+
+**练习 1**：为什么 tangent 的搬运放在 Autograd 内核，而不是给 `A2AFunction` 加一个 jvp？
+
+**答案**：C++ `torch::autograd::Function` 根本没有 jvp 钩子可加（[src/bindings.cc:590-592](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L590-L592)）。dual 一旦进 `apply()` 就 raise；而若让它误入 `with_reverse_ad` 的快速路径（GradMode 关或不需梯度），tangent 被静默丢弃——最危险的失败模式是没有失败。Autograd 内核是所有调用（含快速路径）的必经之门，在这里摘 tangent 才能保证无一遗漏。
+
+**练习 2**：`jvp` 是 `mode=0` 而不是 `mode=1`，用一句话说清与 backward 的差别。
+
+**答案**：backward 算的是 \( P^{\top}g = P^{-1}g \)（转置＝逆，方向反转），jvp 算的是 \( P\dot{x} \)（同一个排列，方向不变）——所以 vjp 换 mode，jvp 不换。
+
+**练习 3**：一个需要梯度的输入在 `torch.no_grad()` 下走 `out=` 调用会怎样？在 grad 模式下呢？
+
+**答案**：`no_grad()` 下被接受（[test/distributed/validation.py:350-357](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/validation.py#L350-L357) 断言「accepts」）；grad 模式下在 Python 侧 raise `RuntimeError`，消息以 "does not support autograd" 开头（[python/fast_ulysses/group.py:138-143](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L138-L143)、[test/distributed/validation.py:186-192](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/validation.py#L186-L192)）。
+
+## 5. 综合实践
+
+把本讲四条线串成一个脚本：**「backward 是另一个 mode」的完整验证 + 双重 backward 的递归证据 + 与示例的梯度校验对照**。
+
+**实践目标**：证明下面三件事在真实多卡（或 ws=1）环境同时成立：
+
+1. 对同一不均匀 splits，`mode 0 → mode 1` 前向串联逐字节还原数据，且与 backward 产出的梯度逐字节一致。
+2. 双重 backward（grad-of-grad）能算，且 \( L=\sum y^2 \) 的二阶导处处为 2——这只有在 backward 经 `A2AFunction::apply` 递归建图时才可能。
+3. `examples/dit_attention.py` 的「输出 + 输入梯度」双校验方法与本讲的单元验证互补：前者防「接错轴」，后者防「排列本身错」。
+
+**操作步骤**（示例代码）：
+
+```python
+# 示例代码：practice_u6l3_final.py
+#   torchrun --nproc_per_node=<N> practice_u6l3_final.py
+import os
+import torch
+import torch.distributed as dist
+from fast_ulysses import UlyssesGroup
+
+dist.init_process_group("nccl")
+torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
+rank, ws = dist.get_rank(), dist.get_world_size()
+g = UlyssesGroup(require_nvlink=False)
+
+s_total = 97 * ws + 13
+seq_splits = [s_total - (ws - 1)] + [1] * (ws - 1)      # 倾斜：交换 splits 必挂形状
+head_splits = [4] * ws
+kw = {"seq_splits": seq_splits, "head_splits": head_splits}
+
+# --- 1. 串联还原 + 与 backward 一致 -------------------------------------------------
+x = torch.randn(2, seq_splits[rank], sum(head_splits), 128,
+                device="cuda", dtype=torch.bfloat16)
+xg = x.clone().requires_grad_(True)
+up = torch.randn_like(g.all_to_all_4d(x.detach(), mode=0, **kw))
+g.all_to_all_4d(xg, mode=0, **kw).backward(up)
+chained = g.all_to_all_4d(g.all_to_all_4d(up, mode=0, **kw), mode=1, **kw)
+assert torch.equal(xg.grad, chained)
+print(f"rank {rank}: [1] backward == mode1(mode0(up)), bit-exact")
+
+# --- 2. 双重 backward：sum(y**2) 的二阶导是 2 ---------------------------------------
+# 递归链条：A2AFunction::backward 里调的是 A2AFunction::apply（不是裸函数），
+# 所以一阶梯度 g1 = 2x 仍带 grad_fn，第二次 grad 能再穿一层排列节点。
+# 数学：g1 = P^T (2 P x) = 2x  =>  dg1/dx = 2I。
+xd = torch.randn(2, 16, 4 * ws, 128, device="cuda", dtype=torch.bfloat16,
+                 requires_grad=True)
+(first,) = torch.autograd.grad((g.all_to_all_4d(xd, mode=0) ** 2).sum(), xd,
+                               create_graph=True)
+assert first.grad_fn is not None, "一阶梯度必须仍在图上，否则 apply() 递归没发生"
+(second,) = torch.autograd.grad(first.sum(), xd)
+assert torch.allclose(second.float(), torch.full_like(second.float(), 2.0))
+print(f"rank {rank}: [2] double backward == 2 everywhere")
+
+g.destroy()
+dist.destroy_process_group()
+```
+
+**步骤 3（阅读对照）**：打开 [examples/dit_attention.py:52-62](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L52-L62)——模块里两行注释各自写着「mode 0: ... Differentiable; its backward is mode 1」与「mode 1: ... Its backward is mode 0」，正是本讲结论在用户代码里的样子；再看 [examples/dit_attention.py:96-116](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/examples/dit_attention.py#L96-L116)：梯度经 `all_gather` 拼回全局后与单卡参照比 `allclose`（容差 5e-2，因为 SDPA 与投影的归约顺序不同）。写三行注释回答：为什么示例用 `allclose` 而本讲的单元断言用 `torch.equal`？
+
+**需要观察的现象**：两个断言通过；示例跑出 `d/dinput max |diff|` 小于容差的 OK 行。
+
+**预期结果**：单元断言位精确（纯排列不引入算术误差）；示例的误差来自注意力而非交换。如果第 2 步的 `first.grad_fn is None`，说明 backward 没走 `apply()`——正是源码注释（[src/bindings.cc:554-556](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L554-L556)）要防住的退化。
+
+**运行前提**：需要已构建扩展与 CUDA 设备；所有数值输出待本地验证。
 
 ## 6. 本讲小结
 
-- `A2AFunction` 在 `saved_data` 里保存 `group`（torchbind 类的 `intrusive_ptr`，图因此持有组存活）、`mode` 和两个 splits；forward 经 `dispatch_below_autograd` 重新进入 dispatcher，保住 Meta/FakeTensor 等下层 key。
-- mode 0 是全局元素集上的排列，其 Jacobian 是排列矩阵，转置即逆——所以 vjp 就是 `1 - mode` 的前向调用，位精确、零额外内核。
-- splits 描述**组的几何**（rank p 拥有什么），与数据流向无关，backward 原样传递；`all_to_all_single` 的 split sizes 描述**单次收发量**，方向反转必须交换——两种对象、两种约定，偶均分时碰巧等价，不均分时分出对错。
-- backward 永走 copying 路径：`empty_output()` 是集合分配，不能交给引擎的节点顺序；梯度属于引擎、可能被累加持有，与单缓冲窗口的生命周期不兼容。
-- forward AD 在 Autograd 内核里手工处理：primal 与 tangent 各走一次同一集合通信（jvp of a permutation is the permutation），流量 ×2；`grad`/`vjp`/`jacrev` 因 functorch 无法 lift C++ Function 而 raise，vmap 被显式拒绝。
+- `A2AFunction` 是 C++ `torch::autograd::Function`：`saved_data` 保存 group（图持有其生命周期）、mode 与两张 splits 表（`IValue` 的 None 语义保留「没传」），forward 经 `dispatch_below_autograd` 重入调度器以保住 Meta/Python key。
+- 排列的 vjp 是逆排列（\( P^{\top}=P^{-1} \)），而逆排列就是同一几何下另一个 mode 的前向——所以 backward 是 `1 - mode`，位精确、不重算。
+- splits **不交换**：`all_to_all_single` 的 split sizes 描述单次调用的收发量（方向反转即角色互换），本库的两张表描述组的切分几何（与流向无关）；倾斜切分下交换会在 `make_dims` 的形状校验上失败。
+- backward 永走 copying 路径：`empty_output()` 是集合分配（rendezvous 位置不能交给引擎的节点顺序），且梯度会被引擎累加/持有，与单缓冲窗口不兼容；用 `apply()` 而非裸函数，使 grad-of-grad 递归回 `A2AFunction`。
+- forward AD 在唯一的 Autograd 内核里手工搬运 tangent：jvp 是同一个排列，tangent 走第二条集合通信（流量 ×2）；`forward_ad`/`jvp`/`linearize` 可用，`grad`/`vjp`/`jacrev` 因 functorch 无法 lift C++ Function 而 raise，`vmap`/`jacfwd` 被显式拒绝。
+- `out=` 与 async 形式不可微且**拒绝而非静默丢梯度**：返回值分别是调用者的缓冲与叶节点 wrapper，静默通过会让 `x.grad` 悄悄变 `None`。
 
 ## 7. 下一步学习建议
 
-- **u6-l4（Meta 内核、FakeTensor 与 vmap 拒绝）**：本讲两次路过 Meta key 与 `refuse_vmap`，下一讲正面拆解形状传播为何复用 `plan()`、哪些 op 拒绝被 trace、以及 vmap 双 key 拒绝的完整论证。
-- **u7-l1（异步调用全景）**：`all_to_all_4d_async` 明确**不可微**且对带梯度输入 raise——带着本讲「梯度属于引擎、窗口单缓冲」的结论去读它的拒绝理由，会看到同一组生命周期约束的另一种表达。
-- **源码延伸阅读**：`src/a2a_plan.cc` 的 `build_plan`（u3-l2）——把「mode 1 是 mode 0 从右往左读」落到 CopyOp 的发射循环上；以及 `test/distributed/correctness.py` 的其余段落，看位精确对照如何覆盖 out 三态、async 与全部 dtype。
+- **u6-l4（Meta 内核、FakeTensor 与 vmap 拒绝）**：本讲多次遇到「哪些入口可 trace」——下一讲系统讲 Meta 内核如何复用 `group->plan()` 做纯主机形状传播，以及 `FuncTorchBatched + Batched` 双 key 拒绝 vmap 的完整论证。
+- **u7-l1（异步调用全景）**：本讲确认了 async 形式不可微的原因（`AsyncCollectiveTensor` 是叶），第七单元讲它换来的东西——comm 流上的重叠与 `record_stream` 记账。
+- **源码延伸阅读**：把 [test/distributed/correctness.py:296-358](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/distributed/correctness.py#L296-L358) 完整读一遍（backward、splits 传递、forward AD、双重 backward 四段连续出现），再对照 [test/test_plan.py:236-257](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/test/test_plan.py#L236-L257) 的无 GPU round trip——「GPU 上的位精确」与「主机上的重放还原」互为表里，是本库测试哲学的缩影。

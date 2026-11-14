@@ -1,14 +1,13 @@
 {
-  "head": "2289b819b8f709e37e3e042ebb019f411fb6b742",
+  "head": "075a7892d8a004242b085bf3c71b996389fd863c",
   "project": "OLMo-core",
-  "rationale": "OLMo-core 是 AI2 用于训练 OLMo 系列大模型的核心训练库，规模大、模块多（配置系统、Transformer 模型、数据加载、优化器、训练循环、多维并行、评测生成、脚本部署、多模态与内核），因此采用 10 个单元、37 篇讲义的三层路线。第一单元让读者从零认识项目并跑通第一个训练示例；第二单元先讲贯穿全库的 Config/Registrable 配置模式，因为后续所有模块都建立在这一模式上；第三到六单元按\"模型 → 数据 → 优化 → 训练循环\"的依赖顺序深入核心调用链；第七到九单元进入专家层的分布式并行、评测生成与真实训练脚本/Beaker 部署；第十单元覆盖 float8、CUDA 内核、多模态、checkpoint 转换与测试贡献等二次开发主题。每篇讲义只讲一个主题、引用 1-6 个真实源码文件，并配一个可动手的代码实践任务，讲义之间通过 depends_on 形成清晰的学习路径。",
+  "rationale": "OLMo-core 是 AI2 用于训练 OLMo 系列大模型的核心训练库，规模大、模块多（配置系统、Transformer 模型、数据加载、优化器、训练循环、多维并行、评测生成、脚本部署、多模态与内核），因此采用 10 个单元、37 篇讲义的三层路线。第一单元让读者从零认识项目并跑通第一个训练示例；第二单元先讲贯穿全库的 Config/Registrable 配置模式，因为后续所有模块都建立在这一模式上；第三到六单元按\"模型 → 数据 → 优化 → 训练循环\"的依赖顺序深入核心调用链；第七到九单元进入专家层的分布式并行、评测生成与真实训练脚本/Beaker 部署；第十单元覆盖 float8、CUDA 内核、多模态、checkpoint 转换与测试贡献等二次开发主题。本轮增量（2289b819b..075a7892d，仅一个提交）做了两件事：修复了张量并行下 nn/cross_entropy_loss.py 的损失归约（规约输出声明为 Partial 布局、mean 归约改为先求和再除以全局有效 token 数），并把 DDP/MoE v2 的重复测试整合为共享 helper（src/test/nn/ddp/helpers.py）加参数化套件。已生成的 u1-l1 引用的 CHANGELOG 行号（L8-L27、L41）均位于新增条目（约 L70 起）之上，内容不受影响，标记 keep；u7-l2 与 u10-l6 尚未生成，分别把 cross_entropy_loss.py 和 src/test/nn/ddp/helpers.py 纳入源码范围以覆盖该修复与测试整合，仍标记 new；其余讲义计划与引用文件均未受影响，因尚未生成故保持 new。",
   "units": [
     {
       "id": "u1",
-      "level": "beginner",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -114,12 +113,12 @@
           "topic": "精读自包含示例 src/examples/llm/train.py，理解一个完整训练实验如何由 model、dataset、data_loader、train_module、trainer 五个 Config 组装而成，并用 torchrun 启动。"
         }
       ],
+      "level": "beginner",
       "order": 1,
       "title": "单元一：初识 OLMo-core"
     },
     {
       "id": "u2",
-      "level": "beginner",
       "lectures": [
         {
           "action": "new",
@@ -201,12 +200,12 @@
           "topic": "讲解 --train_module.optim.lr=6e-3 这类命令行覆盖如何通过 Config.merge() 的 dotlist 机制实现，以及 src/olmo_core/script_utils.py 提供的 ExperimentConfig 与 main() 入口模式。"
         }
       ],
+      "level": "beginner",
       "order": 2,
       "title": "单元二：配置系统——贯穿全库的设计模式"
     },
     {
       "id": "u3",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -377,12 +376,12 @@
           "topic": "讲解 nn/transformer/init.py 的参数初始化方案（normal init、缩放策略等）与 init_seed 如何保证可复现。"
         }
       ],
+      "level": "intermediate",
       "order": 3,
       "title": "单元三：Transformer 模型架构"
     },
     {
       "id": "u4",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -473,12 +472,12 @@
           "topic": "讲解 source_mixture.py 的数据混合机制、data/mixes/ 中 OLMo 官方训练配方的组织方式，以及如何用混合比例与课程学习式切分组织多源数据。"
         }
       ],
+      "level": "intermediate",
       "order": 4,
       "title": "单元四：数据加载"
     },
     {
       "id": "u5",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -565,12 +564,12 @@
           "topic": "讲解 SkipStepOptimizer 包装器：梯度裁剪、loss spike 检测与跳步策略，以及 grad_debug.py 的梯度诊断工具。"
         }
       ],
+      "level": "intermediate",
       "order": 5,
       "title": "单元五：优化器"
     },
     {
       "id": "u6",
-      "level": "intermediate",
       "lectures": [
         {
           "action": "new",
@@ -690,12 +689,12 @@
           "topic": "讲解 train/checkpoint.py 的 Checkpointer 与 distributed/checkpoint/ 的分布式保存/加载（含不同文件系统后端）、异步 checkpoint 与 LoadStrategy 恢复策略。"
         }
       ],
+      "level": "intermediate",
       "order": 6,
       "title": "单元六：训练循环"
     },
     {
       "id": "u7",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -735,7 +734,8 @@
           "learning_goals": [
             "说明张量/流水线/上下文/专家并行各自切分的对象",
             "理解多维并行组合时的进程组划分",
-            "为模型配置组合并行策略"
+            "为模型配置组合并行策略",
+            "理解张量并行下 CrossEntropyLoss 的跨 rank 归约：为何规约结果是 Partial 而非 Replicate，mean 归约为何要除以全局有效 token 数"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -745,16 +745,17 @@
             "ExpertParallelConfig"
           ],
           "order": 2,
-          "practice_task": "阅读官方 OLMo-2 32B 脚本中的并行配置组合，画出 8 卡情况下各并行维度的进程组划分示意图，并解释为何 attention 适合 TP 而 MoE 专家适合 EP。",
+          "practice_task": "阅读官方 OLMo-2 32B 脚本中的并行配置组合，画出 8 卡情况下各并行维度的进程组划分示意图，并解释为何 attention 适合 TP 而 MoE 专家适合 EP；再对照 cross_entropy_loss.py 中 TP 损失归约的修复（Partial 布局 + 全局有效 token 数归一化），说明若把规约结果误标为 Replicate 会发生什么。",
           "source_files": [
             "src/olmo_core/distributed/parallel/tensor_parallel.py",
             "src/olmo_core/distributed/parallel/pipeline_parallel.py",
             "src/olmo_core/distributed/parallel/context_parallel.py",
             "src/olmo_core/distributed/parallel/expert_parallel.py",
-            "src/olmo_core/train/train_module/transformer/pipeline_train_module.py"
+            "src/olmo_core/train/train_module/transformer/pipeline_train_module.py",
+            "src/olmo_core/nn/cross_entropy_loss.py"
           ],
           "title": "张量、流水线、上下文与专家并行",
-          "topic": "总览其余并行维度：tensor_parallel、pipeline_parallel（含 pipeline train module）、context_parallel（ring attention）、expert_parallel，以及它们如何与 DP 组合成多维并行。"
+          "topic": "总览其余并行维度：tensor_parallel、pipeline_parallel（含 pipeline train module）、context_parallel（ring attention）、expert_parallel，以及它们如何与 DP 组合成多维并行；并结合 cross_entropy_loss.py 讲清张量并行下损失如何跨 rank 归约（Partial 输出布局与按全局有效 token 数归一化，对应 075a7892d 的修复）。"
         },
         {
           "action": "new",
@@ -785,12 +786,12 @@
           "topic": "讲解 distributed/utils.py 的进程组管理（init_distributed、get_rank 等）、distributed/nn.py 的分布式原语，以及 testing/distributed.py 提供的多进程测试工具。"
         }
       ],
+      "level": "advanced",
       "order": 7,
       "title": "单元七：分布式训练"
     },
     {
       "id": "u8",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -853,12 +854,12 @@
           "topic": "讲解 generate/ 包：generation_module 的自回归生成循环、sampling.py 的采样策略（temperature/top-p）以及 chat.py 的交互式聊天入口。"
         }
       ],
+      "level": "advanced",
       "order": 8,
       "title": "单元八：评测与生成"
     },
     {
       "id": "u9",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -946,12 +947,12 @@
           "topic": "讲解 launch/beaker.py 的 BeakerLaunchConfig/Gantry 启动流程（镜像选择、clone 仓库、pip install、torchrun 包装）、Dockerfile 两阶段构建与 make docker-image。"
         }
       ],
+      "level": "advanced",
       "order": 9,
       "title": "单元九：训练脚本与部署"
     },
     {
       "id": "u10",
-      "level": "advanced",
       "lectures": [
         {
           "action": "new",
@@ -1128,12 +1129,14 @@
             "src/test/train/callbacks",
             "src/olmo_core/testing/distributed.py",
             "src/test/data/composable/data_loader_test.py",
+            "src/test/nn/ddp/helpers.py",
             "Makefile"
           ],
           "title": "测试体系与贡献流程",
-          "topic": "讲解 src/test 的组织约定（test_* 命名、parametrize、@pytest.mark.gpu、分布式测试工具）、olmo_core/testing 工具与贡献时的格式/lint/类型检查要求。"
+          "topic": "讲解 src/test 的组织约定（test_* 命名、parametrize、@pytest.mark.gpu、分布式测试工具）、olmo_core.testing 工具与贡献时的格式/lint/类型检查要求，并以 src/test/nn/ddp/helpers.py 为例说明如何把重复的分布式测试整合为共享 helper 与参数化套件。"
         }
       ],
+      "level": "advanced",
       "order": 10,
       "title": "单元十：高级主题与二次开发"
     }

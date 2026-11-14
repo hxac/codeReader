@@ -1,7 +1,7 @@
 {
-  "head": "bae4209fdc541914540670c200628f67a39371ea",
+  "head": "8cd7c9eb4e4d997cd482e9f88f5249d081728d9a",
   "project": "open-instruct",
-  "rationale": "open-instruct 是 Allen AI 的大模型后训练研究代码库，核心价值链是「SFT → DPO/偏好优化 → RLVR 强化学习」，并在此之上生长出 OLMo-core 高效训练路线与 MILES 新一代 RL 系统两套子系统。大纲按认知梯度分九个单元：单元 1 让读者跑起来并建立目录与入口心智模型；单元 2-3 精读 SFT 主链路与数据工程，这是所有后续算法的共同地基；单元 4-6 依次覆盖偏好优化 DPO、奖励建模与合成数据、RLVR/GRPO 核心，对应 Tülu 3 的后训练配方；单元 7-8 进入当前主力工作的 OLMo-core SFT 路线与 MILES RL 系统（先进架构、配置、执行、奖励、运维）；单元 9 收束工程化技能。本轮增量（896a734→bae4209）主要落在三处：代码执行客户端入库为 open_instruct/code_utils/execution_client（新增 u6-l8 专讲）；MILES 新增 priority 提示提供者与 num_epoch 预算、data.over_length 超长排除（更新 u8-l2/l3/l4 并新增 u8-l11）；Math-Verify 不安全等式回退与判分器依赖随镜像分发（更新 u6-l7、u8-l6、u8-l8）。SFT/DPO/RM/OLMo-core/工程化各篇所引文件无变化，全部保持 keep。讲义仍遵循「一篇只讲一个问题、引用真实源码、配一个可动手实践任务」，单元内递进、跨单元显式依赖。",
+  "rationale": "本轮增量（bae4209→8cd7c9eb）共五个提交，全部落在 MILES 子系统：其一，统一判分输入（#2250）新增 rewards/grading.py 与 docs/miles/grading.md，用 ResponseParts 一次性切分 thinking 与 delivered response，以 objective×scope×require_response 声明每个验证器的输入契约，rewards 注册表加载与 driver 启动都会校验，推理记录与选择表升级到 schema 2——这是本轮最大的新机制，单独新增 u8-l12，并波及 u6-l3（VerifierFunction 新增 selected_input）、u8-l6（注册表策略解析）、u8-l9（记录契约）；其二，原生 Nemotron abstention QA 奖励（#2252）新增 abstention.py 与 abstention.md，作为「数据源→rubric→裁判绑定→失败策略」的端到端案例新增 u8-l13，并更新 u8-l4（源准备新增 nemo_abstention_v1 适配器）；其三，score-centering TIS 进入 Core refresh 训练（#2229）新增 configuration/score_centering.py 预检与 core.md 章节，单独新增 u8-l14；其四，示例按模型家族重组（#2255，examples 细分为 tiny/ 与 small/，评估采样默认对齐 temperature 1.0、top-p 0.95、32768 响应上限），u8-l1/u8-l2/u8-l9 相应更新；其五，池采样可与优先级组序组合（#2256，data.sampling.priority 要求 uniform/exposure 且与 replay 互斥），更新 u8-l5 与 u8-l11。SFT/DPO/RM/OLMo-core/工程化各篇所引文件无变化，全部保持 keep。",
   "units": [
     {
       "id": "u1",
@@ -698,7 +698,7 @@
           "topic": "精读核心数学：compute_grpo_loss 的 DAPO 裁剪与 CISPO 变体、rho 修正、组内标准化优势（compute_group_advantages）与序列打包。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u6-l1"
           ],
@@ -707,29 +707,32 @@
           "learning_goals": [
             "理解验证器注册表与自动发现机制",
             "掌握 boxed 答案抽取与数学等价判定流程",
-            "能编写并注册一个自定义验证器"
+            "能编写并注册一个自定义验证器",
+            "理解 VerifierFunction.async_call 新增的 selected_input 关键字与 grading_* 类属性声明（MILES 统一判分入口，详见 u8-l12）"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "VerifierFunction 基类",
             "apply_verifiable_reward 分发",
-            "Math/GSM8K 验证器"
+            "Math/GSM8K 验证器",
+            "selected_input 与 grading_* 声明"
           ],
           "order": 3,
-          "practice_task": "写一个新的 VerifierFunction 子类（如判断答案是否为质数），参考现有验证器接入 RewardConfig，并用 5 组样例验证打分正确。",
+          "practice_task": "写一个新的 VerifierFunction 子类（如判断答案是否为质数），参考现有验证器接入 RewardConfig，并用 5 组样例验证打分正确；再对比 remove_thinking_section 在 selected_input=False 与 True 下的输出差异，并查看 UpToMaxLenVerifier 等类新增的 grading_objective/grading_scope/grading_uses_tokens 声明。",
           "source_files": [
             "open_instruct/ground_truth_utils.py",
             "open_instruct/math_utils.py",
+            "open_instruct/answer_utils.py",
             "open_instruct/test_ground_truth_utils.py",
             "open_instruct/test_math_utils.py"
           ],
           "title": "可验证奖励：verifier 注册表与数学判分",
-          "topic": "精读 ground_truth_utils.py 与 math_utils.py：VerifierFunction 抽象类、按数据集名分发的 apply_verifiable_reward、Math/GSM8K/Code 等验证器与 sympy 等价判定。"
+          "topic": "精读 ground_truth_utils.py 与 math_utils.py：VerifierFunction 抽象类、按数据集名分发的 apply_verifiable_reward、Math/GSM8K/Code 等验证器与 sympy 等价判定。更新点：async_call 新增 selected_input 关键字参数，IFEval/F1/Puzzle/LMJudge 等消费者声明 grading_accepts_selected_input，MaxLen/UpToMaxLen 声明 process/full 目标，answer_utils.remove_thinking_section 在 selected_input=True 时不再二次切分思考边界。"
         },
         {
           "action": "keep",
           "depends_on": [
-            "u6-l2"
+            "u6-l1"
           ],
           "filename": "u6-l4-grpo-fast-ray-architecture.md",
           "id": "u6-l4",
@@ -784,7 +787,7 @@
           "topic": "讲解训练与推理引擎的一致性机制：perform_weight_sync 的暂停-广播-唤醒流程、IPC 权重广播、grpo_fast_resource_plan.py 的资源规划与 grpo_callbacks.py 的回调集。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u6-l2"
           ],
@@ -793,7 +796,8 @@
           "learning_goals": [
             "理解多轮工具调用的 rollout 状态机",
             "掌握 StepResult 与奖励聚合（Last/Sum）",
-            "理解 ToolRL 打分中调用名与参数匹配规则"
+            "理解 ToolRL 打分中调用名与参数匹配规则",
+            "理解 toolrl_utils.score_response 新增可选 action 参数：格式文本与已选定动作文本可分离传入（MILES 复合判分使用），默认路径行为不变"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -802,7 +806,7 @@
             "ToolRL 打分"
           ],
           "order": 6,
-          "practice_task": "运行 tests/test_environments.py，然后实现一个最小环境（如猜数字）：继承现有基类，让一次 rollout 记录 StepResult 并按 SumRewardAggregator 聚合奖励。",
+          "practice_task": "运行 tests/test_environments.py，然后实现一个最小环境（如猜数字）：继承现有基类，让一次 rollout 记录 StepResult 并按 SumRewardAggregator 聚合奖励；再对比 score_response 显式传入 action 与不传时的打分差异。",
           "source_files": [
             "open_instruct/environments/base.py",
             "open_instruct/toolrl_utils.py",
@@ -811,10 +815,10 @@
             "tests/test_environments.py"
           ],
           "title": "工具调用 RL：environments 与 ToolRL",
-          "topic": "讲解工具与环境体系：environments/base.py 的 RLEnvironment/RolloutState 抽象、tools 目录的解析器与 MCP 集成、toolrl_utils.py 的离线工具调用打分。"
+          "topic": "讲解工具与环境体系：environments/base.py 的 RLEnvironment/RolloutState 抽象、tools 目录的解析器与 MCP 集成、toolrl_utils.py 的离线工具调用打分。更新点：score_response 新增可选 action 参数，可由外部传入已选定的动作文本，供 MILES 的 ToolRL 复合判分（format 用原始边界、correctness 用选定响应）复用。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -845,7 +849,7 @@
           "topic": "讲解代码类可验证奖励：CodeVerifier 通过外部执行服务跑测试用例，code_utils 的沙箱执行与 generic_sandbox 环境；更新点：执行客户端已从外部私有包移入库内（open_instruct/code_utils/execution_client），test_complete_code.py 的 mock 方式随之改变。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l7"
           ],
@@ -981,7 +985,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u6-l4"
           ],
@@ -990,7 +994,8 @@
           "learning_goals": [
             "说出 MILES 与 grpo.py/grpo_fast.py 的关系与适用范围",
             "理解三层所有权划分",
-            "会用 python -m open_instruct.miles 的五个子命令"
+            "会用 python -m open_instruct.miles 的五个子命令",
+            "知道维护示例按模型家族重组在 configs/miles/examples/tiny/ 与 small/ 下"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -999,7 +1004,7 @@
             "文档地图"
           ],
           "order": 1,
-          "practice_task": "阅读 docs/miles/index.md 与 architecture.md，绘制 MILES 三层架构图，并用 `python -m open_instruct.miles plan`（无 GPU 也可运行）对一份示例 TOML 做计划验证。",
+          "practice_task": "阅读 docs/miles/index.md 与 architecture.md，绘制 MILES 三层架构图，并用 `python -m open_instruct.miles plan`（无 GPU 也可运行）对 configs/miles/examples/tiny/dev.toml 做计划验证；浏览 docs/miles/grading.md 与 abstention.md 的新目录条目，了解文档地图本轮的扩展。",
           "source_files": [
             "docs/miles/index.md",
             "docs/miles/architecture.md",
@@ -1007,7 +1012,7 @@
             "docs/miles/grpo.md"
           ],
           "title": "MILES 总览与架构分层",
-          "topic": "介绍 MILES 的定位与分层：open-instruct 负责配置/数据/奖励集成，MILES 运行时负责 rollout 编排与共享 RL 机制，Core 适配器经 OLMo-core 训练、SGLang 服务。"
+          "topic": "介绍 MILES 的定位与分层：open-instruct 负责配置/数据/奖励集成，MILES 运行时负责 rollout 编排与共享 RL 机制，Core 适配器经 OLMo-core 训练、SGLang 服务。更新点：grpo.md 指南的最终答案奖励一节改写为共享判分输入并链接 grading.md，示例配置移动到 configs/miles/examples/tiny/ 与 small/（按模型家族分组）。"
         },
         {
           "action": "update",
@@ -1020,25 +1025,28 @@
             "掌握 TOML run 文件的结构与 schema_version",
             "理解 RunSpec.compile 到 RunConfig 的编译链",
             "会用 --set 覆盖与 validate 命令排查配置错误",
-            "掌握新增的 prompt_provider=priority 约束（priority 设置要求 provider=priority 且需 rollout_global_dataset）、data.over_length 取值校验，以及 num_epoch/num_rollout 互斥与 save_final_checkpoint 默认策略"
+            "掌握 prompt_provider=priority 约束（priority 设置要求 provider=priority 且需 rollout_global_dataset）、data.over_length 取值校验，以及 num_epoch/num_rollout 互斥与 save_final_checkpoint 默认策略",
+            "掌握本轮新增的编译期字段与默认值：core.reward_final_answer_only / reward_reasoning_mode、score-centering 系列参数（loss_type=score_centering、score_centering_is 及 fp32_lm_head 要求）、评估采样默认（temperature 1.0、top_p 0.95、max_response_len 上限 32768）"
           ],
           "level": "advanced",
           "minimal_modules": [
             "RunSpec",
             "CoreConfig/RunConfig 编译",
             "校验与约束",
-            "priority/over_length/epoch 预算新字段"
+            "priority/over_length/epoch 预算新字段",
+            "判分与 score-centering 编译选项"
           ],
           "order": 2,
-          "practice_task": "复制 configs/miles/examples/dev.toml（注意其中新增的 [data] over_length = \"exclude\"），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；最后同时设置 training.num_epoch 与 num_rollouts 观察互斥报错。",
+          "practice_task": "复制 configs/miles/examples/tiny/dev.toml（注意其中的 [data] over_length = \"exclude\" 与 core 的 reward_final_answer_only/reward_reasoning_mode），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；同时设置 training.num_epoch 与 num_rollouts 观察互斥报错；最后对照 configs/miles/examples/small/dev.toml 观察示例按模型家族的划分，并在 plan 产物中找出评估采样默认值。",
           "source_files": [
             "open_instruct/miles/configuration/run_spec.py",
             "open_instruct/miles/configuration/config.py",
             "open_instruct/miles/configuration/validation.py",
+            "open_instruct/miles/configuration/score_centering.py",
             "docs/miles/configuration-intro.md"
           ],
           "title": "配置系统：TOML → RunSpec → RunConfig",
-          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；更新点：新增 priority 采样相关字段（prompt_priority_field 等）、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 的编译默认值。"
+          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；更新点：新增 priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认；本轮又新增 reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束。"
         },
         {
           "action": "update",
@@ -1051,7 +1059,8 @@
             "理解一次 MILES run 的阶段划分与断点恢复",
             "掌握 driver 与 MILES 运行时的职责边界",
             "理解指纹（fingerprint）如何支撑 resume",
-            "理解 driver 返回值携带 num_rollout 后 workflow 完成判定的变化，以及 save_final_checkpoint 如何在最后一个 rollout 落盘最终存档"
+            "理解 driver 返回值携带 num_rollout 后 workflow 完成判定的变化，以及 save_final_checkpoint 如何在最后一个 rollout 落盘最终存档",
+            "理解 driver.train 在分配 worker 之前调用 rewards.validate_registry 的启动期奖励注册表校验"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1061,7 +1070,7 @@
             "完成判定与最终存档"
           ],
           "order": 3,
-          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证。",
+          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证；最后定位 driver.train 中 validate_registry 的调用点，说明它为何必须发生在 worker 分配之前。",
           "source_files": [
             "open_instruct/miles/execution/workflow.py",
             "open_instruct/miles/execution/driver.py",
@@ -1069,7 +1078,7 @@
             "docs/miles/workflow.md"
           ],
           "title": "工作流与执行：driver、workflow 与集群启动",
-          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；更新点：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存。"
+          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；更新点：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存；本轮 driver 新增 rewards.validate_registry 启动校验——在分配 worker 前解析可信注册表，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。"
         },
         {
           "action": "update",
@@ -1082,17 +1091,19 @@
             "理解 MILES 数据源的声明方式",
             "掌握 mixture 与 verifier 目标的绑定",
             "会用 source preparation 预处理新数据",
-            "掌握新增 data.over_length = \"exclude\" 的训练侧超长排除语义、held-out 仍严格失败的边界，以及 manifest 中 prompt_length 计数（original/excluded/retained）"
+            "掌握 data.over_length = \"exclude\" 的训练侧超长排除语义、held-out 仍严格失败的边界，以及 manifest 中 prompt_length 计数（original/excluded/retained）",
+            "理解准备期用 grading.validate_spec 校验注册表语法（不导入工厂）与 named-judge 绑定覆盖继承受信 grading 声明的规则"
           ],
           "level": "advanced",
           "minimal_modules": [
             "mixture 混合",
             "run_data 准备",
             "源目录与准备",
-            "超长提示排除策略"
+            "超长提示排除策略",
+            "grading 声明的准备期校验"
           ],
           "order": 4,
-          "practice_task": "为一份新数据（如自制的数学题集）写 source 声明并接入 mixture，运行 validate 确认可被 MILES 接受，并说明验证器目标如何随样本携带；再构造一份故意混入超过 max_prompt_length 的训练样本与 held-out 样本的数据，分别以 over_length=\"fail\" 与 \"exclude\" 走 prepare（或对照 open_instruct/test_miles_over_length.py 的用例），比较报错行为与 manifest.json 中 prompt_length 的 original/excluded/retained 计数，并验证被掏空的配置 source 会导致准备失败。",
+          "practice_task": "为一份新数据（如自制的数学题集）写 source 声明并接入 mixture，运行 validate 确认可被 MILES 接受，并说明验证器目标如何随样本携带；再构造一份故意混入超过 max_prompt_length 的训练样本与 held-out 样本的数据，分别以 over_length=\"fail\" 与 \"exclude\" 走 prepare（或对照 open_instruct/test_miles_over_length.py 的用例），比较报错行为与 manifest.json 中 prompt_length 的 original/excluded/retained 计数，并验证被掏空的配置 source 会导致准备失败；最后构造一个带 grading 声明的注册表 JSON，分别用合法与非法组合（如 answer 配 thinking scope）跑 prepare，观察 validate_spec 的报错。",
           "source_files": [
             "open_instruct/miles/datasets/mixture.py",
             "open_instruct/miles/datasets/run_data.py",
@@ -1101,39 +1112,42 @@
             "open_instruct/test_miles_over_length.py"
           ],
           "title": "数据源、混合、超长排除与源准备",
-          "topic": "讲解 datasets 包：mixture 混合、run_data 的提示词/验证目标/清单准备、source_preparation 与 source_catalog 的源管理；更新点：新增 data.over_length 排除策略——训练侧可跳过超限提示并按 source/pool 记录排除计数，held-out 数据仍严格失败。"
+          "topic": "讲解 datasets 包：mixture 混合、run_data 的提示词/验证目标/清单准备、source_preparation 与 source_catalog 的源管理；更新点一：data.over_length 排除策略——训练侧可跳过超限提示并按 source/pool 记录排除计数，held-out 数据仍严格失败；更新点二：准备期调用 grading.validate_spec 校验注册表语法（不导入工厂、不猜测默认值），named-judge 绑定替换工厂配置时会继承原注册表的受信 grading 声明（陈旧缓存会被拒绝）；更新点三：新增 nemo_abstention_v1 源适配器（见 u8-l13）。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
-            "u8-l3"
+            "u8-l2"
           ],
           "filename": "u8-l5-miles-rollout-providers.md",
           "id": "u8-l5",
           "learning_goals": [
             "理解不同 rollout 提供者的采样语义",
             "掌握 pool 指标与排除表的作用",
-            "理解策略前缀缓存对长提示的收益"
+            "理解策略前缀缓存对长提示的收益",
+            "掌握 data.sampling 新增 priority 字段的约束：要求 policy=uniform|exposure、field 非空、与 replay 互斥"
           ],
           "level": "advanced",
           "minimal_modules": [
             "PromptProvider 协议",
             "Pool/Replay 提供者",
-            "排空数据源"
+            "排空数据源",
+            "池采样优先级排序"
           ],
           "order": 5,
-          "practice_task": "实现一个自定义 PromptProvider（如按难度循环出题），对照协议接口补齐方法，并解释它与 pool_provider 在耗尽行为上的差异。",
+          "practice_task": "实现一个自定义 PromptProvider（如按难度循环出题），对照协议接口补齐方法，并解释它与 pool_provider 在耗尽行为上的差异；再用 pool_sampling.validate 分别验证带 priority 的合法（uniform/exposure）与非法（shuffle/weighted、缺 field、同时启用 replay）sampling 配置，记录报错信息。",
           "source_files": [
             "open_instruct/miles/rollout/data_source.py",
             "open_instruct/miles/rollout/pool_provider.py",
+            "open_instruct/miles/rollout/pool_sampling.py",
             "open_instruct/miles/rollout/replay_provider.py",
             "docs/miles/policy-prefix-cache.md"
           ],
           "title": "Rollout 提供者：pool、replay 与前缀缓存",
-          "topic": "讲解 rollout 包：PromptProvider 协议、PoolPromptProvider 的有限提示池、replay/remind 提供者与 DashboardDrainingRolloutDataSource 的排空与游标机制。"
+          "topic": "讲解 rollout 包：PromptProvider 协议、PoolPromptProvider 的有限提示池、replay/remind 提供者与 DashboardDrainingRolloutDataSource 的排空与游标机制。更新点：data.sampling 新增 priority 字段——在 uniform/exposure 策略下每个池内按优先级字段排序取下一个新提示，训练回执携带 sampling_priority_group，priority 与 replay 互斥。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u8-l5",
             "u8-l2",
@@ -1145,26 +1159,29 @@
             "理解 PriorityPromptProvider 的组序遍历：每个 epoch 内按组 1→2→3→4 依序耗尽、组内无采样权重",
             "掌握组内混源加权（prompt_priority_source_field/weights）：权重只影响顺序与早期曝光、耗尽源被跳过并重归一化",
             "理解确定性（seed 固定组内洗牌、identity 哈希拒绝不匹配的 resume）与 provider_source 的接入方式",
-            "掌握 training.num_epoch 预算在数据加载后被解析为 num_rollout，以及 epoch 预算 run 默认保存最终 checkpoint"
+            "掌握 training.num_epoch 预算在数据加载后被解析为 num_rollout，以及 epoch 预算 run 默认保存最终 checkpoint",
+            "理解池采样优先级（data.sampling.priority）与独立 priority provider 的分工：两者共享 1..4 历史分层定义（pool_sampling.priority_value），前者只排序池内新提示、后者切换整个提供者"
           ],
           "level": "advanced",
           "minimal_modules": [
             "PriorityPromptProvider",
             "provider_source 接入与配置约束",
-            "epoch 预算与最终存档"
+            "epoch 预算与最终存档",
+            "池采样优先级组合"
           ],
           "order": 6,
-          "practice_task": "构造一个带 reward_priority 元数据字段的小数据集（覆盖 1-4 组、每行再带 workbench.source.candidate_id 之类的 source 标签），运行 open_instruct/test_miles_priority_provider.py 与 tests/miles/test_prompt_provider.py 并记录断言覆盖的行为；再写一份启用 prompt_provider=\"priority\"、带 source 权重的 TOML，运行 validate 观察缺 prompt_priority_field、越界/非整数组标签、缺 source 权重三类报错，并对照 docs/miles/data-and-evaluation.md 解释组定义与在线零方差过滤为何互不影响。",
+          "practice_task": "构造一个带 reward_priority 元数据字段的小数据集（覆盖 1-4 组、每行再带 workbench.source.candidate_id 之类的 source 标签），运行 open_instruct/test_miles_priority_provider.py 与 tests/miles/test_prompt_provider.py 并记录断言覆盖的行为；再写一份启用 prompt_provider=\"priority\"、带 source 权重的 TOML，运行 validate 观察缺 prompt_priority_field、越界/非整数组标签、缺 source 权重三类报错，并对照 docs/miles/data-and-evaluation.md 解释组定义与在线零方差过滤为何互不影响；最后对照 open_instruct/test_miles_pool_priority.py 了解池采样优先级（data.sampling.priority）的断言与 docs/miles/measurements/pool-priority-v7-20261113.json 的测量记录。",
           "source_files": [
             "open_instruct/miles/rollout/priority_provider.py",
             "open_instruct/miles/rollout/provider_source.py",
+            "open_instruct/miles/rollout/pool_sampling.py",
             "open_instruct/miles/configuration/config.py",
             "open_instruct/miles/execution/driver.py",
             "docs/miles/data-and-evaluation.md",
             "open_instruct/test_miles_priority_provider.py"
           ],
           "title": "历史优先级提示采样与 epoch 预算",
-          "topic": "讲解 MILES 新增的 priority 提示提供者：按元数据中的历史奖励优先级组（1-4）依序耗尽、组内可选混源加权、seed 固定的确定性洗牌与 resume 身份校验，以及 num_epoch 预算到 num_rollout 的换算与 save_final_checkpoint 最终存档。"
+          "topic": "讲解 MILES 的 priority 提示提供者：按元数据中的历史奖励优先级组（1-4）依序耗尽、组内可选混源加权、seed 固定的确定性洗牌与 resume 身份校验，以及 num_epoch 预算到 num_rollout 的换算与 save_final_checkpoint 最终存档。更新点：新增 data.sampling.priority 把同一套 1..4 历史分层引入池采样（pool_sampling.priority_value 与独立 provider 共享定义），在 uniform/exposure 策略下按组排序每个池的新提示并在回执中记录 sampling_priority_group，与 replay 互斥。"
         },
         {
           "action": "update",
@@ -1179,7 +1196,8 @@
             "理解可信注册表的安全模型",
             "掌握验证器工厂与 metadata.verifiers 的绑定",
             "理解 Math-Verify 不安全等式的探针式守卫：为何用已知错误等式探测参考、为何 _requires_legacy_verifier 只缓存判定而非解析结果、_legacy_compare 如何按等号分段回退到旧版比较",
-            "了解 complete_code 改用库内 execution_client 后的依赖与凭据模型（Beaker 秘密注入 CODE_EXECUTION_TOKEN）"
+            "了解 complete_code 改用库内 execution_client 后的依赖与凭据模型（Beaker 秘密注入 CODE_EXECUTION_TOKEN）",
+            "理解注册表加载期的 grading 策略解析：_VerifierRegistry 存储每个验证器的 GradingPolicy 与未声明契约的外部工厂集合，_IsolatedVerifier 透传 grading_* 声明"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1189,7 +1207,7 @@
             "命名裁判注册"
           ],
           "order": 7,
-          "practice_task": "在一个 JSON 注册表中登记你在 u6-l3 写的验证器（factory + config），构造携带该验证器名的样本元数据，走 rewards.py 的分发路径验证调用与超时行为；再运行 open_instruct/test_miles_math_verifier.py，找到触发 legacy 回退的等式类参考样例，解释假等式哨兵（\\boxed{1 + 2 = 8}）的探测原理与 lru_cache 只缓存布尔判定的原因；最后对照 docs/miles/dataset-verifiers.md 说明判分器依赖如今如何随 MILES 镜像分发。",
+          "practice_task": "在一个 JSON 注册表中登记你在 u6-l3 写的验证器（factory + config），构造携带该验证器名的样本元数据，走 rewards.py 的分发路径验证调用与超时行为；再运行 open_instruct/test_miles_math_verifier.py，找到触发 legacy 回退的等式类参考样例，解释假等式哨兵（\\boxed{1 + 2 = 8}）的探测原理与 lru_cache 只缓存布尔判定的原因；最后对照 docs/miles/dataset-verifiers.md 说明判分器依赖如今如何随 MILES 镜像分发，并观察 validate_registry 对未声明 grading 契约的外部工厂抛出的错误。",
           "source_files": [
             "open_instruct/miles/rewards/rewards.py",
             "open_instruct/miles/rewards/verifiers.py",
@@ -1199,7 +1217,76 @@
             "docs/miles/managed-judges.md"
           ],
           "title": "MILES 奖励体系：可信验证器注册表、数学守卫与裁判",
-          "topic": "讲解 rewards 包：rewards.py 把样本元数据映射到可信注册表中的验证器工厂（数据不能自带任意代码）、math/task 验证器的进程隔离、托管裁判服务；更新点：math_verifier 新增对 Math-Verify 0.9.0 空解算子缺陷的守卫（假等式探针 + 缓存的 legacy 比较回退），complete_code 改用库内 execution_client，判分器依赖随 MILES 镜像分发。"
+          "topic": "讲解 rewards 包：rewards.py 把样本元数据映射到可信注册表中的验证器工厂（数据不能自带任意代码）、math/task 验证器的进程隔离、托管裁判服务；更新点一：math_verifier 新增对 Math-Verify 0.9.0 空解算子缺陷的守卫（假等式探针 + 缓存的 legacy 比较回退），complete_code 改用库内 execution_client，判分器依赖随 MILES 镜像分发；更新点二：_registry 现在为每个验证器解析 grading 策略并存入 _VerifierRegistry（含未声明契约的外部工厂集合），_IsolatedVerifier 透传 grading_* 声明，最终答案模式下的输入选择与门控详见 u8-l12。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l6",
+            "u6-l3"
+          ],
+          "filename": "u8-l12-miles-grading-inputs.md",
+          "id": "u8-l12",
+          "learning_goals": [
+            "理解 reward_final_answer_only 与 reward_reasoning_mode（required/none）的语义：共享选择器只切一次思考边界，任务解析器仍负责答案包装/代码/JSON/工具调用解析",
+            "掌握 GradingPolicy 的 objective（answer/process/format/composite）× scope（response/thinking/full）× require_response 组合约束：answer 必须 response、process 需 thinking/full、token 验证器必须 full",
+            "理解消费者迁移契约：selected_input=True 直通（不再自行查找 </think>）与 async_call_parts/grading_components 复合接口（ToolRL 的 correctness=response、format=full）",
+            "理解证据身份隔离：GradingRecorder 把 grading_policy 写入组行并扩展 input_key，选择表升级 schema 2 并新增 --grading-policy，跨契约证据被拒绝"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "split_response 与 ResponseParts",
+            "GradingPolicy 与 validate_spec",
+            "_VerifierRegistry 与 validate_registry",
+            "selected_input 消费者迁移与 async_call_parts",
+            "grading 记录与选择表契约"
+          ],
+          "order": 8,
+          "practice_task": "运行 open_instruct/test_miles_grading.py 与 test_miles_grading_consumers.py 并记录覆盖点；再用 grading.split_response 构造 4 段原始输出（正常闭合、缺 </think>、闭合后重开 <think>、reasoning_mode=\"none\" 下夹带标签），打印 ResponseParts 的 gate（missing_final_answer / unfinished_reasoning / unexpected_reasoning）、response_start 与 thinking/response 文本；最后写一个带 grading 声明（objective=\"process\"、scope=\"full\"、require_response=false）的注册表条目，分别用 grading.validate_spec 与 GradingPolicy.from_spec 验证合法与非法组合（如 answer+thinking、require_response=false+response）的报错。",
+          "source_files": [
+            "open_instruct/miles/rewards/grading.py",
+            "docs/miles/grading.md",
+            "open_instruct/miles/rewards/rewards.py",
+            "open_instruct/ground_truth_utils.py",
+            "open_instruct/miles/datasets/recording.py",
+            "open_instruct/miles/datasets/record_selection.py"
+          ],
+          "title": "统一判分输入：ResponseParts、GradingPolicy 与 typed 奖励组件",
+          "topic": "讲解 MILES 新增的统一判分输入层：grading.py 的 split_response 一次性切分 thinking 与 delivered response（含 prompt 预填闭合思考、非思考模式、重开推理等门控），GradingPolicy 用 objective×scope×require_response 为每个验证器声明输入契约，rewards._VerifierRegistry 加载期解析策略并在 driver 启动前校验（外部工厂必须声明 grading 或实现 parts 协议），ground_truth_utils 消费者经 selected_input 直通，复合消费者经 async_call_parts 取得分组件输入，推理记录与选择表以 schema 2 携带 grading 契约防止新旧证据混用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l12",
+            "u8-l4"
+          ],
+          "filename": "u8-l13-nemotron-abstention-rewards.md",
+          "id": "u8-l13",
+          "learning_goals": [
+            "理解 nemo_abstention_v1 源契约：保留原始 system/user 问题、闭卷（禁止 tools）、输出结构化 question/answer 目标并校验",
+            "掌握 rubric+binding 配置：[rubrics.abstention] 挂 nvidia/qa-abstention-v1 profile（rubric SHA256 固定、lambda 固定 0.5），[judging.bindings.abstention] 复用既有 judges.general 裁判服务，绑定名需与 verifiers.json 对齐",
+            "理解打分语义：规范化 [IDK] 直接得 0.5 且绝不调用裁判；CORRECT/INCORRECT/NOT_ATTEMPTED 对应 1/0/0.5；boxed 抽取取最后一个平衡括号并回退剩余输出",
+            "理解失败策略与诊断：空回复/传输错误/不完整生成走既有 strict/zero 策略并保持 ungraded，verifier_diagnostics 区分显式弃答与裁判给出的 NOT_ATTEMPTED"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "abstention rubric 与 A/B/C 解析器",
+            "nemo_abstention_v1 源适配器",
+            "rubric/binding 注册与 NamedJudgeVerifier",
+            "失败策略与探针控制"
+          ],
+          "order": 9,
+          "practice_task": "运行 open_instruct/test_miles_abstention.py 并记录覆盖点（显式弃答不调用裁判、boxed 抽取、失败策略、数据绑定控制）；再用 abstention 的解析函数对一组裁判回复（含 A./B./C. 风格、NOT_ATTEMPTED 与畸形输出）手工验证分数，并核对 normalized [IDK] 得 0.5 的分支；最后参照 docs/miles/abstention.md 写出 [rubrics.abstention] 与 [judging.bindings.abstention] 的 TOML 片段，指出 verifier 绑定名为何要与导出的 verifiers.json 中的实际名字对齐。",
+          "source_files": [
+            "open_instruct/miles/rewards/abstention.py",
+            "docs/miles/abstention.md",
+            "open_instruct/miles/rewards/general_judge.py",
+            "open_instruct/miles/rewards/judge_registry.py",
+            "open_instruct/miles/datasets/source_preparation.py",
+            "open_instruct/test_miles_abstention.py"
+          ],
+          "title": "Abstention QA 奖励：Nemotron 数据、rubric 与裁判服务复用",
+          "topic": "讲解新增的原生 Nemotron abstention QA 奖励链路：source_preparation 的 nemo_abstention_v1 源适配器、abstention.py 从 NVIDIA-NeMo/Gym 移植的 rubric 与宽容 A/B/C 解析（1/0/0.5，[IDK] 归一化后免裁判得 0.5）、judge_registry 的 rubric/binding 声明生成 NamedJudgeVerifier 注册项，以及 general_judge 的 abstention 分支如何复用既有裁判服务并在诊断中区分显式弃答与裁判错误。"
         },
         {
           "action": "keep",
@@ -1220,7 +1307,7 @@
             "权重同步对比",
             "checkpoint 转换"
           ],
-          "order": 8,
+          "order": 10,
           "practice_task": "阅读 grpo_olmo_core_actor.py 与 docs/miles/core.md，写一页对比笔记：两条路径各自的引擎（vLLM vs SGLang）、同步方式与适用模型，并标注 open-instruct 侧需要维护的代码范围。",
           "source_files": [
             "open_instruct/grpo_olmo_core_actor.py",
@@ -1231,7 +1318,41 @@
           "topic": "对比两条 OLMo-core RL 路径：grpo_olmo_core_actor.py（grpo.py 使用的 Ray actor 与 vLLM 权重传输）与 MILES 运行时内部的 Core 适配器，以及 checkpoint 转换/导出。"
         },
         {
-          "action": "update",
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u8-l7"
+          ],
+          "filename": "u8-l14-score-centering-core-refresh.md",
+          "id": "u8-l14",
+          "learning_goals": [
+            "会用 [trainer] fp32_lm_head=true 配合 [miles] loss_type=\"score_centering\"、rollout_top_logprobs_num、score_centering_is=\"tis\"/\"mis\" 启用原生 score-centering 目标",
+            "理解 score_centering.py CPU 预检的约束族：强制 trainer.fp32_lm_head（保守资格策略而非数学要求）、要求 advantage_estimator=grpo、与 use_tis/custom_tis/use_opsm/true_on_policy_mode/投机解码/OPD 等互斥、TIS 裁剪与 MIS 上下界的取值校验",
+            "理解 run_spec 编译映射：async.off_policy_correction=\"tis\" 选择原生 score-centering TIS 而非旧 use_tis；异步训练的锚定条件扩展为 TIS、score_centering_is 或 rollout-logprob 三者之一",
+            "理解候选概率收集约束：收集候选时要求 rollout_top_logprobs_num >= rollout_top_k（对任意 loss 生效），unfiltered 采样只记录部分候选头"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "score_centering 预检",
+            "run_spec 编译映射与异步锚定",
+            "refresh 约束放宽",
+            "候选概率与 top-k 校验"
+          ],
+          "order": 11,
+          "practice_task": "运行 open_instruct/test_miles_score_centering.py 与 tests/miles/test_score_centering.py 并记录覆盖点；写一份启用 score centering 的 TOML 片段（fp32_lm_head=true、rollout_top_logprobs_num=20、score_centering_is=\"tis\"），用 `python -m open_instruct.miles plan` 查看编译产物中的对应选项；再依次制造三类非法配置——缺 fp32_lm_head、同时设 use_tis=true、rollout_top_logprobs_num 小于 rollout_top_k——分别记录 validation/constraints 的报错信息。",
+          "source_files": [
+            "open_instruct/miles/configuration/score_centering.py",
+            "open_instruct/miles/configuration/run_spec.py",
+            "open_instruct/miles/configuration/validation.py",
+            "docs/miles/core.md",
+            "open_instruct/test_miles_score_centering.py",
+            "tests/miles/test_score_centering.py"
+          ],
+          "title": "Score centering 训练目标与 Core refresh 集成",
+          "topic": "讲解 MILES 新集成的原生 score-centering 目标：loss_type=\"score_centering\" 经 score_centering.py 的 CPU 预检（FP32 head、GRPO 优势估计、与旧开关互斥、TIS/MIS 参数），run_spec 编译把 off_policy_correction=\"tis\" 映射到原生 TIS 并放宽 refresh 与异步训练的锚定约束，candidate 概率收集要求 rollout_top_logprobs_num >= rollout_top_k；docs/miles/core.md 记录了临时 FP32 资格政策与上游实现链接。"
+        },
+        {
+          "action": "keep",
           "depends_on": [
             "u8-l3"
           ],
@@ -1250,7 +1371,7 @@
             "任务判分器依赖与秘密注入",
             "运维判据"
           ],
-          "order": 9,
+          "order": 12,
           "practice_task": "用 `python -m open_instruct.miles run` 走一次提交（或 dry-run），找到本地 launches 回执目录，然后按 operations.md 的清单列出判断 run 完成所需的三个证据；再对照 docs/miles/launching.md 的「Task grader dependencies」一节，说明 runtime/miles/task-verifier-requirements.txt 与 scripts/miles/check_verifier_dependencies.py 在镜像构建期各承担什么检查，并解释为何令牌值绝不能出现在 launch.env、数据行或镜像里。",
           "source_files": [
             "open_instruct/miles/execution/launch.py",
@@ -1264,7 +1385,7 @@
           "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断；更新点：launching.md 新增任务判分器依赖一节——ReasoningGym/RDKit 等判分依赖随镜像分发并在构建期自检，代码判分只需在 launch.secrets 里配置 Beaker 秘密名注入 CODE_EXECUTION_TOKEN。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u8-l8"
           ],
@@ -1273,25 +1394,29 @@
           "learning_goals": [
             "理解后台评估的里程碑与回执机制",
             "掌握推理记录的存储结构",
-            "会用 records summarize/select 做数据分析"
+            "会用 records summarize/select 做数据分析",
+            "理解推理记录与选择表的 grading 契约隔离：组行携带 grading_policy、input_key 被扩展、选择表 schema 2 与 --grading-policy、跨契约证据被拒绝",
+            "理解评估采样对齐：in-loop 评估默认 temperature 1.0 / top-p 0.95 / 响应上限 32768，可用 miles.eval_* 覆盖"
           ],
           "level": "advanced",
           "minimal_modules": [
             "评估 Coordinator",
             "评估 runner",
-            "记录筛选"
+            "记录筛选",
+            "grading 契约与选择表 schema 2"
           ],
-          "order": 10,
-          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义。",
+          "order": 13,
+          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义；再演练 --grading-policy 在混合契约证据上的必填报错与 schema 1 表仅限 legacy 模式的行为；最后对照 docs/miles/background-evaluation.md 的「Shared in-loop policy evaluation」一节说明采样默认值与覆盖方式。",
           "source_files": [
             "open_instruct/miles/evaluation/evaluation.py",
             "open_instruct/miles/evaluation/evaluation_runner.py",
             "open_instruct/miles/datasets/record_selection.py",
+            "open_instruct/miles/datasets/recording.py",
             "docs/miles/inference-records.md",
             "docs/miles/background-evaluation.md"
           ],
           "title": "后台评估与推理记录",
-          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析。"
+          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点：GradingRecorder 把 grading 契约写入组行并扩展 input_key（schema 3 选择摘要），record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝；评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限，三节点面板分组细化）。"
         },
         {
           "action": "keep",
@@ -1312,7 +1437,7 @@
             "长序列预算",
             "拓扑与吞吐画像"
           ],
-          "order": 11,
+          "order": 14,
           "practice_task": "为一个假想的 8 卡预算设计两种拓扑（重训练 vs 重推理），按 throughput/topology 文档的指标论证选择，并指出哪种拓扑下应调整 async 缓冲区大小。",
           "source_files": [
             "docs/miles/sequence-packing.md",

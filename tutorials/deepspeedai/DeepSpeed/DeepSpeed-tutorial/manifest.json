@@ -1,13 +1,13 @@
 {
-  "head": "84481c333875abc8a47f1b0d07fdadddb8d70fd8",
+  "head": "663de9736f53e7f1e4deab75b7aa766694825b2a",
   "project": "DeepSpeed",
-  "rationale": "增量更新（84679e9d -> 84481c33，共 7 个提交，版本 0.19.10 经 0.20.0 发布 bumped 至 0.20.1）：九单元主线结构与讲义顺序不变，上周期标记 new 且现已生成的 u6-l7/u8-l7/u8-l8/u8-l9/u9-l5 本周期无相关代码变化转为 keep。本周期三条主线：一是 #8843 把「模型点名的 fp32 张量」从 buffers 扩展到参数——ZeRO-3（无参数卸载）现可同时持有多种 dtype 的分区：keep_buffers_in_fp32 更名 keep_tensors_in_fp32（include_params）并在 zero.Init 收尾时就地转换 ds_tensor 分区（量化分区保持量化），stage3 按分区 dtype 拆分子组、按累积 dtype 分平坦梯度缓冲与 IPG bucket、fp32 参数的梯度全程 fp32 归约累积，训练 dtype 取第一个非 fp32 参数；低于 ZeRO-3 或开参数卸载时 auto 告警、显式列表报错——该机制横跨 keep_in_fp32.py/zero.Init/stage3/引擎 cast 关卡，拆为新讲义 u5-l9（避免 u4-l3/u5-l2/u5-l6 过载），u4-l3（keep_in_fp32 更名与单 dtype 边界）与 u5-l2（Init 收尾钩子、按 dtype 拆分 all-reduce）做 update。二是 #8841 融合 CPU Adam 步（ZeRO-3 CPU 卸载）：DeepSpeedCPUAdam.step 新增 grad_scale（内核加载梯度时乘因子，替代整遍 mul_）与 bf16_copy 分片回调（同一内核遍历把更新写成 bf16，分片按最宽向量块对齐保证逐位一致，支持与否随 CPU 构建查询），stage3 侧 _grad_scale_for_cpu_adam 判定适用条件、_cpu_adam_step_and_copy_back 用双 pinned bf16 缓冲流水拷回、未被下一窗口覆写的梯度延迟到下个 step 前补乘——按「内核与类 API」（u5-l4）与「stage3 集成」（u5-l6）分别 update。三是 #8659 新增 deepspeed/models/ 模型族包约定与首个家族 glm_moe_dsa（TileLang 稀疏注意力：分块 indexer top-k、吸收式 MLA 前向/反向内核、replace_attention 一行替换、ZeRO-3 external parameter 注册、128 线反向内核预热、set_context_parallel_group 序列切分）——全新子系统拆为新讲义 u9-l6，u1-l2 的目录地图 update 增补该目录。此外 #9056 修复 universal 检查点恢复时 fused/capturable 组的 step 放置（place_restored_optimizer_step 在组设置恢复后统一转为参数设备上的 float32 张量，zero-1/2 与 stage3 两条加载路径接入）落在 u8-l3（update）；版本号变化更新 u1-l1；#9058 仅把 TestZero3SynchronizedEarlyStop 的设备改为 get_accelerator().current_device_name()（测试基础设施，不改变 u7-l4 所教内容）；superoffload/zenflow 对多 dtype 的机械适配在 u5-l9 统一说明，u9-l3 维持 keep；u2-l3 引擎构造阶段框架未变（cast 关卡的新逻辑由 u5-l9 覆盖并引用 engine.py）故 keep；其余讲义全部 keep。",
+  "rationale": "增量更新（84481c33 -> 663de973，共 2 个提交，version.txt 仍为 0.20.1）：九单元主线结构与讲义顺序保持不变，本周期两条主线。一是 #9059 补齐 Ulysses/FPDT 的不等分片防线：DistributedAttention 新增 opt-in validate_shards（每个 forward 在 SP 组上做一次元数据 all-gather，分别比较 Q/K/V 三者的序列长度——Q 与 K/V 可互不相同——不一致时在注意力数据交换之前于所有参与 rank 抛出带各 rank 长度明细的 ValueError；默认关闭时零额外元数据通信，且要求全组一致开启并参与每次 forward），_generate_layout_params 对不能被 SP world size 整除的序列长度直接断言失败，DistributedAttention 自此从 deepspeed.sequence 公开导出（_SeqAllToAll 保持私有）——落在 u6-l2（update）；同时 FPDT_InputConstruct 新增几何校验（S/C/P 为正、rank 在界内、全局 chunk 整除 SP size）与因果尾部 padding（补零 tokens/labels/loss_mask、position_ids 续接，要求提供 loss_mask 且 attention_mask=None；补齐标签用 0 而非 -100，因为 FPDT_LogitsLoss.backward 直接索引 labels 不认 ignore_index），配套 ulysses-offload.md 新增的 SP 全局损失归一化契约与全新 test_fpdt_inputs.py——fpdt_layer.py 是 1387 行的完整子系统（分块注意力 autograd、SequenceChunk 双缓冲主机卸载、FPDT_FFN/FPDT_LogitsLoss）却从未被讲义覆盖，本周期以此为锚拆出新讲义 u6-l8。二是 #9009 让连续 rollout 图跨 RL 轮次复用并支持显式释放：图签名改为「模块 id + 归一化设备号 + dtype + decode batch + cache 长度 + 每个参数与 buffer 的地址/设备/dtype/形状/步长」，去掉 prompt_len 与 _version（重放按捕获时固定的地址与布局读张量，优化器就地更新权重无需重捕——DeepSpeed 平坦缓冲写更新本就不碰 _version；替换参数/buffer 或同地址 transpose_() 才触发重捕），钉住 continuous_cache_capacity 后一张图服务所有放得下的 prompt 宽度（prefill 走 eager，宽度只经由 cache 长度进入签名），重建前先释放旧 static cache 与图池避免双份占用，并新增 HybridEngineRollout.shutdown() 落实 RolloutEngine.shutdown() 生命周期钩子（synchronize 后释放图与 cache、rollout 仍可用，TP>1 下不先 shutdown 直接 destroy_process_group 会在 ProcessGroupNCCL.shutdown 挂起）——落在 u7-l4（update），签名里还把未编索引的设备号归一化到当前设备。其余讲义（含 u1-l1，版本号未变；上周期 new 的 u5-l9/u9-l6 等无相关代码变化）全部 keep。",
   "units": [
     {
       "id": "u1",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [],
           "filename": "u1-l1-project-overview.md",
           "id": "u1-l1",
@@ -33,7 +33,7 @@
           "topic": "介绍 DeepSpeed 的定位：面向超大模型训练与推理的优化库。通过 README 和官方文档了解 ZeRO、3D 并行、ZeRO-Infinity 等核心创新，以及项目当前版本（0.20.1）与生态位。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l1"
           ],
@@ -449,7 +449,7 @@
           "topic": "对比 unfused_optimizer 与 fused_optimizer：如何维护 fp32 主权重、如何调用 FusedAdam 与 CPU 端变体、zero_grad/step 的包装逻辑，以及 initialize_optimizer_states 中 Adagrad 构造期初始化的设备修复。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -549,7 +549,7 @@
           "topic": "综述 ZeRO 的动机（optimizer state/gradient/parameter 三级切分）与 DeepSpeed 中 zero 包的文件布局、配置类继承结构（含本周期新增的 retain_gpu_grad_partition_until_step 字段），为后续 8 篇建立框架。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l1",
             "u3-l2"
@@ -606,7 +606,7 @@
             "按分区组的主机梯度累计器"
           ],
           "order": 4,
-          "practice_task": "写一个直接使用 DeepSpeedCPUAdam 的基准脚本：在 CPU 上对 1M 参数向量分别用 torch.optim.Adam 与 DeepSpeedCPUAdam 各跑 100 步并对比耗时；再用 bf16 参数 + fp32_optimizer_states=True 构造 DeepSpeedCPUAdam，保存/加载 state_dict 后断言 exp_avg/exp_avg_sq 仍为 torch.float（参考 tests/unit/ops/adam/test_cpu_adam.py 的断言）；再按同文件 test_cpu_adam_grad_scale_matches_scaling_in_place 与 test_cpu_adam_bf16_copy_matches_step 验证 step(grad_scale=f) 与分片式 step(bf16_copy=...)（含 1000 元素非向量块整数倍的分片）同两遍式调用 bitwise 一致、bf16 副本等于 param.to(torch.bfloat16）；最后仿照 tests/unit/v1/zero/test_zero2_gradient_safety.py 的空闲参数用例（对照 torch.optim.Adam），验证空闲参数窗口不复用上一窗口梯度。",
+          "practice_task": "写一个直接使用 DeepSpeedCPUAdam 的基准脚本：在 CPU 上对 1M 参数向量分别用 torch.optim.Adam 与 DeepSpeedCPUAdam 各跑 100 步并对比耗时；再用 bf16 参数 + fp32_optimizer_states=True 构造 DeepSpeedCPUAdam，保存/加载 state_dict 后断言 exp_avg/exp_avg_sq 仍为 torch.float（参考 tests/unit/ops/adam/test_cpu_adam.py 的断言）；再按同文件 test_cpu_adam_grad_scale_matches_scaling_in_place 与 test_cpu_adam_bf16_copy_matches_step 验证 step(grad_scale=f) 与分片式 step(bf16_copy=...)（含 1000 元素非向量块整数倍的分片）同两遍式调用 bitwise 一致、bf16 副本等于 param.to(torch.bfloat16)；最后仿照 tests/unit/v1/zero/test_zero2_gradient_safety.py 的空闲参数用例（对照 torch.optim.Adam），验证空闲参数窗口不复用上一窗口梯度。",
           "source_files": [
             "deepspeed/runtime/zero/stage_1_and_2.py",
             "deepspeed/ops/adam/cpu_adam.py",
@@ -700,7 +700,7 @@
           "topic": "解读 parameter_offload.py 与 partitioned_param_coordinator.py：module hook 如何按需 allgather 参数、预取下一层参数、ds_status 状态机、NVMe 预取去重、zero/linear.py 的 autocast 设备修复、销毁时的 FWD_MODULE_STACK 弹栈与每实例 lru_cache（#9034），以及修改收集态参数时 GatheredParameters 必须传 modifier_rank 才能持久化布局变换（HybridMegatron QKV 双向往返，#8392）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u5-l5",
             "u4-l1"
@@ -770,7 +770,7 @@
             "tests/unit/v1/nvme/test_aio.py"
           ],
           "title": "ZeRO-Infinity：NVMe 交换与异步 IO",
-          "topic": "解读 swap_tensor 包与 nvme/io_engine：参数/优化器状态在 GPU/CPU/NVMe 三级存储间的交换、异步 IO 内核（csrc/aio）与 pipelined swapper 的实现，以及 DeepNVMe 对齐/错误检查修复（完成请求结果校验、bounce buffer、staging 读取、EINTR 重试）。"
+          "topic": "解读 swap_tensor 包与 nvme/io_engine：参数/优化器状态在 GPU/CPU/NVMe 三级存储间的交换、异步 IO 内核（csrc/aio）与 pipelined swapper 的实现，以及 DeepNVME 对齐/错误检查修复（完成请求结果校验、bounce buffer、staging 读取、EINTR 重试）。"
         },
         {
           "action": "keep",
@@ -808,7 +808,7 @@
           "topic": "解读引擎 save/load_checkpoint 对 ZeRO 分片状态的处理：优化器状态/参数/调度器状态如何按 rank 保存、zero_to_fp32 如何按需重组出完整 fp32 权重，以及 fp32 masters 恢复矩阵的补全（masters-only/module-only 加载语义、stage3 从 bit16 权重重建、流水线串行加载的分片预检查）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u5-l2",
             "u5-l6",
@@ -887,7 +887,7 @@
           "topic": "解读 module_inject 包：如何按 policy 识别模型中的线性/注意力层，tp_shard 如何按 head 维度切分权重并注入并行版 Linear；按模型管理 AutoTP 训练模式（AutoTPMeta.training、TensorParallel_Layer.is_training_mode 的 per-model 语义）与冻结模型支持（frozen replicated params 的跳过与引擎侧 unfreeze 防线）。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u3-l3"
           ],
@@ -896,23 +896,30 @@
           "learning_goals": [
             "推导 Ulysses 对 attention 输入输出形状的变换",
             "解释为什么 Ulysses 能把通信量降到与 head 数相关",
-            "了解 auto_sp 自动切分判定器的输入输出"
+            "了解 auto_sp 自动切分判定器的输入输出",
+            "说明 #9059 的等分片契约与两道防线：_generate_layout_params 对不能被 SP world size 整除的序列长度在 scatter 前直接断言失败；DistributedAttention 新增 opt-in validate_shards=True——每个 forward 在 SP 组上做一次元数据 all-gather，分别比较 Q/K/V 三者的序列长度（Q 与 K/V 可互不相同），不一致时在注意力数据交换之前于所有参与 rank 同步抛出带各 rank 长度明细的 ValueError；默认关闭时零额外元数据通信，开启则要求全组一致并参与每次 forward（不一致的开关在默认路径上无法被检测），且不做任何 padding——分片对齐、padding 与掩码仍由调用方负责",
+            "了解 DistributedAttention 现已从 deepspeed.sequence 包公开导出（deepspeed/sequence/__init__.py），_SeqAllToAll 保持私有"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "DistributedAttention",
             "all_to_all 通信",
-            "auto_sp 判定器"
+            "auto_sp 判定器",
+            "validate_shards 分片长度校验与整除断言",
+            "DistributedAttention 的公开导出"
           ],
           "order": 2,
-          "practice_task": "实现一个单机 4 进程的 DistributedAttention 示例：对随机输入跑 forward，验证 Ulysses 输出与完整 attention 的输出逐元素一致（容差内）。",
+          "practice_task": "实现一个单机 4 进程的 DistributedAttention 示例：对随机输入跑 forward，验证 Ulysses 输出与完整 attention 的输出逐元素一致（容差内）；再构造 SP=2 的不等长分片（两种 rank 顺序、两种 batch 布局），开启 validate_shards 验证所有 rank 在数据交换前收到带各 rank 长度明细的 ValueError，并按 tests/unit/v1/sequence_parallelism/test_ulysses.py 的 test_default_does_not_exchange_metadata 确认默认路径不做元数据通信、test_validation_uses_sequence_group_ranks 验证校验用的是序列组而非世界组；最后按 test_sequence_scatter_rejects_indivisible_length 直接调用 _generate_layout_params 验证不可整除的序列长度被断言拒绝。",
           "source_files": [
             "deepspeed/sequence/layer.py",
+            "deepspeed/sequence/__init__.py",
             "deepspeed/sequence/auto_sp.py",
-            "deepspeed/utils/groups.py"
+            "deepspeed/utils/groups.py",
+            "docs/_tutorials/ds-sequence.md",
+            "tests/unit/v1/sequence_parallelism/test_ulysses.py"
           ],
           "title": "Ulysses 序列并行",
-          "topic": "解读 sequence/layer.py 的 DistributedAttention：all-to-all 把序列维切分转为 head 维切分，以及 auto_sp 自动判定哪些层可做序列并行。"
+          "topic": "解读 sequence/layer.py 的 DistributedAttention：all-to-all 把序列维切分转为 head 维切分、auto_sp 自动判定哪些层可做序列并行；以及 #9059 新增的等分片防线——scatter 前的整除断言与 opt-in validate_shards 元数据 all-gather 校验（在注意力数据交换前于所有参与 rank 报错，默认关闭零通信），DistributedAttention 同步从 deepspeed.sequence 公开导出。"
         },
         {
           "action": "keep",
@@ -1073,6 +1080,41 @@
           ],
           "title": "VocabTP 损失算子：词表并行 logprobs/熵/KL/JSD",
           "topic": "解读 deepspeed/sequence/vocab_parallel_ops.py 的词表并行逐 token 损失族（logprobs/entropy/forward-reverse KL）与本周期新增的广义 Jensen-Shannon 散度 vocab_parallel_jsd（#8958，含 vocab_parallel_softmax.py 的 jsd_softmax_stats/jsd_forward/jsd_backward Triton 内核与 eager 回退）：配合 AutoTP 的 vocab_parallel_lm_head，RL 与蒸馏负载无需 gather 全词表即可计算全词表目标。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u2-l4"
+          ],
+          "filename": "u6-l8-fpdt-ulysses-offload.md",
+          "id": "u6-l8",
+          "learning_goals": [
+            "解释 FPDT（Ulysses 卸载）的定位：与 Ulysses 配套把超出显存的超长序列按全局 chunk 切块、逐块做前向反向，并用主机内存双缓冲暂存 chunk，让单卡装不下的整段序列也能训练",
+            "追踪 FPDT_InputConstruct 的分块推导：全局序列长度 S、全局 chunk 大小 C（args.ds_sequence_parallel_fpdt_chunk_size）、SP size P 与 rank 的几何关系（每 GPU chunk 数、本地 chunk 大小的换算），以及 #9059 新增的几何校验（S/C/P 必须为正、rank 在 [0, P) 内、C 必须整除 P）",
+            "解读 #9059 的因果尾部 padding：序列长度不足整数个全局 chunk 时在尾部补零 tokens/labels/loss_mask、position_ids 从最后位置续接；padding 要求提供 loss_mask 且 attention_mask=None（因果注意力保证真实 token 看不到补零尾部，对齐输入行为完全不变）；补齐的标签用 0 而非 -100，因为 FPDT_LogitsLoss.backward 直接索引 labels、不认 ignore_index",
+            "说明 SP 全局损失归一化契约：FPDT_LogitsLoss 返回按 SP rank 顺序 gather 的 [sequence, batch] 损失，generate() 返回同一顺序的负载均衡 loss mask（[batch, sequence]），使用方须先在零权重位置把损失置零（避免 inf*0=NaN）再加权求和，并用 SP 全局有效权重和归一化——允许某个 rank 一个有效 token 都没有",
+            "区分 FPDT_Attention 的两条路径：cpu_offloading=False 或全局只有一个 chunk 时走 _FPDTGPUAttentionImpl_，否则走 _FPDTGPUOffloadingAttentionImpl_（SequenceChunk 双缓冲在 GPU 与 pinned 主机间搬运 chunk）；两条路径都要求 flash-attn >= 2.5，FPDT_FFN/FPDT_LogitsLoss 同样以分块 autograd Function 实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "FPDT_InputConstruct 的几何校验与尾部 padding",
+            "FPDT_LogitsLoss 与 SP 全局损失归一化",
+            "_FPDTGPUAttentionImpl_ 分块注意力 autograd",
+            "SequenceChunk 双缓冲主机卸载",
+            "ds_sequence_parallel_fpdt_* 配置族"
+          ],
+          "order": 8,
+          "practice_task": "先在 CPU 上跑通 tests/unit/v1/sequence_parallelism/test_fpdt_inputs.py 的全部构造器用例（几何错误、padding 数值、position 续接、rank 顺序与重构、可选字段与输入不可变性），再用长度 19（不足整数个全局 chunk）构造 FPDT_InputConstruct，逐张量断言尾部补零、labels 用 0+零权重、position_ids 从最后位置续接，并对照对齐输入行为不变；然后按 tests/unit/v1/sequence_parallelism/test_ulysses.py 的 test_padding_matches_unpadded_reference（SP=2、开/关 offloading，覆盖长度 19 的多 chunk 路径与长度 3 的单 chunk 回退路径）验证 padding 后的输出、loss 反向与 input/QKV/head 梯度都与未 padding 参考一致；最后按 docs/_tutorials/ulysses-offload.md 的示例手写 SP 全局损失归一化（先置零再加权、除以全局权重和），核对手算 3.5 的结果。",
+          "source_files": [
+            "deepspeed/sequence/fpdt_layer.py",
+            "deepspeed/sequence/layer.py",
+            "docs/_tutorials/ulysses-offload.md",
+            "tests/unit/v1/sequence_parallelism/test_fpdt_inputs.py",
+            "tests/unit/v1/sequence_parallelism/test_ulysses.py"
+          ],
+          "title": "FPDT 与 Ulysses 卸载：超长序列分块训练",
+          "topic": "解读 deepspeed/sequence/fpdt_layer.py 的 FPDT（Ulysses 卸载）子系统：FPDT_InputConstruct 把全局序列按 chunk 负载均衡地划分到各 SP rank 并在 #9059 后带几何校验与因果尾部 padding（补零 tokens/labels/loss_mask、position_ids 续接，要求 loss_mask 且 attention_mask=None），_FPDTGPUAttentionImpl_/_FPDTGPUOffloadingAttentionImpl_ 分块注意力的前向反向，SequenceChunk 双缓冲把 chunk 在 GPU 与主机间搬运，FPDT_LogitsLoss 按分块算损失并 gather 到 SP 顺序，配套 ulysses-offload.md 的 SP 全局损失归一化契约（零权重先置零避免 inf*0=NaN）。"
         }
       ],
       "level": "intermediate",
@@ -1169,7 +1211,7 @@
           "topic": "解读 ragged 子系统：变长 batch 的统一表示、blocked allocator 显存池与 KV cache 的生命周期管理，这是 v2 高吞吐推理的关键。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u7-l2",
             "u2-l4"
@@ -1183,7 +1225,8 @@
             "解读静态图 decode 前向传预构建 4-D 加性掩码（static_causal_attn）的原因：Transformers 从 2-D mask 构建 SDPA 掩码时的 host 端检查会同步 stream、破坏 CUDA graph 捕获；DeepSpeedStaticCache 新增 get_query_offset 以支持 Transformers 5.20 的 cache query offsets",
             "解读非贪婪采样快路径：_token_selector(sampling) 统一 graph decode、continuous batching 与 continuous batching+graph 三条路径的 token 选择——temperature<=0 走 argmax，否则按 generate() 的顺序在 float32 logits 上应用 Temperature/TopK/TopP warper 后 torch.multinomial；采样发生在 host 端、图之外，因此图捕获不再要求 greedy；continuous batching 移除 temperature>0 的拒绝，repetition penalty 调整到 warper 之前（generate() 的顺序），_hf_sampling_kwargs 统一主 generate() 调用与无 cache-class prefill 的采样参数",
             "解读本周期 ZeRO-3 rollout 的 EOS 早停同步（#8390）：GlobalWorkRemaining 在 optimizer.dp_process_group（参数 gather 实际使用的组）上 all_reduce(MAX) 汇聚局部工作标志，_GlobalEosStoppingCriteria 让全组一致停在最晚出现的 rank 本地 EOS、每个序列保留首个 EOS 之后的 pad；ZeRO-3 路径显式传 synced_gpus=False（Transformers 依默认 world size 开启它会对未分组的世界做 all-reduce，把进入 rollout 的 DP 子组与未进入的 rank 相互卡死）；CUDA/HIP 图捕获 rollout 绕过 generate() 不受此改影响",
-            "解读本周期 AutoTP 下的 KV cache 本地定尺寸（#9008）：DeepSpeedStaticCache 不再从全局 module.config 预分配（TP>1 时每 rank 只持部分 KV head，4 vs 2 的拷贝失败或静默广播），三条 decode 路径全部改为惰性——plain graph 去掉 batch/device/dtype 预设参数、由既有 lazy setup 按 prefill 张量定尺寸；continuous eager 用 _continuous_cache_layer 按 prefill 张量初始化各层、容量取 slot 数（lazy_initialization 新增可选 max_batch_size）；continuous graph 在 warmup 前先在当前 stream 跑一次 decode forward 完成各层初始化（避免张量落在 warmup side stream）；cache_memory_bytes 改为 decode 后经 memory_bytes() 统计，未初始化层记 0"
+            "解读本周期 AutoTP 下的 KV cache 本地定尺寸（#9008）：DeepSpeedStaticCache 不再从全局 module.config 预分配（TP>1 时每 rank 只持部分 KV head，4 vs 2 的拷贝失败或静默广播），三条 decode 路径全部改为惰性——plain graph 去掉 batch/device/dtype 预设参数、由既有 lazy setup 按 prefill 张量定尺寸；continuous eager 用 _continuous_cache_layer 按 prefill 张量初始化各层、容量取 slot 数（lazy_initialization 新增可选 max_batch_size）；continuous graph 在 warmup 前先在当前 stream 跑一次 decode forward 完成各层初始化（避免张量落在 warmup side stream）；cache_memory_bytes 改为 decode 后经 memory_bytes() 统计，未初始化层记 0",
+            "解读本周期连续 rollout 图的跨轮复用与显式释放（#9009）：图签名改为「模块 id + 归一化设备号（未编索引时取当前设备）+ dtype + decode batch + cache 长度 + 每个参数与 buffer 的地址/设备/dtype/形状/步长」，去掉 prompt_len 与 _version——重放按捕获时固定的地址与布局读张量，优化器就地更新权重无需重捕（DeepSpeed 平坦缓冲写更新本就不碰 param._version），而替换参数/buffer（重注册的 rotary inv_freq、量化 scale）或同地址布局变化（如 transpose_()）触发重捕；prefill 走 eager，prompt 宽度只经由 cache 长度进入签名，钉住 continuous_cache_capacity 后一张图服务所有放得下的宽度；重建前先释放旧 static cache 与图池（避免新旧状态双份占用）；新增 HybridEngineRollout.shutdown() 落实 RolloutEngine.shutdown() 生命周期钩子（base.py 默认 no-op）——synchronize 后释放图与静态 cache、rollout 仍可用并在下次图调用重捕，TP>1 下图持有捕获的集合通信，不先 shutdown 直接 destroy_process_group() 会在 ProcessGroupNCCL.shutdown 挂起"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1194,13 +1237,15 @@
             "_token_selector 与采样 warper 链",
             "DeepSpeedStaticCache 的 query offset",
             "ZeRO-3 EOS 早停的组内同步",
-            "KV cache 惰性定尺寸与 memory_bytes"
+            "KV cache 惰性定尺寸与 memory_bytes",
+            "连续图复用签名与 shutdown 释放"
           ],
           "order": 4,
-          "practice_task": "用 tests/unit/hybrid_engine 与 tests/unit/runtime/rollout/test_hybrid_engine_rollout.py 的用例作为模板，跑通一个 train->generate->train 的混合引擎循环，记录每次切换的训练/推理耗时分解；对比 greedy 与非贪婪（temperature=0.7, top_k=5, top_p=0.8）采样路径的输出与耗时，在日志中确认不支持图捕获的后端会打印回退警告；参考 test_hybrid_engine_rollout.py 的 token selector 分布测试与 TestZero3SynchronizedEarlyStop（两 rank 在第 2/5 步到达 EOS 时各执行 5 次 forward 且本地响应长度保留）、TestZero3SubgroupGeneration（部分 rank 不进 rollout 时的子组活性），验证早停同步与 synced_gpus=False 的必要性；再在 AutoTP TP=2 下跑 continuous 路径（tests/unit/v1/test_hybrid_engine_rollout_v1.py 的 static_graph_uses_prefill_kv_shape / continuous_generation_uses_local_kv_shape），打印各层 KV cache 的本地 head 数，验证按本 rank prefill 形状定尺寸；最后参考 test_hybrid_engine_rollout_v1.py 的 test_decode_sampling_matches_hf_generate 验证三条路径的采样分布与 HF generate() 一致。",
+          "practice_task": "用 tests/unit/hybrid_engine 与 tests/unit/runtime/rollout/test_hybrid_engine_rollout.py 的用例作为模板，跑通一个 train->generate->train 的混合引擎循环，记录每次切换的训练/推理耗时分解；对比 greedy 与非贪婪（temperature=0.7, top_k=5, top_p=0.8）采样路径的输出与耗时，在日志中确认不支持图捕获的后端会打印回退警告；参考 test_hybrid_engine_rollout.py 的 token selector 分布测试与 TestZero3SynchronizedEarlyStop（两 rank 在第 2/5 步到达 EOS 时各执行 5 次 forward 且本地响应长度保留）、TestZero3SubgroupGeneration（部分 rank 不进 rollout 时的子组活性），验证早停同步与 synced_gpus=False 的必要性；再在 AutoTP TP=2 下跑 continuous 路径（tests/unit/v1/test_hybrid_engine_rollout_v1.py 的 static_graph_uses_prefill_kv_shape / continuous_generation_uses_local_kv_shape），打印各层 KV cache 的本地 head 数，验证按本 rank prefill 形状定尺寸；接着参考同文件本周期新增的 test_continuous_graph_state_survives_in_place_weight_updates 与 test_continuous_graph_recaptures_only_when_tensor_layout_changes（就地权重更新、同地址 transpose_()、参数替换、buffer 重注册与容量变化），验证跨 rollout 轮次图被复用、仅地址/布局变化才重捕，并调用 rollout.shutdown() 确认图与静态 cache 被释放且下一次图 rollout 能重新捕获（对照 docs/code-docs/source/inference-engine.rst 的 Graph capture 小节理解签名语义）；最后参考 test_hybrid_engine_rollout_v1.py 的 test_decode_sampling_matches_hf_generate 验证三条路径的采样分布与 HF generate() 一致。",
           "source_files": [
             "deepspeed/runtime/hybrid_engine.py",
             "deepspeed/runtime/rollout/hybrid_engine_rollout.py",
+            "deepspeed/runtime/rollout/base.py",
             "deepspeed/runtime/rollout/continuous_batching.py",
             "deepspeed/runtime/hybrid_engine_graph.py",
             "deepspeed/utils/static_cache.py",
@@ -1208,7 +1253,7 @@
             "docs/code-docs/source/inference-engine.rst"
           ],
           "title": "Hybrid Engine：训练与推理一体化",
-          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；图捕获按加速器显式 opt-in（KLXPU 已于 #9042 验证并继承 CUDA 的 opt-in）、静态图 decode 用预构建 4-D 加性掩码、非贪婪采样经 _token_selector 统一进入快路径，以及本周期 ZeRO-3 rollout 的 EOS 早停按参数 gather 组同步（关闭 synced_gpus 的世界级 all-reduce，#8390）与 AutoTP 下 KV cache 从本 rank prefill 张量惰性定尺寸（#9008）。"
+          "topic": "解读 hybrid_engine.py 与 rollout 包：同一份 ZeRO-3 训练状态如何在训练/推理模式间切换权重布局，支持 RLHF 类 train-rollout 循环；图捕获按加速器显式 opt-in（KLXPU 已于 #9042 验证并继承 CUDA 的 opt-in）、静态图 decode 用预构建 4-D 加性掩码、非贪婪采样经 _token_selector 统一进入快路径、ZeRO-3 rollout 的 EOS 早停按参数 gather 组同步（#8390）与 AutoTP 下 KV cache 从本 rank prefill 张量惰性定尺寸（#9008），以及本周期 #9009 的连续图跨轮复用——签名改为参数/buffer 的地址与布局（地址移动、形状/步长变化或 buffer 重注册才重捕）、钉住容量后一张图服务多种 prompt 宽度、重建前先释放旧状态，并新增 shutdown() 生命周期钩子（TP 下不先释放图会让 destroy_process_group 挂起）。"
         }
       ],
       "level": "advanced",
@@ -1276,7 +1321,7 @@
           "topic": "解读 checkpoint_engine 包：torch/fast/decoupled 三种引擎的可插拔抽象，以及引擎如何决定状态实际写到哪（本地盘、共享存储、异步服务）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u8-l2",
             "u5-l8"
@@ -1689,7 +1734,7 @@
           "topic": "解读 DeepSpeed 的权重量化栈：deepspeed/linear/quantization.py 的 QuantizedParameter/QuantizedLinear（权重以量化形式驻留 GPU、前向时反量化）、deepspeed/ops/fp_quantizer 的 FP_Quantize（fp8/fp12/fp6/fp4 分组量化）与 csrc/fp_quantizer CUDA 内核、fp8_gemm_triton 的反量化 GEMM；一系列修复（q_bits=12 尾数位 4->7、Python/C++ 双侧 group_size 校验、空张量早退、.to() 保持子类、E4M3 位布局修正、共享内存不足自动降 num_stages）让这条路径首次值得系统讲解。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u9-l2",
             "u5-l5",
