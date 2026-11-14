@@ -68759,7 +68759,7 @@
           "action": "update",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"503525cf-044e-465d-8b79-8ab1a5211570\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b9442648-67f2-43f1-9888-a7bea82eff86\",\"total_co"
         },
         "u8-l1": {
           "status": "keep",
@@ -68843,7 +68843,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "663de9736f53e7f1e4deab75b7aa766694825b2a",
-      "last_run_at": "2026-11-14T11:02:44Z",
+      "last_run_at": "2026-11-14T13:45:14Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "triple-mu/fast-ulysses": {
@@ -69050,7 +69050,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e5479f79-e656-4d42-9212-98afbfa0960d\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"bce37fd0-8f23-41b3-8c7d-45a4d4633050\",\"total_co"
         },
         "u9-l2": {
           "status": "pending",
@@ -69079,7 +69079,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/triple-mu/fast-ulysses/fast-ulysses-tutorial",
       "last_head": "ad1a4a06a42d8129a278f010b1d67a6e206d38e6",
-      "last_run_at": "2026-11-14T11:02:44Z",
+      "last_run_at": "2026-11-14T13:45:14Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "KellerJordan/Muon": {
@@ -69394,7 +69394,7 @@
           "action": "update",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"2c774a07-f1cf-4fb0-a0b8-4ed89290582c\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"c58d4326-7a73-4cfd-b3c2-485e018f0360\",\"total_co"
         },
         "u8-l5": {
           "status": "pending",
@@ -69478,7 +69478,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/open-instruct/open-instruct-tutorial",
       "last_head": "8cd7c9eb4e4d997cd482e9f88f5249d081728d9a",
-      "last_run_at": "2026-11-14T11:02:44Z",
+      "last_run_at": "2026-11-14T13:45:14Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/OLMo-core": {
@@ -69543,7 +69543,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"793db6e9-d0fa-4585-a551-519b258f688d\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"b0696bc6-a72d-49a8-ab04-5263a1c42c74\",\"total_co"
         },
         "u3-l3": {
           "status": "pending",
@@ -69692,7 +69692,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/OLMo-core/OLMo-core-tutorial",
       "last_head": "075a7892d8a004242b085bf3c71b996389fd863c",
-      "last_run_at": "2026-11-14T11:02:44Z",
+      "last_run_at": "2026-11-14T13:45:14Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/olmocr": {},
