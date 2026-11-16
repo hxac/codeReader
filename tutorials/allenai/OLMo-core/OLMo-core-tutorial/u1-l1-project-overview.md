@@ -41,13 +41,13 @@
 
 | 文件 | 作用 |
 |------|------|
-| [README.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md) | 项目门面：定位、安装、官方脚本、推理、开发指南，本讲的主教材 |
-| [AGENTS.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/AGENTS.md) | 给 AI 编码助手（和人类贡献者）看的项目导览，是理解架构的「官方剧透」 |
-| [CHANGELOG.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/CHANGELOG.md) | 版本变更日志，用来看项目「最近在忙什么」 |
-| [pyproject.toml](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml) | 包名、依赖、可选依赖（extras）的权威定义 |
-| [src/olmo_core/version.py](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/version.py) | 当前版本号的定义处 |
-| [src/olmo_core/nn/attention/flash_attn_api.py](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/nn/attention/flash_attn_api.py) | 「可选依赖」机制的典型样本：注意力后端对 flash-attn 的按需导入 |
-| [src/scripts/official/README.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/scripts/official/README.md) | 官方训练脚本的使用说明 |
+| [README.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md) | 项目门面：定位、安装、官方脚本、推理、开发指南，本讲的主教材 |
+| [AGENTS.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/AGENTS.md) | 给 AI 编码助手（和人类贡献者）看的项目导览，是理解架构的「官方剧透」 |
+| [CHANGELOG.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md) | 版本变更日志，用来看项目「最近在忙什么」 |
+| [pyproject.toml](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml) | 包名、依赖、可选依赖（extras）的权威定义 |
+| [src/olmo_core/version.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/version.py) | 当前版本号的定义处 |
+| [src/olmo_core/nn/attention/flash_attn_api.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/attention/flash_attn_api.py) | 「可选依赖」机制的典型样本：注意力后端对 flash-attn 的按需导入 |
+| [src/scripts/official/README.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/README.md) | 官方训练脚本的使用说明 |
 
 ## 4. 核心概念与源码讲解
 
@@ -109,23 +109,23 @@
 
 **① 标题与副标题——定位的最短表述**
 
-[README.md:1-7](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L1-L7) 是 README 的标题区：项目名 `Olmo-core`，副标题 `Building blocks for OLMo modeling and training`。 badges 里还能看到 API 文档（readthedocs）、示例入口、PyPI 包、论文和 Discord 社区的链接——这个项目有完整的文档与社区配套。
+[README.md:1-7](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L1-L7) 是 README 的标题区：项目名 `Olmo-core`，副标题 `Building blocks for OLMo modeling and training`。 badges 里还能看到 API 文档（readthedocs）、示例入口、PyPI 包、论文和 Discord 社区的链接——这个项目有完整的文档与社区配套。
 
 **② 推理生态——模型消费侧的三条路**
 
-[README.md:101-151](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L101-L151) 的 Inference 一节展示了用 HF transformers（`AutoModelForCausalLM.from_pretrained("allenai/Olmo-3-1125-32B")`）和 vLLM 加载 OLMo checkpoint 推理的完整代码。注意这里的模型来自 Hugging Face Hub 而不是本仓库——再次印证「权重与训练库分离」。
+[README.md:101-151](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L101-L151) 的 Inference 一节展示了用 HF transformers（`AutoModelForCausalLM.from_pretrained("allenai/Olmo-3-1125-32B")`）和 vLLM 加载 OLMo checkpoint 推理的完整代码。注意这里的模型来自 Hugging Face Hub 而不是本仓库——再次印证「权重与训练库分离」。
 
 **③ 评测生态——独立仓库**
 
-[README.md:161-163](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L161-L163) 一句话说清评测工具在 OLMo Eval 与 olmes 两个独立仓库。OLMo-core 内部也有训练期的评测模块（`src/olmo_core/eval/`，第 8 单元精读），但「跑 benchmark 出榜」用的是外部工具。
+[README.md:161-163](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L161-L163) 一句话说清评测工具在 OLMo Eval 与 olmes 两个独立仓库。OLMo-core 内部也有训练期的评测模块（`src/olmo_core/eval/`，第 8 单元精读），但「跑 benchmark 出榜」用的是外部工具。
 
 **④ 官方架构导览——AGENTS.md 的 overview**
 
-[AGENTS.md:5-7](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/AGENTS.md#L5-L7) 用三句话概括了库的范围：*「Olmo-core is AI2's training library for the Open Language Model (OLMo) series. It provides modular components for transformer architectures, distributed training, data loading, and evaluation.」* 这四块（模型结构、分布式训练、数据加载、评测）正是学习手册第 3–8 单元的骨架。
+[AGENTS.md:5-7](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/AGENTS.md#L5-L7) 用三句话概括了库的范围：*「Olmo-core is AI2's training library for the Open Language Model (OLMo) series. It provides modular components for transformer architectures, distributed training, data loading, and evaluation.」* 这四块（模型结构、分布式训练、数据加载、评测）正是学习手册第 3–8 单元的骨架。
 
 **⑤ 版本与包名**
 
-包在 PyPI 上的名字是 `ai2-olmo-core`（见 [pyproject.toml:6](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml#L6) 的 `name = "ai2-olmo-core"`），注意与 GitHub 仓库名 `OLMo-core` 略有差异。当前版本定义为 [src/olmo_core/version.py:1-5](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/version.py#L1-L5)，主版本是 3.0（`_MAJOR = "3"`）。
+包在 PyPI 上的名字是 `ai2-olmo-core`（见 [pyproject.toml:6](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml#L6) 的 `name = "ai2-olmo-core"`），注意与 GitHub 仓库名 `OLMo-core` 略有差异。当前版本定义为 [src/olmo_core/version.py:1-5](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/version.py#L1-L5)，主版本是 3.0（`_MAJOR = "3"`）。
 
 #### 4.1.4 代码实践
 
@@ -133,11 +133,11 @@
 
 1. **实践目标**：不看任何二手资料，只从仓库文件里回答「这个项目叫什么、当前版本是多少、归谁维护」。
 2. **操作步骤**：
-   - 打开 [pyproject.toml](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml) 开头，记下 `name`、`description` 字段；
-   - 打开 [src/olmo_core/version.py](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/version.py)，记下 `VERSION`；
-   - 打开 [CHANGELOG.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/CHANGELOG.md)，找到最近的正式版本发布（如 `[v3.0.0]`，见 [CHANGELOG.md:41](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/CHANGELOG.md#L41)）和 `Unreleased` 段（[CHANGELOG.md:8-27](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/CHANGELOG.md#L8-L27)）。
-3. **需要观察的现象**：CHANGELOG 的 `Unreleased` 段记录了大量近期新增能力（例如 MaxText checkpoint 互转、Molmo2 多模态数据管线等）。
-4. **预期结果**：你能回答「包名 `ai2-olmo-core`、版本 3.0.x、由 AI2 的 OLMo 团队维护、当前正在活跃开发多模态与 checkpoint 互转方向」。
+   - 打开 [pyproject.toml](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml) 开头，记下 `name`、`description` 字段；
+   - 打开 [src/olmo_core/version.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/version.py)，记下 `VERSION`；
+   - 打开 [CHANGELOG.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md)，找到最近的正式版本发布（如 `[v3.0.0]`，见 [CHANGELOG.md:48](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L48)）和 `Unreleased` 段（[CHANGELOG.md:8-44](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L8-L44)）。
+3. **需要观察的现象**：CHANGELOG 的 `Unreleased` 段记录了大量近期新增能力（例如 MaxText checkpoint 互转、Molmo2 多模态数据管线，以及最近一批参数化方面的工作：`InitMethod.nanochat` 谱条件初始化、`MuPConfig` muP 学习率、`CompletedPConfig` 参数化）。
+4. **预期结果**：你能回答「包名 `ai2-olmo-core`、版本 3.0.x、由 AI2 的 OLMo 团队维护、当前正在活跃开发多模态、checkpoint 互转与参数化/超参迁移（muP/CompletedP）方向」。
 5. 如果你在本地已安装该包，可以用 `pip show ai2-olmo-core` 交叉验证版本号；**待本地验证**。
 
 #### 4.1.5 小练习与答案
@@ -148,11 +148,11 @@
 
 **练习 2**：如果你只想用 OLMo-3 模型做推理，需要安装 OLMo-core 吗？
 
-> **答案**：不需要。README 的 Inference 一节（[README.md:101-151](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L101-L151)）显示只需 `transformers` 或 `vllm` 即可加载 `allenai/Olmo-3-1125-32B` 推理。OLMo-core 只有在你想用自己的方式做生成实验（beta 的 chat demo）或训练/微调时才需要。
+> **答案**：不需要。README 的 Inference 一节（[README.md:101-151](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L101-L151)）显示只需 `transformers` 或 `vllm` 即可加载 `allenai/Olmo-3-1125-32B` 推理。OLMo-core 只有在你想用自己的方式做生成实验（beta 的 chat demo）或训练/微调时才需要。
 
 **练习 3**：项目在哪里声明「当前活跃开发的方向」？举一个证据。
 
-> **答案**：CHANGELOG.md 的 `Unreleased` 段（[CHANGELOG.md:8-27](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/CHANGELOG.md#L8-L27)）。例如其中记录了新增 `olmo_core.nn.maxtext`（与 MaxText 互转 checkpoint）和 `olmo_core.data.multimodal`（Molmo2 多模态数据核心），说明近期方向是多模态与生态互转。
+> **答案**：CHANGELOG.md 的 `Unreleased` 段（[CHANGELOG.md:8-44](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L8-L44)）。例如其中记录了新增 `olmo_core.nn.maxtext`（与 MaxText 互转 checkpoint）、`olmo_core.data.multimodal`（Molmo2 多模态数据核心），以及最近一批参数化工作——`InitMethod.nanochat` 谱条件初始化（[CHANGELOG.md:28](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L28)）、muP 学习率（[CHANGELOG.md:29-30](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L29-L30)）和 CompletedP 参数化（[CHANGELOG.md:31-33](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/CHANGELOG.md#L31-L33)），说明近期方向是多模态、生态互转与超参迁移参数化（muP/CompletedP，进阶内容见第 10 单元 u10-l7/u10-l8）。
 
 ### 4.2 OLMo-core 提供的四类能力
 
@@ -187,27 +187,27 @@
 
 **① 组件库：安装即得**
 
-[README.md:32-47](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L32-L47) 给出两种安装方式：开发装 `pip install -e .[all]`（从源码、带全部可选依赖）或直接 `pip install ai2-olmo-core`。装好后 `import olmo_core` 拿到的就是组件库本体。
+[README.md:32-47](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L32-L47) 给出两种安装方式：开发装 `pip install -e .[all]`（从源码、带全部可选依赖）或直接 `pip install ai2-olmo-core`。装好后 `import olmo_core` 拿到的就是组件库本体。
 
 **② 官方训练脚本：一条命令复现 32B 训练**
 
-[README.md:65-99](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L65-L99) 是官方脚本的完整用法说明，三个要点：
+[README.md:65-99](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L65-L99) 是官方脚本的完整用法说明，三个要点：
 
-- 用 `torchrun` 启动，例如 [README.md:74-76](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L74-L76) 的 `torchrun --nproc-per-node=8 src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py --save-folder=...`；
-- 绝大多数配置能用**点号路径**从命令行覆盖，例如 [README.md:81-84](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L81-L84) 用 `--train_module.optim.lr=6e-3` 改学习率（原理在第 2 单元讲）；
-- 目前有 OLMo-2 与 OLMo-3 两个家族（[README.md:94-99](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L94-L99) 的表格）；仓库里实际还有 `OLMo-hybrid` 目录（用 `ls src/scripts/official/` 可验证）。
+- 用 `torchrun` 启动，例如 [README.md:74-76](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L74-L76) 的 `torchrun --nproc-per-node=8 src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py --save-folder=...`；
+- 绝大多数配置能用**点号路径**从命令行覆盖，例如 [README.md:81-84](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L81-L84) 用 `--train_module.optim.lr=6e-3` 改学习率（原理在第 2 单元讲）；
+- 目前有 OLMo-2 与 OLMo-3 两个家族（[README.md:94-99](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L94-L99) 的表格）；仓库里实际还有 `OLMo-hybrid` 目录（用 `ls src/scripts/official/` 可验证）。
 
-配套的 [src/scripts/official/README.md:1-8](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/scripts/official/README.md#L1-L8) 补充了两个极实用的小技巧：给脚本加 `--help` 看必填参数，加 `--dry-run` 在不启动训练的情况下打印最终生效的完整配置。**这在没有 GPU 的机器上也能跑，是你后面每一讲的好帮手。**
+配套的 [src/scripts/official/README.md:1-8](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/README.md#L1-L8) 补充了两个极实用的小技巧：给脚本加 `--help` 看必填参数，加 `--dry-run` 在不启动训练的情况下打印最终生效的完整配置。**这在没有 GPU 的机器上也能跑，是你后面每一讲的好帮手。**
 
 **③ Docker 镜像与 Beaker 启动**
 
-[README.md:57-63](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L57-L63) 说明了官方 Docker 镜像的两个重要约定：镜像包含**全部依赖但不包含 Olmo-core 本身**（源码在运行时 clone 进容器，方便代码频繁变更）；镜像在自家 H100 集群上定期测试，换硬件可能需要自己改 Dockerfile。
+[README.md:57-63](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L57-L63) 说明了官方 Docker 镜像的两个重要约定：镜像包含**全部依赖但不包含 Olmo-core 本身**（源码在运行时 clone 进容器，方便代码频繁变更）；镜像在自家 H100 集群上定期测试，换硬件可能需要自己改 Dockerfile。
 
-启动机制在 [AGENTS.md:145-151](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/AGENTS.md#L145-L151)：`launch` 命令会生成一个 Gantry 配方，四步走——起容器 → clone 指定 commit 的仓库 → `pip install -e .` → 用 torchrun 跑训练命令。细节留到第 9 单元。
+启动机制在 [AGENTS.md:145-151](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/AGENTS.md#L145-L151)：`launch` 命令会生成一个 Gantry 配方，四步走——起容器 → clone 指定 commit 的仓库 → `pip install -e .` → 用 torchrun 跑训练命令。细节留到第 9 单元。
 
 **④ 推理与生态集成**
 
-- 自带生成（beta）：[README.md:153-159](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L153-L159) 的 `python -m olmo_core.generate.chat <checkpoint-url>` 可以直接跟一个 OLMo checkpoint 聊天；
+- 自带生成（beta）：[README.md:153-159](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L153-L159) 的 `python -m olmo_core.generate.chat <checkpoint-url>` 可以直接跟一个 OLMo checkpoint 聊天；
 - HF 权重互转：`src/examples/huggingface/` 下有双向转换脚本（`convert_checkpoint_to_hf.py` 等，第 10 单元精读）。
 
 #### 4.2.4 代码实践
@@ -218,7 +218,7 @@
 2. **操作步骤**：
    - 能力①（组件库）：`ls src/olmo_core/`，记下你看到的子包名（应有 `nn`、`data`、`optim`、`train`、`distributed`、`eval`、`generate` 等）；
    - 能力②（官方脚本）：`ls src/scripts/official/`，再挑一个脚本文件打开，只看文件开头的 docstring 与 import，不看正文；
-   - 能力③（镜像）：打开 [src/Dockerfile](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/Dockerfile) 看前 30 行，确认它是两阶段构建；
+   - 能力③（镜像）：打开 [src/Dockerfile](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/Dockerfile) 看前 30 行，确认它是两阶段构建；
    - 能力④（推理集成）：在 README 里找到 chat demo 命令和 HF 互转脚本所在的 examples 目录。
 3. **需要观察的现象**：每类能力都真实存在且入口明确；官方脚本 import 的几乎全是 `olmo_core.*` 里的 Config 类。
 4. **预期结果**：得到一张「能力 → 入口文件」对照表（形如：组件库→`src/olmo_core/`、官方脚本→`src/scripts/official/OLMo3/…`、镜像→`src/Dockerfile`、推理→`olmo_core.generate.chat`）。
@@ -228,11 +228,11 @@
 
 **练习 1**：官方训练脚本为什么推荐用 `--dry-run` 先跑一遍？
 
-> **答案**：`--dry-run` 会打印合并命令行覆盖之后的**最终完整配置**但不真正启动训练（见 [src/scripts/official/README.md:1-8](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/scripts/official/README.md#L1-L8)）。这样可以在花 GPU 时间之前检查配置是否正确，也让我们这些学习者能零成本研究一份完整训练配方长什么样。
+> **答案**：`--dry-run` 会打印合并命令行覆盖之后的**最终完整配置**但不真正启动训练（见 [src/scripts/official/README.md:1-8](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/README.md#L1-L8)）。这样可以在花 GPU 时间之前检查配置是否正确，也让我们这些学习者能零成本研究一份完整训练配方长什么样。
 
 **练习 2**：官方 Docker 镜像里为什么不预装 Olmo-core 包本身？
 
-> **答案**：[README.md:60](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L60) 说明这是为了适应频繁的代码变更——镜像只锁依赖，源码在任务启动时按指定 commit clone 并 `pip install -e .`。这样改代码不需要重打镜像。
+> **答案**：[README.md:60](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L60) 说明这是为了适应频繁的代码变更——镜像只锁依赖，源码在任务启动时按指定 commit clone 并 `pip install -e .`。这样改代码不需要重打镜像。
 
 **练习 3**：`--train_module.optim.lr=6e-3` 这种命令行覆盖体现了组件库的什么设计？
 
@@ -242,18 +242,18 @@
 
 #### 4.3.1 概念说明
 
-**四大区域**。仓库的 `src/` 下按职责分成四块（[README.md:165-174](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L165-L174) 的 Development 一节点名了前两块）：
+**四大区域**。仓库的 `src/` 下按职责分成四块（[README.md:165-174](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L165-L174) 的 Development 一节点名了前两块）：
 
 | 区域 | 职责 | 你什么时候会去 |
 |------|------|----------------|
 | `src/olmo_core/` | 库本体：所有可 import 的组件 | 几乎每一讲 |
 | `src/test/` | 测试，目录结构与库一一镜像 | 想确认某组件行为时（测试是最好的用法示例） |
 | `src/scripts/` | 训练/工具脚本：`official/`（官方配方）、`train/`（内部模板）等 | 第 9 单元 |
-| `src/examples/` | 自包含小示例：`llm/`、`moe/`、`huggingface/` 等 | 第 4 讲跑第一个例子 |
+| `src/examples/` | 自包含小示例：`llm/`、`moe/`、`huggingface/`、`mup/`、`completedp/` 等 | 第 4 讲跑第一个例子 |
 
 `src/olmo_core/` 内部的子包按功能划分：`nn/`（模型结构）、`data/`（数据）、`optim/`（优化器）、`train/`（训练循环）、`distributed/`（并行与 checkpoint）、`eval/`（评测）、`generate/`（生成）、`launch/`（集群启动）、`kernels/`（自定义 CUDA 内核）、`float8/`（低精度训练）——这张「内景图」第 3 讲会详细展开。
 
-**可选依赖**。OLMo-core 的核心只要求 PyTorch，重度 GPU 功能按需挂载可选依赖（[README.md:49-55](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md#L49-L55)）：
+**可选依赖**。OLMo-core 的核心只要求 PyTorch，重度 GPU 功能按需挂载可选依赖（[README.md:49-55](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md#L49-L55)）：
 
 | 可选依赖 | 解锁的功能 | 对应源码位置（证据） |
 |----------|------------|----------------------|
@@ -275,25 +275,25 @@ import 某个可选库
     └─ 失败 → 模块置为 None，功能自动降级/禁用，其余部分照常工作
 ```
 
-好处是：装一个轻量版 OLMo-core 就能读代码、跑 CPU 测试、写配置；只有真正要训练大模型时才需要装齐 GPU 依赖。这也是为什么 `pip install -e .[all]` 里 `[all]` 会显著拉长安装时间——它把 `dev`、`beaker`、`fa4`、`fla`、`torchao`、`wandb` 等 extras 全部拉进来（见 [pyproject.toml:36-91](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml#L36-L91)）。
+好处是：装一个轻量版 OLMo-core 就能读代码、跑 CPU 测试、写配置；只有真正要训练大模型时才需要装齐 GPU 依赖。这也是为什么 `pip install -e .[all]` 里 `[all]` 会显著拉长安装时间——它把 `dev`、`beaker`、`fa4`、`fla`、`torchao`、`wandb` 等 extras 全部拉进来（见 [pyproject.toml:36-91](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml#L36-L91)）。
 
 #### 4.3.3 源码精读
 
 **① 可选导入的标准写法**
 
-[src/olmo_core/nn/attention/flash_attn_api.py:9-32](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/nn/attention/flash_attn_api.py#L9-L32) 连续用四个 `try/except ImportError` 分别尝试导入 flash-attn 2、flash-attn 3（还有两种模块路径的回退）、flash-attn 4 和 ring-flash-attn，全部失败就置 `None`。这就是 4.3.2 流程图的真实代码。
+[src/olmo_core/nn/attention/flash_attn_api.py:9-32](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/attention/flash_attn_api.py#L9-L32) 连续用四个 `try/except ImportError` 分别尝试导入 flash-attn 2、flash-attn 3（还有两种模块路径的回退）、flash-attn 4 和 ring-flash-attn，全部失败就置 `None`。这就是 4.3.2 流程图的真实代码。
 
 **② 能力探测函数**
 
-紧随其后的 [flash_attn_api.py:37-60](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/nn/attention/flash_attn_api.py#L37-L60) 定义了 `has_flash_attn_2()`、`has_flash_attn_3()`、`has_flash_attn_4()`：不仅检查「装没装」，还检查 GPU 架构是否匹配（例如 flash-attn 3 只认 H100/H800，flash-attn 4 认 Blackwell）。运行时靠这些函数决定选哪个后端——注意力后端的可插拔机制第 3 单元精读。
+紧随其后的 [flash_attn_api.py:37-60](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/attention/flash_attn_api.py#L37-L60) 定义了 `has_flash_attn_2()`、`has_flash_attn_3()`、`has_flash_attn_4()`：不仅检查「装没装」，还检查 GPU 架构是否匹配（例如 flash-attn 3 只认 H100/H800，flash-attn 4 认 Blackwell）。运行时靠这些函数决定选哪个后端——注意力后端的可插拔机制第 3 单元精读。
 
 **③ extras 的权威定义**
 
-[pyproject.toml:36-91](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml#L36-L91) 定义了全部 extras。注意两点：`dev` 里是 pytest/black/ruff/mypy 等开发工具；`all`（[pyproject.toml:91](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/pyproject.toml#L91)）是其余 extras 的合集。README 提到的 grouped_gemm、ring-flash-attn、TransformerEngine 等不在 extras 里，需要按 README 指引自行安装（grouped_gemm 甚至可能要从源码编译）。
+[pyproject.toml:36-91](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml#L36-L91) 定义了全部 extras。注意两点：`dev` 里是 pytest/black/ruff/mypy 等开发工具；`all`（[pyproject.toml:91](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml#L91)）是其余 extras 的合集。README 提到的 grouped_gemm、ring-flash-attn、TransformerEngine 等不在 extras 里，需要按 README 指引自行安装（grouped_gemm 甚至可能要从源码编译）。
 
 **④ 测试镜像源码结构**
 
-[AGENTS.md:155-160](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/AGENTS.md#L155-L160) 描述了测试约定：`src/test/` 镜像源码结构、测试函数命名 `test_*`、GPU 测试用 `@pytest.mark.gpu` 标记且无 GPU 时自动跳过。所以 `pytest -v src/` 在笔记本上也能跑——大部分重型测试会安静地 skip。
+[AGENTS.md:155-160](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/AGENTS.md#L155-L160) 描述了测试约定：`src/test/` 镜像源码结构、测试函数命名 `test_*`、GPU 测试用 `@pytest.mark.gpu` 标记且无 GPU 时自动跳过。所以 `pytest -v src/` 在笔记本上也能跑——大部分重型测试会安静地 skip。
 
 #### 4.3.4 代码实践
 
@@ -336,9 +336,9 @@ import 某个可选库
 
 这是贯穿本讲全部内容的一个小任务，产出一份 Markdown 笔记（写到你自己任意的笔记位置即可），分三部分：
 
-1. **四类能力清单**：通读 [README.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/README.md)，为「组件库、官方训练脚本、Docker 镜像、推理集成」各写一行说明，并附上一个你亲手找到的仓库入口（文件或命令），形如 4.2.4 的对照表。
+1. **四类能力清单**：通读 [README.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/README.md)，为「组件库、官方训练脚本、Docker 镜像、推理集成」各写一行说明，并附上一个你亲手找到的仓库入口（文件或命令），形如 4.2.4 的对照表。
 2. **生态位小图**：用你自己的话画一张 OLMo 生态图（权重 / 训练库 / 评测 / 推理框架），标出 OLMo-core 的位置。可以参考 4.1.2，但建议合上讲义默画。
-3. **190M 训练组件猜想**（本实践的核心，留到第 4 讲验证）：仓库里真实存在一个 190M 规模的预置模型配置——`TransformerConfig.olmo2_190M` 工厂方法（[src/olmo_core/nn/transformer/config.py:648](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/olmo_core/nn/transformer/config.py#L648)）。请根据本讲对四类能力的理解，猜想：**要用 OLMo-core 从零训练一个 190M 的模型，最少需要哪几个组件配置？** 每个组件写一句「它负责什么」。
+3. **190M 训练组件猜想**（本实践的核心，留到第 4 讲验证）：仓库里真实存在一个 190M 规模的预置模型配置——`TransformerConfig.olmo2_190M` 工厂方法（[src/olmo_core/nn/transformer/config.py:658](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L658)）。请根据本讲对四类能力的理解，猜想：**要用 OLMo-core 从零训练一个 190M 的模型，最少需要哪几个组件配置？** 每个组件写一句「它负责什么」。
 
    参考猜想方向（先自己写，再对照）：一次完整实验大致需要「模型配置 + 数据配置 + 数据加载器配置 + 优化器（含学习率调度）配置 + 训练模块配置 + 训练器（含回调）配置」。这些名词现在看不懂没关系——第 4 讲精读 `src/examples/llm/train.py` 时，你会逐个对号入座，检验并修正今天的猜想。
 
@@ -355,6 +355,6 @@ import 某个可选库
 ## 7. 下一步学习建议
 
 - **下一讲（u1-l2）**：环境搭建——从源码 `pip install -e '.[all]'`、用 pytest 跑测试（GPU 测试会自动跳过）、跑 `make style-check` 等代码检查。有了环境，后续所有实践才能动手。
-- **顺路看一眼**：[src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/src/examples/llm/train.py)（第 4 讲的精读对象，先扫一眼有个印象即可，看不懂很正常）。
+- **顺路看一眼**：[src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py)（第 4 讲的精读对象，先扫一眼有个印象即可，看不懂很正常）。
 - **暂时不用深入**：`src/olmo_core/nn/`、`train/`、`data/` 的内部实现——第 3 单元起才逐个精读。现在记住「内景图」的子包名字就够了。
-- **配合阅读**：[AGENTS.md](https://github.com/allenai/OLMo-core/blob/2289b819b8f709e37e3e042ebb019f411fb6b742/AGENTS.md) 的 Architecture 一节是官方的架构摘要，本手册后续每一单元都会展开它的某一小节。
+- **配合阅读**：[AGENTS.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/AGENTS.md) 的 Architecture 一节是官方的架构摘要，本手册后续每一单元都会展开它的某一小节。

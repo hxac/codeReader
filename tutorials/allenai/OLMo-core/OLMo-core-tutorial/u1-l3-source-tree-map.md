@@ -28,6 +28,8 @@
 | `src/olmo_core/train/config.py` | `TrainerConfig`（训练类配置）定义处 |
 | `src/olmo_core/data/numpy_dataset.py` | `NumpyDatasetConfig`（数据类配置）定义处 |
 | `src/olmo_core/train/__init__.py` | `train` 子包的「门面」：模块文档、公开 API 再导出、训练环境准备函数 |
+| `src/olmo_core/nn/transformer/mup.py` 与 `src/olmo_core/optim/mup.py` | muP 功能「模型侧 + 优化侧」成对分布的示例（4.2.3） |
+| `src/olmo_core/nn/transformer/completedp.py` 与 `src/olmo_core/optim/completedp.py` | CompletedP 功能的同款成对分布示例（4.2.3） |
 | `src/test/train/trainer_test.py` | 测试镜像结构的最小示例 |
 | `src/test/nn/moe/top16_native_test.py` | GPU 测试的跳过机制示例 |
 | `src/examples/llm/train.py` | 通过它的 import 语句验证「按子包导入」的使用方式 |
@@ -46,7 +48,7 @@ src/
 ├── olmo_core/            # ① 库本体：所有可复用的"积木"
 ├── test/                 # ② 单元测试：与 olmo_core 一一镜像
 ├── scripts/              # ③ 训练/工具脚本：official/（官方复现）、train/（内部模板）、beaker/、data/ 等
-├── examples/             # ④ 可运行示例：llm/、moe/、huggingface/、ngpt/、olmo_ddp/ 等
+├── examples/             # ④ 可运行示例：llm/、moe/、huggingface/、ngpt/、olmo_ddp/、mup/、completedp/ 等
 └── integration_tests/    # ⑤ 集成测试：端到端跑小模型（test_train_small_model.py）
 ```
 
@@ -72,9 +74,9 @@ src/
 
 #### 4.1.3 源码精读
 
-先看第 3 步：OLMo-core 的根入口非常「轻」。[src/olmo_core/__init__.py:L7-L9](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/__init__.py#L7-L9) 只是在导入时解析一次 mxfp8 的默认 scale 模式环境变量；[src/olmo_core/__init__.py:L61](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/__init__.py#L61) 调用了 `_default_triton_cache_dir()`，这个函数（[src/olmo_core/__init__.py:L17-L58](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/__init__.py#L17-L58)）为每个本地 rank 分配独立的 Triton 编译缓存目录，避免多进程同时编译内核时互相踩踏缓存。
+先看第 3 步：OLMo-core 的根入口非常「轻」。[src/olmo_core/__init__.py:L7-L9](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/__init__.py#L7-L9) 只是在导入时解析一次 mxfp8 的默认 scale 模式环境变量；[src/olmo_core/__init__.py:L61](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/__init__.py#L61) 调用了 `_default_triton_cache_dir()`，这个函数（[src/olmo_core/__init__.py:L17-L58](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/__init__.py#L17-L58)）为每个本地 rank 分配独立的 Triton 编译缓存目录，避免多进程同时编译内核时互相踩踏缓存。
 
-**这个文件里没有任何模型类、训练类。** 它传递了一个重要信号：OLMo-core 是「按子包使用」的库——用户写 `from olmo_core.train import TrainerConfig`，而不是 `from olmo_core import TrainerConfig`。这一点可以拿官方示例验证，[src/examples/llm/train.py:L18-L35](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L18-L35) 中的 import 全部形如 `from olmo_core.data import ...`、`from olmo_core.nn.transformer import TransformerConfig`、`from olmo_core.train import ...`。
+**这个文件里没有任何模型类、训练类。** 它传递了一个重要信号：OLMo-core 是「按子包使用」的库——用户写 `from olmo_core.train import TrainerConfig`，而不是 `from olmo_core import TrainerConfig`。这一点可以拿官方示例验证，[src/examples/llm/train.py:L18-L35](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L18-L35) 中的 import 全部形如 `from olmo_core.data import ...`、`from olmo_core.nn.transformer import TransformerConfig`、`from olmo_core.train import ...`。
 
 #### 4.1.4 代码实践
 
@@ -126,7 +128,7 @@ src/
 | `data/` | **数据**：数据集与加载器 | `numpy_dataset.py`、`data_loader.py`、`collator.py`、`tokenizer.py`、`composable/`（新数据 API）、`mixes/`（预置配方）、`multimodal/` |
 | `train/` | **训练**：训练循环与扩展 | `trainer.py`、`config.py`、`common.py`（Duration 等枚举）、`callbacks/`、`train_module/`、`checkpoint.py` |
 | `distributed/` | **分布式**：并行与分布式 checkpoint | `parallel/`（`data_parallel.py`、`tensor_parallel.py`、`pipeline_parallel.py`、`context_parallel.py`、`expert_parallel.py`）、`checkpoint/`、`utils.py`、`nn.py` |
-| `optim/` | **优化器** | `adamw.py`、`lion.py`、`muon.py`、`scheduler.py`（学习率调度）、`skip_step_optimizer.py` |
+| `optim/` | **优化器** | `adamw.py`、`lion.py`、`muon.py`、`scheduler.py`（学习率调度）、`skip_step_optimizer.py`、`mup.py`/`completedp.py`（muP / CompletedP 学习率与超参缩放，u10-l7/u10-l8） |
 | `eval/` | **评测**：困惑度等 | `evaluator.py`、`lm_evaluator.py`、`metrics.py`、`task_groups.py` |
 | `generate/` | **生成**：自回归推理 | `generation_module/`、`sampling.py`、`chat.py` |
 | `launch/` | **部署**：Beaker 集群启动 | `beaker.py`、`beaker_presets.py` |
@@ -144,13 +146,13 @@ src/
 多卡多机（FSDP/TP/PP、分布式存取）   → distributed/
 ```
 
-再配一条**从属规则**：子包内部继续按「名词分目录、动词分文件」细分。例如 `nn/transformer/` 下，`model.py` 是整体、`block.py` 是积木块、`config.py` 是配置、`init.py` 是初始化。也就是说，`config.py` 这个文件名几乎会出现在**每个**子包里——它是该子包「Config 门类」的定义处，这正是 u1-l1 埋下的「一切皆 Config」伏笔在目录结构上的投影。
+再配一条**从属规则**：子包内部继续按「名词分目录、动词分文件」细分。例如 `nn/transformer/` 下，`model.py` 是整体、`block.py` 是积木块、`config.py` 是配置、`init.py` 是初始化，`mup.py` / `completedp.py` 则是参数化方案（本轮新增）。也就是说，`config.py` 这个文件名几乎会出现在**每个**子包里——它是该子包「Config 门类」的定义处，这正是 u1-l1 埋下的「一切皆 Config」伏笔在目录结构上的投影。
 
 #### 4.2.3 源码精读
 
-所有 Config 门类的共同祖先是 [src/olmo_core/config.py:L56-L71](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/config.py#L56-L71) 定义的 `Config` 基类，它的 docstring 明确要求：子类必须仍用 `@dataclass` 装饰、字段只能用可序列化的简单类型或嵌套 Config。
+所有 Config 门类的共同祖先是 [src/olmo_core/config.py:L56-L71](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/config.py#L56-L71) 定义的 `Config` 基类，它的 docstring 明确要求：子类必须仍用 `@dataclass` 装饰、字段只能用可序列化的简单类型或嵌套 Config。
 
-模型这条线还有一层中间基类：[src/olmo_core/nn/config.py:L10-L20](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/nn/config.py#L10-L20) 定义了 `ModuleConfig`（L10）与 `ModelConfig`（L20），后者是 `TransformerConfig` 的直接父类。于是可以画出三条「Config 谱系」：
+模型这条线还有一层中间基类：[src/olmo_core/nn/config.py:L10-L20](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/config.py#L10-L20) 定义了 `ModuleConfig`（L10）与 `ModelConfig`（L20），后者是 `TransformerConfig` 的直接父类。于是可以画出三条「Config 谱系」：
 
 ```text
 模型：  Config → ModuleConfig → ModelConfig → TransformerConfig   (nn/transformer/config.py)
@@ -159,6 +161,8 @@ src/
 ```
 
 「模型、数据、训练」三大类 Config 的谱系都终止于 `config.py` 这一个根——这就是「一张地图读懂全库设计」的含义。
+
+这张地图还能帮你定位**横跨多个子包的功能**。以本轮提交（`704625ad9`，引入 NanoChat 初始化与 muP / CompletedP）新增的 muP 为例：分析参数形状与角色的函数在模型侧的 [src/olmo_core/nn/transformer/mup.py:L123](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/mup.py#L123)（`named_param_shapes`）与 [src/olmo_core/nn/transformer/mup.py:L203](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/mup.py#L203)（`named_matrix_roles`），而按学习率乘数切分参数组的配置在优化侧的 [src/olmo_core/optim/mup.py:L39](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/mup.py#L39)（`MuPConfig`）；同一批的 CompletedP 也成对出现——[src/olmo_core/nn/transformer/completedp.py:L37](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/completedp.py#L37) 的 `CompletedPConfig`（模型结构缩放）搭配 [src/olmo_core/optim/completedp.py:L32](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/completedp.py#L32) 的 `CompletedPOptimConfig`（优化器超参缩放），配套示例则在 `src/examples/mup/` 与 `src/examples/completedp/`。遇到这类功能，先问「它属于模型侧还是优化侧」，再到对应子包按同名模块找——本讲不需要理解它们做什么，只要求你能在地图上找到它们。
 
 #### 4.2.4 代码实践
 
@@ -208,7 +212,7 @@ src/
 
 #### 4.3.2 核心流程
 
-以 `train` 子包为例，它的 docstring 给出了训练脚本的**标准骨架**（[src/olmo_core/train/__init__.py:L23-L35](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L23-L35)）：
+以 `train` 子包为例，它的 docstring 给出了训练脚本的**标准骨架**（[src/olmo_core/train/__init__.py:L23-L35](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L23-L35)）：
 
 ```python
 if __name__ == "__main__":
@@ -230,11 +234,11 @@ if __name__ == "__main__":
 
 #### 4.3.3 源码精读
 
-- [src/olmo_core/train/__init__.py:L1-L41](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L1-L41)：模块 docstring，概述异步 checkpoint、任意并行策略、异步指标收集、回调系统等特性——相当于这个子包的「产品说明书」。
-- [src/olmo_core/train/__init__.py:L43-L64](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L43-L64)：从 `..distributed.utils`、`.checkpoint`、`.common`、`.config`、`.trainer` 等内部模块把 `Trainer`、`TrainerConfig`、`Checkpointer`、`Duration`、`LoadStrategy` 等符号汇集到门面。注意 `from ..distributed.utils import ...`——子包之间也会互相引用（train 依赖 distributed）。
-- [src/olmo_core/train/__init__.py:L66-L79](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L66-L79)：`__all__` 明确列出 12 个公开名字，这就是这个子包对外的全部「官方接口」。
-- [src/olmo_core/train/__init__.py:L85-L148](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L85-L148)：`prepare_training_environment()`——设置多进程 spawn 模式、初始化分布式进程组、配置日志、初始化随机种子。docstring 特别提示它应在 `if __name__ == "__main__":` 块的最开头调用。
-- [src/olmo_core/train/__init__.py:L151-L156](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L151-L156)：`teardown_training_environment()`——销毁进程组，训练收尾。
+- [src/olmo_core/train/__init__.py:L1-L41](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L1-L41)：模块 docstring，概述异步 checkpoint、任意并行策略、异步指标收集、回调系统等特性——相当于这个子包的「产品说明书」。
+- [src/olmo_core/train/__init__.py:L43-L64](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L43-L64)：从 `..distributed.utils`、`.checkpoint`、`.common`、`.config`、`.trainer` 等内部模块把 `Trainer`、`TrainerConfig`、`Checkpointer`、`Duration`、`LoadStrategy` 等符号汇集到门面。注意 `from ..distributed.utils import ...`——子包之间也会互相引用（train 依赖 distributed）。
+- [src/olmo_core/train/__init__.py:L66-L79](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L66-L79)：`__all__` 明确列出 12 个公开名字，这就是这个子包对外的全部「官方接口」。
+- [src/olmo_core/train/__init__.py:L85-L148](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L85-L148)：`prepare_training_environment()`——设置多进程 spawn 模式、初始化分布式进程组、配置日志、初始化随机种子。docstring 特别提示它应在 `if __name__ == "__main__":` 块的最开头调用。
+- [src/olmo_core/train/__init__.py:L151-L156](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L151-L156)：`teardown_training_environment()`——销毁进程组，训练收尾。
 
 读门面是「低成本了解一个子包」的最佳入口：先读 docstring 知道它能干什么，再看 `__all__` 知道它暴露什么，最后顺着 import 语句跳进内部文件深读。
 
@@ -256,7 +260,7 @@ if __name__ == "__main__":
 
 <details><summary>参考答案</summary>
 
-从 [src/olmo_core/train/__init__.py:L55-L62](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L55-L62) 可见它来自 `.common`，即 `src/olmo_core/train/common.py`。也可用 `python -c "from olmo_core.train import Duration; print(Duration.__module__)"` 验证。
+从 [src/olmo_core/train/__init__.py:L55-L62](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L55-L62) 可见它来自 `.common`，即 `src/olmo_core/train/common.py`。也可用 `python -c "from olmo_core.train import Duration; print(Duration.__module__)"` 验证。
 
 </details>
 
@@ -286,9 +290,13 @@ if __name__ == "__main__":
 | `olmo_core/data/numpy_dataset.py` | `test/data/numpy_dataset_test.py` |
 | `olmo_core/nn/transformer/block.py` | `test/nn/transformer/block_test.py` |
 | `olmo_core/nn/transformer/{model,config,init}.py` | `test/nn/transformer/{model,config,init}_test.py` |
+| `olmo_core/nn/transformer/mup.py` | `test/nn/transformer/mup_test.py` |
+| `olmo_core/optim/completedp.py` | `test/optim/completedp_test.py` |
 | `olmo_core/train/trainer.py` | `test/train/trainer_test.py` |
 
 注意镜像**不追求严格一一对应**：`test/nn/transformer/` 里多了一个源码中没有同名文件的 `ac_rng_test.py`（专测 RNG 状态保持）；`test/train/` 下也没有 `config_test.py`（`TrainerConfig` 的行为由 `trainer_test.py` 等间接覆盖，该文件当前只保留了一个纯函数测试）。规则是「默认镜像，按测试需要增删」。
+
+表中最后两行成对文件是这条规则的「活证据」：本轮引入 muP / CompletedP 的提交同时新增了 `nn/transformer/mup.py` ↔ `test/nn/transformer/mup_test.py`、`optim/completedp.py` ↔ `test/optim/completedp_test.py`（以及 `optim/mup.py` ↔ `test/optim/mup_test.py`、`nn/transformer/completedp.py` ↔ `test/nn/transformer/completedp_test.py`）——新功能落地时，测试文件会按镜像规则自动跟着落位。
 
 #### 4.4.2 核心流程
 
@@ -308,9 +316,9 @@ if __name__ == "__main__":
 
 #### 4.4.3 源码精读
 
-- [src/test/train/trainer_test.py:L1-L12](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/test/train/trainer_test.py#L1-L12)：一个完整的最小测试文件，只有 12 行——导入被测函数 `from olmo_core.train.trainer import _metric_value_to_tensor`，然后断言超大 Python 整数转张量后不丢失精度。它展示了镜像规则下最朴素的形态：测 `trainer.py` 里的一个具体函数。
-- [src/test/nn/transformer/block_test.py:L78-L91](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/test/nn/transformer/block_test.py#L78-L91)：`parametrize` 约定的典范——同一个测试函数 `test_tensor_parallel_transformer_block` 叠了三层 `@pytest.mark.parametrize`（注意力后端 × 注意力参数 × block 类别），一份代码覆盖十几组组合。
-- [src/test/nn/moe/top16_native_test.py:L6-L12](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/test/nn/moe/top16_native_test.py#L6-L12)：GPU 跳过机制的典范——L6 用 `pytest.importorskip("olmo_core.ops.moe_top16")` 应对可选 CUDA 扩展缺失，L9 打 `@pytest.mark.gpu` 标记，L11-L12 在函数体内 `pytest.skip("CUDA required")`。三层防线共同保证无 GPU 环境下静默跳过而非报错。
+- [src/test/train/trainer_test.py:L1-L12](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/train/trainer_test.py#L1-L12)：一个完整的最小测试文件，只有 12 行——导入被测函数 `from olmo_core.train.trainer import _metric_value_to_tensor`，然后断言超大 Python 整数转张量后不丢失精度。它展示了镜像规则下最朴素的形态：测 `trainer.py` 里的一个具体函数。
+- [src/test/nn/transformer/block_test.py:L78-L91](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/nn/transformer/block_test.py#L78-L91)：`parametrize` 约定的典范——同一个测试函数 `test_tensor_parallel_transformer_block` 叠了三层 `@pytest.mark.parametrize`（注意力后端 × 注意力参数 × block 类别），一份代码覆盖十几组组合。
+- [src/test/nn/moe/top16_native_test.py:L6-L12](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/nn/moe/top16_native_test.py#L6-L12)：GPU 跳过机制的典范——L6 用 `pytest.importorskip("olmo_core.ops.moe_top16")` 应对可选 CUDA 扩展缺失，L9 打 `@pytest.mark.gpu` 标记，L11-L12 在函数体内 `pytest.skip("CUDA required")`。三层防线共同保证无 GPU 环境下静默跳过而非报错。
 
 #### 4.4.4 代码实践
 
@@ -357,15 +365,15 @@ if __name__ == "__main__":
 2. 对每个类，打开文件核对：`class` 语句上一行通常是 `@dataclass` 装饰器；再向上翻看它的父类。
 3. 用 4.3.4 的 `__module__` 方法交叉验证（`from olmo_core.nn.transformer import TransformerConfig` 等）。
 
-**参考答案**（以当前 HEAD `075a7892d` 为准）：
+**参考答案**（以当前 HEAD `704625ad9` 为准）：
 
 | 类 | 定义位置 | 基类 |
 | --- | --- | --- |
-| `TransformerConfig` | [src/olmo_core/nn/transformer/config.py:L335-L336](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/nn/transformer/config.py#L335-L336)（`@dataclass` 在 L335，`class` 在 L336） | `ModelConfig` |
-| `TrainerConfig` | [src/olmo_core/train/config.py:L26](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/config.py#L26) | `Config` |
-| `NumpyDatasetConfig` | [src/olmo_core/data/numpy_dataset.py:L2610-L2611](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/data/numpy_dataset.py#L2610-L2611)（`@dataclass(kw_only=True)` 在 L2610，`class` 在 L2611） | `Config, ABC`（抽象基类） |
+| `TransformerConfig` | [src/olmo_core/nn/transformer/config.py:L336-L337](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L336-L337)（`@dataclass` 在 L336，`class` 在 L337） | `ModelConfig` |
+| `TrainerConfig` | [src/olmo_core/train/config.py:L26](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/config.py#L26) | `Config` |
+| `NumpyDatasetConfig` | [src/olmo_core/data/numpy_dataset.py:L2610-L2611](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/data/numpy_dataset.py#L2610-L2611)（`@dataclass(kw_only=True)` 在 L2610，`class` 在 L2611） | `Config, ABC`（抽象基类） |
 
-**延伸观察**：三个类分别属于「模型 / 训练 / 数据」三个世界，但谱系最终都汇聚到 [src/olmo_core/config.py:L56](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/config.py#L56) 的 `Config`——这就是下一单元要展开的「一切皆 Config」设计。另外注意 `numpy_dataset.py` 有 2600 多行、`NumpyDatasetConfig` 定义在文件**末尾**（先实现各个具体数据集类、再抽象出公共配置），而 `train/config.py` 的 `TrainerConfig` 在文件**开头**——同一项目里文件内部组织也各有风格，读源码时要灵活。
+**延伸观察**：三个类分别属于「模型 / 训练 / 数据」三个世界，但谱系最终都汇聚到 [src/olmo_core/config.py:L56](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/config.py#L56) 的 `Config`——这就是下一单元要展开的「一切皆 Config」设计。另外注意 `numpy_dataset.py` 有 2600 多行、`NumpyDatasetConfig` 定义在文件**末尾**（先实现各个具体数据集类、再抽象出公共配置），而 `train/config.py` 的 `TrainerConfig` 在文件**开头**——同一项目里文件内部组织也各有风格，读源码时要灵活。最后再看一眼 `TransformerConfig`：本轮提交给它新增了一个可选字段 `completedp`（[src/olmo_core/nn/transformer/config.py:L372](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L372)，配合文件顶部 [L32](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L32) 的新 import）——这正是 u3-l2 与 u10-l8 的伏笔，现在你只需要知道它在地图上的位置。
 
 ## 6. 本讲小结
 
@@ -374,9 +382,10 @@ if __name__ == "__main__":
 - 四类问题的定位口诀：模型 → `nn/`，数据 → `data/`，训练 → `train/`，分布式 → `distributed/`；每个子包内几乎都有自己的 `config.py`，「一切皆 Config」体现在目录结构上。
 - `src/test` 按「目录镜像 + `foo.py` → `foo_test.py` 改名」组织，默认一一对应但允许增删；测试约定为 `test_*` 函数、`parametrize` 优先、GPU 测试靠标记 + `pytest.skip` + `importorskip` 三层机制自动跳过。
 - 三大 Config 的定义位置：`TransformerConfig`（`nn/transformer/config.py`）、`TrainerConfig`（`train/config.py`）、`NumpyDatasetConfig`（`data/numpy_dataset.py`），谱系都汇聚到 `config.py` 的 `Config` 基类。
+- 一个功能可以横跨多个子包：muP / CompletedP 同时落在 `nn/transformer/`（模型侧）与 `optim/`（优化侧），示例在 `examples/mup/`、`examples/completedp/`——先分清「模型侧还是优化侧」，再按同名模块定位。
 
 ## 7. 下一步学习建议
 
-- 下一讲（u1-l4）将精读 [src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py)，你会看到本讲地图上的 `nn/`、`data/`、`optim/`、`train/` 四个子包如何被一个脚本组装成完整训练实验——请先自己通读一遍该文件开头的 import 块。
+- 下一讲（u1-l4）将精读 [src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py)，你会看到本讲地图上的 `nn/`、`data/`、`optim/`、`train/` 四个子包如何被一个脚本组装成完整训练实验——请先自己通读一遍该文件开头的 import 块。
 - 推荐随手翻阅两个「门面 docstring 写得很好」的文件加深对子包边界的认识：`src/olmo_core/train/__init__.py`（本讲已读）和 `src/olmo_core/data/composable/__init__.py`（新一代数据 API 的说明书，u4-l2 主角）。
 - 带着一个问题预习：`TrainerConfig.build()` 返回的 `Trainer` 在 `trainer.py` 里是如何驱动 `train_module` 和 `data_loader` 的？这是单元六的核心问题。

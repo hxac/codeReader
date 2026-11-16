@@ -1,7 +1,7 @@
 {
-  "head": "8cd7c9eb4e4d997cd482e9f88f5249d081728d9a",
+  "head": "28c1816664491493242d453c2c7280ee56e6c20a",
   "project": "open-instruct",
-  "rationale": "本轮增量（bae4209→8cd7c9eb）共五个提交，全部落在 MILES 子系统：其一，统一判分输入（#2250）新增 rewards/grading.py 与 docs/miles/grading.md，用 ResponseParts 一次性切分 thinking 与 delivered response，以 objective×scope×require_response 声明每个验证器的输入契约，rewards 注册表加载与 driver 启动都会校验，推理记录与选择表升级到 schema 2——这是本轮最大的新机制，单独新增 u8-l12，并波及 u6-l3（VerifierFunction 新增 selected_input）、u8-l6（注册表策略解析）、u8-l9（记录契约）；其二，原生 Nemotron abstention QA 奖励（#2252）新增 abstention.py 与 abstention.md，作为「数据源→rubric→裁判绑定→失败策略」的端到端案例新增 u8-l13，并更新 u8-l4（源准备新增 nemo_abstention_v1 适配器）；其三，score-centering TIS 进入 Core refresh 训练（#2229）新增 configuration/score_centering.py 预检与 core.md 章节，单独新增 u8-l14；其四，示例按模型家族重组（#2255，examples 细分为 tiny/ 与 small/，评估采样默认对齐 temperature 1.0、top-p 0.95、32768 响应上限），u8-l1/u8-l2/u8-l9 相应更新；其五，池采样可与优先级组序组合（#2256，data.sampling.priority 要求 uniform/exposure 且与 replay 互斥），更新 u8-l5 与 u8-l11。SFT/DPO/RM/OLMo-core/工程化各篇所引文件无变化，全部保持 keep。",
+  "rationale": "本轮增量（8cd7c9eb→28c181666）只有两个提交，影响面清晰。其一，#2258 把此前仅存在于内部分支的 MoE（OLMoE3/A4B，KDA/MoE v2）checkpoint 转 HF 工具以 scripts/train/debug/convert_moe_checkpoint_to_hf.py 入库，并默认向 generation_config.json 写入 chat EOS 列表 [100265, 100257]——缺 <|im_end|> 会让 vLLM OpenAI 服务无法停止回合、工具调用重复到 token 预算；脚本同时处理 OLMoDDP 融合优化器 .main 权重布局并记录 KDA 严格校验失效等使用告诫，这是 u7 权重转换主题下独立的实践点，故新增 u7-l4（依赖讲权重转换的 u7-l3）。其二，#2260 把 MILES SciCode 参考数据默认指向 SCICODE_H5PY_HOST_PATH Beaker 秘密：evaluation.parse 自动注入默认秘密（three-node 示例删去占位路径），validate_scicode_reference_path 以计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝未解析的占位路径，evaluation_runner 在评估器内部解析秘密、校验文件存在且不回显秘密值，同时保持冻结任务身份以兼容 resume，失败回执保留 InputError 的可行动诊断——主体落在 u8-l9（其上一轮 grading 契约更新尚未落盘，继续 update 并扩充），边界改动小幅波及 u8-l2（launch_warnings 新增警告分支）、u8-l3（execute 预检）、u8-l8（launch 预检与第二个按名注入秘密的实例）。上一轮已由 worker 重写完毕且本轮源码无变化的 u6-l3、u6-l6、u8-l1、u8-l4 翻转为 keep；上一轮尚未落盘的 u8-l5、u8-l6、u8-l11 的 update 与 u8-l12～l14 的 new 继续保留；SFT/DPO/RM/GRPO/OLMo-core 其余各篇与工程化单元无变化，全部保持原动作。",
   "units": [
     {
       "id": "u1",
@@ -698,7 +698,7 @@
           "topic": "精读核心数学：compute_grpo_loss 的 DAPO 裁剪与 CISPO 变体、rho 修正、组内标准化优势（compute_group_advantages）与序列打包。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -787,7 +787,7 @@
           "topic": "讲解训练与推理引擎的一致性机制：perform_weight_sync 的暂停-广播-唤醒流程、IPC 权重广播、grpo_fast_resource_plan.py 的资源规划与 grpo_callbacks.py 的回调集。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u6-l2"
           ],
@@ -975,6 +975,34 @@
           ],
           "title": "混合注意力模型与 HSDP 分片",
           "topic": "讲解 olmo_core_hybrid.py 的混合注意力（滑动+全量）模型构建与 HF↔OLMo-core 权重转换，以及 HSDP 分片策略的原理与默认值。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l4-moe-checkpoint-converter.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "会用 convert_moe_checkpoint_to_hf.py 把 olmo-core MoE v2（KDA/OLMoE3）checkpoint 导出为 HF 格式，并理解 -c 必须传训练配置 JSON（含 model 与 dataset.tokenizer 节）的原因",
+            "理解 OLMoDDP 融合优化器把权威权重存为 module.<param>.main 的布局，以及 load_ddp_main_params 如何按候选键匹配、整型校验并 gather 成完整 state_dict",
+            "掌握 chat EOS 列表默认值 [100265, 100257] 的动机：vLLM OpenAI server 从 generation_config.json 取停止符，缺 <|im_end|> 会导致回合不停止、工具调用重复到 token 预算（BFCL 上的真实故障）",
+            "理解校验策略与边界：默认 --device cuda（KDA 的 Triton 内核拒绝 CPU 张量，避免「已转换但未校验」假象）、KDA 1.2B 上严格 logit 校验必然失败的已知问题与 --skip-validation + 功能性评估的替代、仅支持本地/WEKA 路径、GDN 混合 MoE 会误入 dense-hybrid 导出器的告诫"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "converter 入口与参数（-i/-o/-c/--eos-token-ids/--device/--skip-validation）",
+            "OLMoDDP .main 权重布局收集",
+            "generation_config.json 的 EOS 写入",
+            "校验策略与已知告诫"
+          ],
+          "order": 4,
+          "practice_task": "通读 scripts/train/debug/convert_moe_checkpoint_to_hf.py，画出 load_ddp_main_params 对六类候选键（model.x / model.module.x / x / module.x / x.main / module.x.main）的匹配与回退顺序图，并解释为何缺任一参数权重要直接报错；随后回答三个旗标场景——基座/midtrain 导出应如何传 --eos-token-ids、KDA 生产转换为何传 --skip-validation --device cpu、默认 --device cuda 防的是什么假象；最后写一段分析：为什么 EOS 列表写进 generation_config.json 而不是改 tokenizer，以及注释里说 olmo-core pin 的 save_hf_model 自己写 chat 停止列表后这个覆盖何时可以删除。",
+          "source_files": [
+            "scripts/train/debug/convert_moe_checkpoint_to_hf.py"
+          ],
+          "title": "MoE checkpoint 导出：OLMoE3/KDA 转 HF 与 chat EOS 列表",
+          "topic": "讲解新增的 scripts/train/debug/convert_moe_checkpoint_to_hf.py：把 olmo-core MoE v2（KDA/OLMoE3，A4B）checkpoint 转成 HuggingFace 格式的完整链路——OLMoDDP 融合优化器 .main 权重布局的收集、generation_config.json 默认写入 chat EOS 列表 [100265, 100257]（vLLM OpenAI server 依赖它停止回合）、--eos-token-ids 覆盖、默认 CUDA 校验设备的选择理由，以及 KDA 严格 logit 校验失效、仅本地/WEKA 路径、GDN 混合模型边界等使用告诫。与 u8-l7 的 checkpoint 导出话题互补，但本工具独立于 MILES、属于 scripts/train/debug 下的通用导出脚本。"
         }
       ],
       "level": "intermediate",
@@ -985,7 +1013,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u6-l4"
           ],
@@ -1046,7 +1074,7 @@
             "docs/miles/configuration-intro.md"
           ],
           "title": "配置系统：TOML → RunSpec → RunConfig",
-          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；更新点：新增 priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认；本轮又新增 reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束。"
+          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；更新点：新增 priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认；又新增 reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束。本轮小更新：run_spec.launch_warnings 新增 SciCode 参考路径校验的警告分支（SciCode 秘密链路详见 u8-l9）。"
         },
         {
           "action": "update",
@@ -1060,17 +1088,19 @@
             "掌握 driver 与 MILES 运行时的职责边界",
             "理解指纹（fingerprint）如何支撑 resume",
             "理解 driver 返回值携带 num_rollout 后 workflow 完成判定的变化，以及 save_final_checkpoint 如何在最后一个 rollout 落盘最终存档",
-            "理解 driver.train 在分配 worker 之前调用 rewards.validate_registry 的启动期奖励注册表校验"
+            "理解 driver.train 在分配 worker 之前调用 rewards.validate_registry 的启动期奖励注册表校验",
+            "理解 workflow.execute 在模型准备前对 SciCode 参考资产的预校验：占位路径在分配任何 GPU 任务之前被拒绝（详见 u8-l9）"
           ],
           "level": "advanced",
           "minimal_modules": [
             "workflow 阶段与指纹",
             "driver 协调循环",
             "Supervisor 启动监管",
-            "完成判定与最终存档"
+            "完成判定与最终存档",
+            "启动期预检（注册表 + SciCode 资产）"
           ],
           "order": 3,
-          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证；最后定位 driver.train 中 validate_registry 的调用点，说明它为何必须发生在 worker 分配之前。",
+          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证；最后定位 driver.train 中 validate_registry 与 workflow.execute 开头 validate_scicode_reference_path 的调用点，说明这两类启动期预检为何必须发生在 worker/资源分配之前。",
           "source_files": [
             "open_instruct/miles/execution/workflow.py",
             "open_instruct/miles/execution/driver.py",
@@ -1078,10 +1108,10 @@
             "docs/miles/workflow.md"
           ],
           "title": "工作流与执行：driver、workflow 与集群启动",
-          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；更新点：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存；本轮 driver 新增 rewards.validate_registry 启动校验——在分配 worker 前解析可信注册表，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。"
+          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；更新点：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存；driver 新增 rewards.validate_registry 启动校验——在分配 worker 前解析可信注册表，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。本轮小更新：workflow.execute 在 run_directory 与模型准备之前新增 evaluation.validate_scicode_reference_path 预检，与注册表预检并列构成启动期资产校验（SciCode 秘密链路详见 u8-l9）。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u8-l2"
           ],
@@ -1145,43 +1175,6 @@
           ],
           "title": "Rollout 提供者：pool、replay 与前缀缓存",
           "topic": "讲解 rollout 包：PromptProvider 协议、PoolPromptProvider 的有限提示池、replay/remind 提供者与 DashboardDrainingRolloutDataSource 的排空与游标机制。更新点：data.sampling 新增 priority 字段——在 uniform/exposure 策略下每个池内按优先级字段排序取下一个新提示，训练回执携带 sampling_priority_group，priority 与 replay 互斥。"
-        },
-        {
-          "action": "update",
-          "depends_on": [
-            "u8-l5",
-            "u8-l2",
-            "u8-l3"
-          ],
-          "filename": "u8-l11-priority-group-sampling.md",
-          "id": "u8-l11",
-          "learning_goals": [
-            "理解 PriorityPromptProvider 的组序遍历：每个 epoch 内按组 1→2→3→4 依序耗尽、组内无采样权重",
-            "掌握组内混源加权（prompt_priority_source_field/weights）：权重只影响顺序与早期曝光、耗尽源被跳过并重归一化",
-            "理解确定性（seed 固定组内洗牌、identity 哈希拒绝不匹配的 resume）与 provider_source 的接入方式",
-            "掌握 training.num_epoch 预算在数据加载后被解析为 num_rollout，以及 epoch 预算 run 默认保存最终 checkpoint",
-            "理解池采样优先级（data.sampling.priority）与独立 priority provider 的分工：两者共享 1..4 历史分层定义（pool_sampling.priority_value），前者只排序池内新提示、后者切换整个提供者"
-          ],
-          "level": "advanced",
-          "minimal_modules": [
-            "PriorityPromptProvider",
-            "provider_source 接入与配置约束",
-            "epoch 预算与最终存档",
-            "池采样优先级组合"
-          ],
-          "order": 6,
-          "practice_task": "构造一个带 reward_priority 元数据字段的小数据集（覆盖 1-4 组、每行再带 workbench.source.candidate_id 之类的 source 标签），运行 open_instruct/test_miles_priority_provider.py 与 tests/miles/test_prompt_provider.py 并记录断言覆盖的行为；再写一份启用 prompt_provider=\"priority\"、带 source 权重的 TOML，运行 validate 观察缺 prompt_priority_field、越界/非整数组标签、缺 source 权重三类报错，并对照 docs/miles/data-and-evaluation.md 解释组定义与在线零方差过滤为何互不影响；最后对照 open_instruct/test_miles_pool_priority.py 了解池采样优先级（data.sampling.priority）的断言与 docs/miles/measurements/pool-priority-v7-20261113.json 的测量记录。",
-          "source_files": [
-            "open_instruct/miles/rollout/priority_provider.py",
-            "open_instruct/miles/rollout/provider_source.py",
-            "open_instruct/miles/rollout/pool_sampling.py",
-            "open_instruct/miles/configuration/config.py",
-            "open_instruct/miles/execution/driver.py",
-            "docs/miles/data-and-evaluation.md",
-            "open_instruct/test_miles_priority_provider.py"
-          ],
-          "title": "历史优先级提示采样与 epoch 预算",
-          "topic": "讲解 MILES 的 priority 提示提供者：按元数据中的历史奖励优先级组（1-4）依序耗尽、组内可选混源加权、seed 固定的确定性洗牌与 resume 身份校验，以及 num_epoch 预算到 num_rollout 的换算与 save_final_checkpoint 最终存档。更新点：新增 data.sampling.priority 把同一套 1..4 历史分层引入池采样（pool_sampling.priority_value 与独立 provider 共享定义），在 uniform/exposure 策略下按组排序每个池的新提示并在回执中记录 sampling_priority_group，与 replay 互斥。"
         },
         {
           "action": "update",
@@ -1352,39 +1345,6 @@
           "topic": "讲解 MILES 新集成的原生 score-centering 目标：loss_type=\"score_centering\" 经 score_centering.py 的 CPU 预检（FP32 head、GRPO 优势估计、与旧开关互斥、TIS/MIS 参数），run_spec 编译把 off_policy_correction=\"tis\" 映射到原生 TIS 并放宽 refresh 与异步训练的锚定约束，candidate 概率收集要求 rollout_top_logprobs_num >= rollout_top_k；docs/miles/core.md 记录了临时 FP32 资格政策与上游实现链接。"
         },
         {
-          "action": "keep",
-          "depends_on": [
-            "u8-l3"
-          ],
-          "filename": "u8-l8-miles-launching-operations.md",
-          "id": "u8-l8",
-          "learning_goals": [
-            "掌握 run 与 train 两种启动方式的区别",
-            "理解 launch receipt 与断点状态存储",
-            "会用 status 与指标判断 run 是否完成",
-            "理解任务判分器依赖（ReasoningGym/RDKit、结构化输出解析器、库内代码执行客户端）如何随 MILES 镜像分发并在构建期自检，以及 CODE_EXECUTION_TOKEN 经 launch.secrets 按名注入的凭据模型"
-          ],
-          "level": "advanced",
-          "minimal_modules": [
-            "Beaker 实验编译",
-            "提交与回执",
-            "任务判分器依赖与秘密注入",
-            "运维判据"
-          ],
-          "order": 12,
-          "practice_task": "用 `python -m open_instruct.miles run` 走一次提交（或 dry-run），找到本地 launches 回执目录，然后按 operations.md 的清单列出判断 run 完成所需的三个证据；再对照 docs/miles/launching.md 的「Task grader dependencies」一节，说明 runtime/miles/task-verifier-requirements.txt 与 scripts/miles/check_verifier_dependencies.py 在镜像构建期各承担什么检查，并解释为何令牌值绝不能出现在 launch.env、数据行或镜像里。",
-          "source_files": [
-            "open_instruct/miles/execution/launch.py",
-            "open_instruct/miles/execution/submit.py",
-            "docs/miles/launching.md",
-            "docs/miles/operations.md",
-            "runtime/miles/task-verifier-requirements.txt",
-            "scripts/miles/check_verifier_dependencies.py"
-          ],
-          "title": "启动、提交、判分器依赖与运维",
-          "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断；更新点：launching.md 新增任务判分器依赖一节——ReasoningGym/RDKit 等判分依赖随镜像分发并在构建期自检，代码判分只需在 launch.secrets 里配置 Beaker 秘密名注入 CODE_EXECUTION_TOKEN。"
-        },
-        {
           "action": "update",
           "depends_on": [
             "u8-l8"
@@ -1396,27 +1356,68 @@
             "掌握推理记录的存储结构",
             "会用 records summarize/select 做数据分析",
             "理解推理记录与选择表的 grading 契约隔离：组行携带 grading_policy、input_key 被扩展、选择表 schema 2 与 --grading-policy、跨契约证据被拒绝",
-            "理解评估采样对齐：in-loop 评估默认 temperature 1.0 / top-p 0.95 / 响应上限 32768，可用 miles.eval_* 覆盖"
+            "理解评估采样对齐：in-loop 评估默认 temperature 1.0 / top-p 0.95 / 响应上限 32768，可用 miles.eval_* 覆盖",
+            "理解 SciCode 参考数据的默认秘密链路：SCICODE_H5PY_HOST_PATH 自动注入 evaluation.secrets、占位路径在三个启动边界被拒绝、评估器内解析并校验文件存在、显式路径优先于秘密、失败回执保留可行动诊断"
           ],
           "level": "advanced",
           "minimal_modules": [
             "评估 Coordinator",
             "评估 runner",
             "记录筛选",
-            "grading 契约与选择表 schema 2"
+            "grading 契约与选择表 schema 2",
+            "SciCode 参考秘密的注入/校验/解析"
           ],
           "order": 13,
-          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义；再演练 --grading-policy 在混合契约证据上的必填报错与 schema 1 表仅限 legacy 模式的行为；最后对照 docs/miles/background-evaluation.md 的「Shared in-loop policy evaluation」一节说明采样默认值与覆盖方式。",
+          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义；再演练 --grading-policy 在混合契约证据上的必填报错与 schema 1 表仅限 legacy 模式的行为；对照 docs/miles/background-evaluation.md 的「Shared in-loop policy evaluation」一节说明采样默认值与覆盖方式；最后运行 open_instruct/test_miles_scicode_reference.py 并记录覆盖点，把 configs/miles/examples/tiny/three-node.toml 的 scicode 任务分别改成占位符路径（观察 plan 的 launch_warnings 与 launch 拒绝）与删除该路径（观察 evaluation.secrets 的自动注入），对照 docs/miles/background-evaluation.md 的 SciCode 小节梳理「显式路径 > 秘密 > 默认」的优先级与秘密值不在提交机解析、不写入回执的安全模型。",
           "source_files": [
             "open_instruct/miles/evaluation/evaluation.py",
             "open_instruct/miles/evaluation/evaluation_runner.py",
             "open_instruct/miles/datasets/record_selection.py",
             "open_instruct/miles/datasets/recording.py",
             "docs/miles/inference-records.md",
-            "docs/miles/background-evaluation.md"
+            "docs/miles/background-evaluation.md",
+            "open_instruct/test_miles_scicode_reference.py",
+            "configs/miles/examples/tiny/three-node.toml"
           ],
           "title": "后台评估与推理记录",
-          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点：GradingRecorder 把 grading 契约写入组行并扩展 input_key（schema 3 选择摘要），record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝；评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限，三节点面板分组细化）。"
+          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点一：GradingRecorder 把 grading 契约写入组行并扩展 input_key，record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝，评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限）。更新点二（本轮）：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密——evaluation.parse 在 scicode 任务未显式给 h5py_host_path 时自动注入默认秘密（three-node 示例删去占位路径、模板保持可加载），validate_scicode_reference_path 以 launch_warnings 计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝占位符路径（正则拦截 YOUR_*、$、<> 等占位形态），evaluation_runner.resolve_scicode_reference 在评估器内部解析秘密并校验文件存在（错误信息不回显秘密值、向命令注入解析结果时保持冻结任务身份以兼容完成/resume），submit 失败回执保留 InputError 的可行动诊断。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u8-l5",
+            "u8-l2",
+            "u8-l3"
+          ],
+          "filename": "u8-l11-priority-group-sampling.md",
+          "id": "u8-l11",
+          "learning_goals": [
+            "理解 PriorityPromptProvider 的组序遍历：每个 epoch 内按组 1→2→3→4 依序耗尽、组内无采样权重",
+            "掌握组内混源加权（prompt_priority_source_field/weights）：权重只影响顺序与早期曝光、耗尽源被跳过并重归一化",
+            "理解确定性（seed 固定组内洗牌、identity 哈希拒绝不匹配的 resume）与 provider_source 的接入方式",
+            "掌握 training.num_epoch 预算在数据加载后被解析为 num_rollout，以及 epoch 预算 run 默认保存最终 checkpoint",
+            "理解池采样优先级（data.sampling.priority）与独立 priority provider 的分工：两者共享 1..4 历史分层定义（pool_sampling.priority_value），前者只排序池内新提示、后者切换整个提供者"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "PriorityPromptProvider",
+            "provider_source 接入与配置约束",
+            "epoch 预算与最终存档",
+            "池采样优先级组合"
+          ],
+          "order": 6,
+          "practice_task": "构造一个带 reward_priority 元数据字段的小数据集（覆盖 1-4 组、每行再带 workbench.source.candidate_id 之类的 source 标签），运行 open_instruct/test_miles_priority_provider.py 与 tests/miles/test_prompt_provider.py 并记录断言覆盖的行为；再写一份启用 prompt_provider=\"priority\"、带 source 权重的 TOML，运行 validate 观察缺 prompt_priority_field、越界/非整数组标签、缺 source 权重三类报错，并对照 docs/miles/data-and-evaluation.md 解释组定义与在线零方差过滤为何互不影响；最后对照 open_instruct/test_miles_pool_priority.py 了解池采样优先级（data.sampling.priority）的断言与 docs/miles/measurements/pool-priority-v7-20261113.json 的测量记录。",
+          "source_files": [
+            "open_instruct/miles/rollout/priority_provider.py",
+            "open_instruct/miles/rollout/provider_source.py",
+            "open_instruct/miles/rollout/pool_sampling.py",
+            "open_instruct/miles/configuration/config.py",
+            "open_instruct/miles/execution/driver.py",
+            "docs/miles/data-and-evaluation.md",
+            "open_instruct/test_miles_priority_provider.py"
+          ],
+          "title": "历史优先级提示采样与 epoch 预算",
+          "topic": "讲解 MILES 的 priority 提示提供者：按元数据中的历史奖励优先级组（1-4）依序耗尽、组内可选混源加权、seed 固定的确定性洗牌与 resume 身份校验，以及 num_epoch 预算到 num_rollout 的换算与 save_final_checkpoint 最终存档。更新点：新增 data.sampling.priority 把同一套 1..4 历史分层引入池采样（pool_sampling.priority_value 与独立 provider 共享定义），在 uniform/exposure 策略下按组排序每个池的新提示并在回执中记录 sampling_priority_group，与 replay 互斥。"
         },
         {
           "action": "keep",
@@ -1448,6 +1449,42 @@
           ],
           "title": "高阶主题：序列打包、长序列与吞吐调优",
           "topic": "汇总性能相关专题：文档隔离的序列打包语义、长序列的预算与准入控制、topology 的 GPU 布局与容量规划、吞吐画像与队列指标。"
+        },
+        {
+          "action": "update",
+          "depends_on": [
+            "u8-l3"
+          ],
+          "filename": "u8-l8-miles-launching-operations.md",
+          "id": "u8-l8",
+          "learning_goals": [
+            "掌握 run 与 train 两种启动方式的区别",
+            "理解 launch receipt 与断点状态存储",
+            "会用 status 与指标判断 run 是否完成",
+            "理解任务判分器依赖（ReasoningGym/RDKit、结构化输出解析器、库内代码执行客户端）如何随 MILES 镜像分发并在构建期自检，以及 CODE_EXECUTION_TOKEN 经 launch.secrets 按名注入的凭据模型",
+            "理解凭据按名注入的第二个实例：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密（经 evaluation.secrets 注入），launch.specification 在拓扑规划前即拒绝未解析的占位路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Beaker 实验编译",
+            "提交与回执",
+            "任务判分器依赖与秘密注入",
+            "SciCode 参考秘密与启动前校验",
+            "运维判据"
+          ],
+          "order": 12,
+          "practice_task": "用 `python -m open_instruct.miles run` 走一次提交（或 dry-run），找到本地 launches 回执目录，然后按 operations.md 的清单列出判断 run 完成所需的三个证据；再对照 docs/miles/launching.md 的「Task grader dependencies」一节，说明 runtime/miles/task-verifier-requirements.txt 与 scripts/miles/check_verifier_dependencies.py 在镜像构建期各承担什么检查，并解释为何令牌值绝不能出现在 launch.env、数据行或镜像里；最后对照 docs/miles/background-evaluation.md 的 SciCode 小节，说明 SCICODE_H5PY_HOST_PATH 与 CODE_EXECUTION_TOKEN 在「按名注入、值不落盘」上的共同点，以及 launch.specification 为何要在拓扑规划前拒绝占位路径。",
+          "source_files": [
+            "open_instruct/miles/execution/launch.py",
+            "open_instruct/miles/execution/submit.py",
+            "docs/miles/launching.md",
+            "docs/miles/operations.md",
+            "docs/miles/background-evaluation.md",
+            "runtime/miles/task-verifier-requirements.txt",
+            "scripts/miles/check_verifier_dependencies.py"
+          ],
+          "title": "启动、提交、判分器依赖与运维",
+          "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断；更新点一：launching.md 新增任务判分器依赖一节——ReasoningGym/RDKit 等判分依赖随镜像分发并在构建期自检，代码判分只需在 launch.secrets 里配置 Beaker 秘密名注入 CODE_EXECUTION_TOKEN；更新点二（本轮）：launch.specification 在拓扑规划前调用 validate_scicode_reference_path 拒绝未解析的 SciCode 占位路径，SCICODE_H5PY_HOST_PATH 经 evaluation.secrets 按名注入成为第二个「Beaker 秘密按名注入」的实例（完整链路详见 u8-l9）。"
         }
       ],
       "level": "advanced",
