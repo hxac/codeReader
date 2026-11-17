@@ -68843,8 +68843,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "663de9736f53e7f1e4deab75b7aa766694825b2a",
-      "last_run_at": "2026-11-16T14:17:59Z",
-      "last_error": "ClaudeRunnerError: agent 非零退出（分类匹配）：\nuse\":{\"web_search_requests\":0,\"web_fetch_requests\":0},\"service_tier\":\"standard\",\"cache_creation\":{\"ephemeral_1h_input_tokens\":0,\"ephemeral_5m_input_tokens\":0},\"inference_geo\":\"\",\"iterations\":[],\"speed\":\"standard\",\"fallback_credit\":null},\"modelUsage\":{\"glm-5.3\":{\"inputTokens\":113929"
+      "last_run_at": "2026-11-17T13:02:43Z",
+      "last_error": "ClaudeRunnerError: agent 非零退出（分类匹配）：\n76eab8a4afe\",\"tool_input\":{\"command\":\"git -C /home/runner/work/codeReader/codeReader/work/deepspeedai-DeepSpeed log --oneline 663de9736f53e7f1e4deab75b7aa766694825b2a..fd8be8161176d0359060cc44faa98383382b70d3\",\"description\":\"List commits between previous and current HEAD\"}},{\"tool_"
     },
     "triple-mu/fast-ulysses": {
       "prompt_hash": "b21aef51792b02df",
@@ -69053,21 +69053,25 @@
           "error": null
         },
         "u9-l2": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1549664,
+          "error": null
+        },
+        "u9-l3": {
+          "status": "done",
+          "action": "new",
+          "retries": 0,
+          "cost": 1.1358104000000002,
+          "error": null
+        },
+        "u9-l4": {
           "status": "failed",
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"12cdbebf-a88c-4456-8745-c205fe154f58\",\"total_co"
-        },
-        "u9-l3": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
-        },
-        "u9-l4": {
-          "status": "pending",
-          "action": "new",
-          "retries": 0
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4fa42a9c-5ceb-4c48-9912-c87d8ddfd755\",\"total_co"
         },
         "u9-l5": {
           "status": "pending",
@@ -69081,7 +69085,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/triple-mu/fast-ulysses/fast-ulysses-tutorial",
       "last_head": "ad1a4a06a42d8129a278f010b1d67a6e206d38e6",
-      "last_run_at": "2026-11-16T14:17:59Z",
+      "last_run_at": "2026-11-17T13:02:43Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "KellerJordan/Muon": {
@@ -69379,16 +69383,18 @@
           "retries": 0
         },
         "u8-l2": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"7bf5bc27-15c9-401f-9c68-5759f449bd26\",\"total_co"
+          "cost": 1.4621344,
+          "error": null
         },
         "u8-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3281800000000001,
+          "error": null
         },
         "u8-l4": {
           "status": "keep",
@@ -69396,9 +69402,11 @@
           "retries": 0
         },
         "u8-l5": {
-          "status": "pending",
+          "status": "failed",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"5140c71b-95e5-4c8d-878f-3effcf4e92f2\",\"total_co"
         },
         "u8-l6": {
           "status": "pending",
@@ -69477,7 +69485,7 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/open-instruct/open-instruct-tutorial",
       "last_head": "28c1816664491493242d453c2c7280ee56e6c20a",
-      "last_run_at": "2026-11-16T14:17:59Z",
+      "last_run_at": "2026-11-17T13:02:43Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/OLMo-core": {
@@ -69503,11 +69511,11 @@
           "error": null
         },
         "u1-l4": {
-          "status": "failed",
+          "status": "done",
           "action": "update",
           "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"399ca376-701f-4003-8208-07ae51ef514c\",\"total_co"
+          "cost": 0.5710408,
+          "error": null
         },
         "u2-l1": {
           "status": "keep",
@@ -69515,9 +69523,11 @@
           "retries": 0
         },
         "u2-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9197584,
+          "error": null
         },
         "u2-l3": {
           "status": "keep",
@@ -69525,49 +69535,67 @@
           "retries": 0
         },
         "u3-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 0.9960872000000001,
+          "error": null
         },
         "u3-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "update",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.1740464000000002,
+          "error": null
         },
         "u3-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.3197264,
+          "error": null
         },
         "u3-l4": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2866864,
+          "error": null
         },
         "u3-l5": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2013128000000002,
+          "error": null
         },
         "u3-l6": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.0086304,
+          "error": null
         },
         "u4-l1": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.0461983999999998,
+          "error": null
         },
         "u4-l2": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.4334616,
+          "error": null
         },
         "u4-l3": {
-          "status": "pending",
+          "status": "done",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": 1.2374656000000002,
+          "error": null
         },
         "u5-l1": {
           "status": "pending",
@@ -69691,8 +69719,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/OLMo-core/OLMo-core-tutorial",
       "last_head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
-      "last_run_at": "2026-11-16T14:17:59Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-11-17T13:02:43Z",
+      "last_error": "near dead zone; will resume next window"
     },
     "allenai/olmocr": {},
     "allenai/OLMo": {},
