@@ -1,6 +1,6 @@
 # 工作流与执行：driver、workflow 与集群启动
 
-> 本讲对应 MILES 单元第三讲。上一讲（u8-l2）我们已经看过 TOML run 文件如何被 `RunSpec` 「加载即编译」成 `RunConfig`；本讲顺着这条链往下走：**编译产物交给谁、在 GPU 集群上如何被执行、中断之后如何恢复、一次 run 何时才算「完成」、以及训练开始前有哪些启动期预检**。本轮增量更新（bae4209 → 8cd7c9eb）为 driver 新增了 `rewards.validate_registry` 启动预检（PR #2250 统一判分输入的一部分），本讲把它作为 driver 协调循环的第一环纳入讲解。
+> 本讲对应 MILES 单元第三讲。上一讲（u8-l2）我们已经看过 TOML run 文件如何被 `RunSpec` 「加载即编译」成 `RunConfig`；本讲顺着这条链往下走：**编译产物交给谁、在 GPU 集群上如何被执行、中断之后如何恢复、一次 run 何时才算「完成」、以及训练开始前有哪些启动期预检**。上一轮增量为 driver 新增了 `rewards.validate_registry` 注册表预检（PR #2250 统一判分输入的一部分）；本轮增量（8cd7c9eb → 28c181666，PR #2260）又在 `workflow.execute` 的最顶端加入 `evaluation.validate_scicode_reference_path` 资产预检——占位的 SciCode 参考数据路径从此在任何资源分配之前被拒绝。两道预检并列构成本讲的「启动期预检」主题。
 
 ## 1. 本讲目标
 
@@ -10,14 +10,16 @@
 2. 解释「指纹（fingerprint）」如何支撑 resume：配置身份如何计算、哪些字段的改动被允许、哪些会被拒绝。
 3. 读懂 `driver.train` 的协调循环：启动期预检 → rollout 收集 → 优化器更新 → 权重发布 → 存档边界，以及时间停 / debug 退出 / 池耗尽三种提前退出方式。
 4. 理解 run 完成判定如何使用 driver 返回值中的 `num_rollout`：`training.num_epoch` 预算的 run 由原生运行时在数据加载后才解析出 rollout 总数，并通过 `core.save_final_checkpoint` 在最后一次更新时落盘最终存档。
-5. **掌握本轮更新**：`driver.train` 在分配任何 worker 之前调用 `rewards.validate_registry`——解析可信判分注册表、为每个验证器计算 grading 策略，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。
-6. 理解 `cluster.Supervisor` 如何在 Beaker 副本内做受监管启动（心跳、健康探针、启动预算）。
+5. 理解（上一轮引入的）`driver.train` 在分配任何 worker 之前调用 `rewards.validate_registry`——解析可信判分注册表、为每个验证器计算 grading 策略，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。
+6. **掌握本轮更新**：`workflow.execute` 在进入 `run_directory` 与模型准备之前调用 `evaluation.validate_scicode_reference_path`——SciCode 评估任务若携带未解析的占位参考路径（`YOUR_*`、`$`、`<>` 等形态），在 plan 期进 `launch_warnings` 软警告，在 `launch.specification` / `workflow.execute` / `evaluation.specification` 三个启动边界被硬拒绝（SciCode 秘密链路详见 u8-l9）。
+7. 理解 `cluster.Supervisor` 如何在 Beaker 副本内做受监管启动（心跳、健康探针、启动预算）。
 
 ## 2. 前置知识
 
 - **run 文件与 RunSpec（承接 u8-l2）**：一份 TOML 描述模型、数据、训练器、推理引擎与集群分配；`RunSpec.compile()` 把结构化小节翻译成 `CoreConfig`（经 `--olmo-core-config` 传入）和原生 MILES 参数（`--num-rollout`、`--num-epoch` 等）。本讲取其中与「训练预算」「存档节奏」和「判分输入声明」相关的编译产出。
 - **rollout（采样回合）**：GRPO 类算法以「一轮采样 + 若干次优化器更新」为基本节奏。一轮收集 `rollout_batch_size × n_samples_per_prompt` 条回答，`global_batch_size` 决定每次更新消耗多少条。
 - **可信判分注册表（承接 u8-l6）**：MILES 的奖励不是数据自带的任意代码。`core.reward_config` 指向一份注册表 JSON，把验证器名映射到 `{factory, config, kwargs}` 工厂规格；打分时按样本元数据里的 `verifiers` 名单从注册表取验证器。u8-l12 在此之上定义了每个验证器的 grading 输入契约（objective × scope × require_response）。本讲只关心一件事：**driver 在启动时如何预检这份注册表**。
+- **后台评估与 SciCode（承接 u8-l1）**：`evaluation.mode = "background"` 时，评估作为独立 Beaker 任务周期性运行。SciCode 是其中一个 `kind = "external"` 的评估任务，需要评估器所在主机上的一份参考数据文件（`test_data.h5`）——本讲只关心「这份路径在启动前如何被校验」，注入秘密、评估器内解析的完整链路在 u8-l9。
 - **幂等与指纹**：分布式训练会被抢占、被重启。为了让重启后的进程能安全复用上一轮的产物，系统给每个产物记录「身份」（输入的哈希或清单），重启时先核对身份，一致才复用——这就是指纹。
 - **Beaker 副本（replica）**：MILES 的多机 run 会被 Beaker 调成多个副本，每个副本在各自节点上跑一个 `cluster` 进程；其中 IP 最小的节点成为 head，只有 head 运行训练 workflow。
 - **原生运行时（pinned MILES runtime）**：open-instruct 通过 `--miles` 镜像使用一版钉死的 MILES/Core 运行时。数据集加载、rollout 引擎与优化器执行都发生在那个运行时里；open-instruct 侧的 driver 只做编排。
@@ -26,16 +28,19 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [open_instruct/miles/execution/workflow.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py) | 一次 run 的总编排：模型/数据准备、身份记录、run 目录锁、训练调用与完成判定 |
-| [open_instruct/miles/execution/driver.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py) | 单次训练尝试的协调循环：启动预检（含本轮新增的注册表校验）、rollout、更新、发布、存档、清理，并返回结果字典 |
-| [open_instruct/miles/execution/cluster.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py) | Beaker 副本内的 `Supervisor`：rendezvous、心跳、judge 健康探针、Ray 启动与 workflow 拉起 |
-| [open_instruct/miles/execution/timing.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/timing.py) | `stage()` 上下文管理器：把 driver 各阶段耗时写成 `driver_timing.jsonl` |
-| [open_instruct/miles/rewards/rewards.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py) | 判分注册表的加载与分发（u8-l6 主角）；本轮新增的 `validate_registry` 预检入口也在这里 |
-| [open_instruct/miles/configuration/run_spec.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/run_spec.py) | 编译链中与本讲相关的部分：`num_epoch`/`num_rollout` 预算选择、`save_final_checkpoint` 默认值 |
-| [open_instruct/miles/configuration/config.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py) | `CoreConfig` 字段定义：`save_final_checkpoint`、本轮新增的 `reward_final_answer_only` / `reward_reasoning_mode` |
-| [open_instruct/test_miles_epoch_budget.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/test_miles_epoch_budget.py) | epoch 预算编译行为的单测（本讲实践的验证工具） |
-| [open_instruct/test_miles_grading_consumers.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/test_miles_grading_consumers.py) | `validate_registry` 预检行为的单测（本讲实践的验证工具） |
-| [docs/miles/workflow.md](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/workflow.md) | 研究者视角的工作流文档：plan/validate/train/run/status 与恢复语义 |
+| [open_instruct/miles/execution/workflow.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py) | 一次 run 的总编排：SciCode 资产预检（本轮新增）、模型/数据准备、身份记录、run 目录锁、训练调用与完成判定 |
+| [open_instruct/miles/execution/driver.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py) | 单次训练尝试的协调循环：启动预检（注册表校验）、rollout、更新、发布、存档、清理，并返回结果字典 |
+| [open_instruct/miles/execution/cluster.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py) | Beaker 副本内的 `Supervisor`：rendezvous、心跳、judge 健康探针、Ray 启动与 workflow 拉起 |
+| [open_instruct/miles/execution/timing.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/timing.py) | `stage()` 上下文管理器：把 driver 各阶段耗时写成 `driver_timing.jsonl` |
+| [open_instruct/miles/evaluation/evaluation.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py) | 后台评估配置解析（含 SciCode 默认秘密注入）与 `validate_scicode_reference_path` 预检入口（本轮新增的调用方在 workflow/launch） |
+| [open_instruct/miles/execution/launch.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/launch.py) | 把 run 编译成 Beaker 实验规格；`specification` 开头的 SciCode 预检是三道启动边界之一（详见 u8-l8） |
+| [open_instruct/miles/rewards/rewards.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py) | 判分注册表的加载与分发（u8-l6 主角）；`validate_registry` 预检入口也在这里 |
+| [open_instruct/miles/configuration/run_spec.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py) | 编译链中与本讲相关的部分：`num_epoch`/`num_rollout` 预算选择、`save_final_checkpoint` 默认值、`launch_warnings` 的 SciCode 警告分支（本轮新增） |
+| [open_instruct/miles/configuration/config.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py) | `CoreConfig` 字段定义：`save_final_checkpoint`、`reward_final_answer_only` / `reward_reasoning_mode` |
+| [open_instruct/test_miles_epoch_budget.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_epoch_budget.py) | epoch 预算编译行为的单测（本讲实践的验证工具） |
+| [open_instruct/test_miles_grading_consumers.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_grading_consumers.py) | `validate_registry` 预检行为的单测（本讲实践的验证工具） |
+| [open_instruct/test_miles_scicode_reference.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py) | SciCode 参考路径预检的单测（本轮新增，本讲实践的验证工具） |
+| [docs/miles/workflow.md](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/workflow.md) | 研究者视角的工作流文档：plan/validate/train/run/status 与恢复语义 |
 
 ## 4. 核心概念与源码讲解
 
@@ -51,10 +56,14 @@
 
 「指纹」是这一切的安全网：run 目录里记录了启动时规格的哈希，重启时新规格必须与记录匹配（或在允许的「运维字段」上等价），否则拒绝恢复，逼你换一个新的 `output.root`。这防止了「换数据续训旧目录」这类静默事故。
 
+本轮起，`execute` 的第一件事不是打开 run 目录，而是一次**资产预检**（见 4.5）：SciCode 评估任务若带着未解析的占位参考路径，在这里就被拒绝——连目录锁都不会去拿。
+
 #### 4.1.2 核心流程
 
 ```text
 execute(spec)
+  │
+  ├─ validate_scicode_reference_path(spec.evaluation)   # ← 本轮新增：占位参考路径在此拒绝
   │
   ├─ run_directory(spec)            # 独占锁 + 身份校验 + attempt 记账
   │    ├─ flock(.workflow.lock)     # 多进程互斥
@@ -81,25 +90,26 @@ execute(spec)
 
 #### 4.1.3 源码精读
 
-**run 目录的锁与身份校验**。[open_instruct/miles/execution/workflow.py:306-346](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L306-L346) 是 `run_directory` 上下文管理器：先用 `fcntl.flock` 对 `.workflow.lock` 加非阻塞独占锁（防止两个进程同时写同一 run 目录）；然后计算当前规格的指纹，与 `workflow.json` 里记录的 `spec_sha256` 比对；若旧状态是 `complete` 直接拒绝（完成的 run 不可覆盖）；若 `launch.auto_resume=false` 且目录已有 workflow 也拒绝。任何阶段抛异常时，把状态更新为 `failed` 并记录错误再上抛。
+**run 目录的锁与身份校验**。[open_instruct/miles/execution/workflow.py:306-346](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L306-L346) 是 `run_directory` 上下文管理器：先用 `fcntl.flock` 对 `.workflow.lock` 加非阻塞独占锁（防止两个进程同时写同一 run 目录）；然后计算当前规格的指纹，与 `workflow.json` 里记录的 `spec_sha256` 比对；若旧状态是 `complete` 直接拒绝（完成的 run 不可覆盖）；若 `launch.auto_resume=false` 且目录已有 workflow 也拒绝。任何阶段抛异常时，把状态更新为 `failed` 并记录错误再上抛。
 
-**指纹计算（含 OPD 历史兼容）**。[open_instruct/miles/execution/workflow.py:38-44](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L38-L44) 在哈希前对 OPD 算法的 run 做了两处剔除（空的 `miles` 覆盖表、`keep_checkpoints`），让历史上可选的字段不改变 run 身份。
+**指纹计算（含 OPD 历史兼容）**。[open_instruct/miles/execution/workflow.py:38-44](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L38-L44) 在哈希前对 OPD 算法的 run 做了两处剔除（空的 `miles` 覆盖表、`keep_checkpoints`），让历史上可选的字段不改变 run 身份。
 
-**允许 resume 时改动的字段白名单**。[open_instruct/miles/execution/workflow.py:58-97](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L58-L97) 的 `recovery_configuration_matches`：先严格比对原始哈希；不一致时读取磁盘上的 `run-spec.json` 做认证（记录的规格也要能算出旧指纹，防篡改），然后把**运维性字段**从新规格「领养」进记录再比较——包括 `launch.auto_resume` / `max_retries` / `memory`、编译器缓存各项、`training.save_interval` 与 `evaluation.interval`。换句话说：**恢复策略、缓存位置、存档/评估节奏可以改；模型、数据、训练视野（horizon）、算法配方不能改**。
+**允许 resume 时改动的字段白名单**。[open_instruct/miles/execution/workflow.py:58-97](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L58-L97) 的 `recovery_configuration_matches`：先严格比对原始哈希；不一致时读取磁盘上的 `run-spec.json` 做认证（记录的规格也要能算出旧指纹，防篡改），然后把**运维性字段**从新规格「领养」进记录再比较——包括 `launch.auto_resume` / `max_retries` / `memory`、编译器缓存各项、`training.save_interval` 与 `evaluation.interval`。换句话说：**恢复策略、缓存位置、存档/评估节奏可以改；模型、数据、训练视野（horizon）、算法配方不能改**。
 
-**重启记账**。[open_instruct/miles/execution/workflow.py:107-128](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L107-L128) 的 `record_attempt`：Beaker 对被抢占任务会无限重启，一个总在存档前被抢占的 run 会永远空转。每次启动向 `attempts.json` 追加一条记录，超过 `launch.max_retries` 即拒绝再启动（`-1` 关闭上限，且「重试次数」不含首次启动）。
+**重启记账**。[open_instruct/miles/execution/workflow.py:107-128](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L107-L128) 的 `record_attempt`：Beaker 对被抢占任务会无限重启，一个总在存档前被抢占的 run 会永远空转。每次启动向 `attempts.json` 追加一条记录，超过 `launch.max_retries` 即拒绝再启动（`-1` 关闭上限，且「重试次数」不含首次启动）。
 
-**模型身份清单与准备复用**。[open_instruct/miles/execution/workflow.py:131-149](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L131-L149) 的 `model_identity` 不对几十 GB 的权重做哈希，而是记录每个文件的路径、大小、纳秒级 mtime，仅对小文件（`.json` / `.jinja` / `.metadata`）算 SHA-256；[open_instruct/miles/execution/workflow.py:179-190](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L179-L190) 里 `prepare_model` 用目标目录下的 `workflow-model.json` 标记：身份一致且产物清单完整 → 直接复用；身份变化或目录不完整 → 报错要求换新 `output.root`。数据准备（`prepare_data`，见 u8-l4）走同样的「清单 + 标记」思路。
+**模型身份清单与准备复用**。[open_instruct/miles/execution/workflow.py:131-149](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L131-L149) 的 `model_identity` 不对几十 GB 的权重做哈希，而是记录每个文件的路径、大小、纳秒级 mtime，仅对小文件（`.json` / `.jinja` / `.metadata`）算 SHA-256；[open_instruct/miles/execution/workflow.py:179-190](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L179-L190) 里 `prepare_model` 用目标目录下的 `workflow-model.json` 标记：身份一致且产物清单完整 → 直接复用；身份变化或目录不完整 → 报错要求换新 `output.root`。数据准备（`prepare_data`，见 u8-l4）走同样的「清单 + 标记」思路。
 
-**三阶段总编排**。[open_instruct/miles/execution/workflow.py:349-426](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L349-L426) 的 `execute`：
+**三阶段总编排**。[open_instruct/miles/execution/workflow.py:349-427](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L427) 的 `execute`：
 
-- L352-353 `prepare_model`（阶段一·模型），L356-378 `prepare_data` + 判分注册表校验（阶段一·数据）；
-- L396-398：`auto_resume=true` 且 checkpoint 目录存在 `core-latest.json` 时，把它挂到 `config.miles["load"]`，实现「从最新完成的 Core checkpoint 续训」；
-- L399-403：写 `resolved-plan.json`、发 advisories，状态改为 `training`；
-- L404-412：调用 `train_config`（内含 `parse_runtime` 与 `driver.train`，见 4.2/4.3）；
-- L413-423：完成判定（见 4.3.3）。
+- L350 **SciCode 资产预检（本轮新增）**：`evaluation.validate_scicode_reference_path(spec.evaluation)` 位于 `with run_directory(spec)` **之外**——被拒绝的占位路径不会触碰 run 目录（不拿锁、不记账、不写 `failed` 状态），详见 4.5；
+- L353-354 `prepare_model`（阶段一·模型），L358-379 `prepare_data` + 判分注册表校验（阶段一·数据）；
+- L397-399：`auto_resume=true` 且 checkpoint 目录存在 `core-latest.json` 时，把它挂到 `config.miles["load"]`，实现「从最新完成的 Core checkpoint 续训」；
+- L400-404：写 `resolved-plan.json`、发 advisories，状态改为 `training`；
+- L405-413：调用 `train_config`（内含 `parse_runtime` 与 `driver.train`，见 4.2/4.3）；
+- L414-424：完成判定（见 4.3.3）。
 
-**训练前的运行时解析**。[open_instruct/miles/execution/workflow.py:267-303](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L267-L303)：`parse_runtime` 临时替换 `sys.argv` 调用原生 MILES 的 `parse_args`，并要求后端必须是 `olmo_core`；若带 `--load` 恢复，则从 checkpoint 的 resume manifest 里取出 `clock.next_rollout_id` 作为 `start_rollout_id`——这就是「rollout 游标不重不漏」的来源。
+**训练前的运行时解析**。[open_instruct/miles/execution/workflow.py:267-303](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L267-L303)：`parse_runtime` 临时替换 `sys.argv` 调用原生 MILES 的 `parse_args`，并要求后端必须是 `olmo_core`；若带 `--load` 恢复，则从 checkpoint 的 resume manifest 里取出 `clock.next_rollout_id` 作为 `start_rollout_id`——这就是「rollout 游标不重不漏」的来源。
 
 #### 4.1.4 代码实践
 
@@ -115,27 +125,27 @@ execute(spec)
    | `attempts.json` | ? | ? | ? |
    | `prepared/`、`checkpoints/`、`inference-profile.json` | ? | ? | ? |
 
-2. 在仓库根目录运行（CPU 即可，不需要 GPU/WEKA）。注意：维护示例本轮起按模型家族重组进了 `tiny/` 与 `small/` 子目录，文档中的命令也已同步（[docs/miles/workflow.md:28-31](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/workflow.md#L28-L31)）：
+2. 在仓库根目录运行（CPU 即可，不需要 GPU/WEKA）。注意：维护示例已按模型家族重组进 `tiny/` 与 `small/` 子目录，文档中的命令也已同步（[docs/miles/workflow.md:28-31](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/workflow.md#L28-L31)）：
 
    ```bash
    python -m open_instruct.miles plan configs/miles/examples/tiny/dev.toml
    python -m open_instruct.miles validate configs/miles/examples/tiny/dev.toml
    ```
 
-3. **需要观察的现象**：`plan` 打印解析后的 argv、批几何与放置；`validate` 只做 CPU 侧检查，不证明显存可容纳（见 [docs/miles/workflow.md:33-38](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/workflow.md#L33-L38)）。
+3. **需要观察的现象**：`plan` 打印解析后的 argv、批几何与放置；`validate` 只做 CPU 侧检查，不证明显存可容纳（见 [docs/miles/workflow.md:33-38](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/workflow.md#L33-L38)）。
 4. **预期结果**：两条命令都以退出码 0 结束；`plan` 输出里能看到 `--num-rollout`（tiny/dev.toml 用显式 rollout 预算 `num_rollouts = 4`，而非 epoch 预算）。
 5. 本地未实际运行以上命令，具体输出格式**待本地验证**（行为依据源码与文档）。
 
 #### 4.1.5 小练习与答案
 
 **练习 1**：为什么 `recovery_configuration_matches` 允许改 `training.save_interval`，却不允许改 `training.num_epoch`？
-**答案**：`save_interval` 只影响「未来产物的节奏」，不改变已经训出的权重语义；而 `num_epoch` 属于训练视野（horizon）——改了它等于改变这次 run 要训多少数据，与目录里已记录的指纹身份冲突。源码注释明确写了「Keep training horizon, evaluation tasks/scorers, and all recipe fields strict」（[workflow.py:86-88](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L86-L88)）。
+**答案**：`save_interval` 只影响「未来产物的节奏」，不改变已经训出的权重语义；而 `num_epoch` 属于训练视野（horizon）——改了它等于改变这次 run 要训多少数据，与目录里已记录的指纹身份冲突。源码注释明确写了「Keep training horizon, evaluation tasks/scorers, and all recipe fields strict」（[workflow.py:86-88](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L86-L88)）。
 
 **练习 2**：一个 run 在第 3 次被抢占后重启，`launch.max_retries=2`，会发生什么？
-**答案**：`record_attempt` 读到 `attempts.json` 已有 3 条记录，`len(attempts) > limit`（3 > 2）成立，抛出 `InputError`，提示要么调大 `launch.max_retries` 要么换新 `output.root`（[workflow.py:119-125](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L119-L125)）。注意上限按「重启次数」计，首次启动不会被拒。
+**答案**：`record_attempt` 读到 `attempts.json` 已有 3 条记录，`len(attempts) > limit`（3 > 2）成立，抛出 `InputError`，提示要么调大 `launch.max_retries` 要么换新 `output.root`（[workflow.py:119-125](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L119-L125)）。注意上限按「重启次数」计，首次启动不会被拒。
 
 **练习 3**：为什么 `model_identity` 不对 safetensors 权重整体做 SHA-256？
-**答案**：权重动辄几十 GB，每次启动都全量哈希会把恢复拖慢到不可用。它退而记录（路径, 大小, mtime_ns）三元组，只对小体积的配置/模板文件做内容哈希——以极小概率漏检「同大小同时间的权重替换」换取可用的启动速度（[workflow.py:131-149](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L131-L149)，函数 docstring 自述 "without hashing tens of GB"）。
+**答案**：权重动辄几十 GB，每次启动都全量哈希会把恢复拖慢到不可用。它退而记录（路径, 大小, mtime_ns）三元组，只对小体积的配置/模板文件做内容哈希——以极小概率漏检「同大小同时间的权重替换」换取可用的启动速度（[workflow.py:131-149](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L131-L149)，函数 docstring 自述 "without hashing tens of GB"）。
 
 ### 4.2 driver 协调循环
 
@@ -143,7 +153,7 @@ execute(spec)
 
 `driver.py` 的 `train()` 是**一次训练尝试（attempt）**的协调者。它自己不执行模型前向、不搬运权重——那些属于钉死的 MILES 运行时（SGLang 推理引擎 + OLMo-core 训练器）。driver 的职责是把各角色连起来并在正确的时机放置边界：
 
-- **启动期预检（本轮新增）**：在分配任何 worker 之前校验判分注册表的输入契约；
+- **启动期预检（上一轮新增）**：在分配任何 worker 之前校验判分注册表的输入契约；
 - rollout 收集（推理引擎按当前策略采样）；
 - 优化器更新（训练器消费一个 batch）；
 - 权重发布（把训练器的新权重推给推理引擎，支持 barrier / refresh / engine-drain 三种模式）；
@@ -159,7 +169,7 @@ execute(spec)
 train(args):
     校验 Ray 后端
     若配置了 reward_config 且 custom_rm_path 指向 open-instruct 奖励入口:
-        validate_registry(args)            # ← 本轮新增：worker 分配前的注册表预检
+        validate_registry(args)            # ← 上一轮新增：worker 分配前的注册表预检
     解析时间预算 max_run_seconds → deadline；判定时间停是否可恢复(resumable)
     启动 Ray → 初始化 W&B → 启动 worker manager
     （colocate/offload 时序约束下）启动 serving 与 trainer；拿到 rollouts_per_epoch
@@ -178,7 +188,7 @@ train(args):
     return {completed_rollout_ids, num_rollout, pools_exhausted, ...}
 ```
 
-存档条件的判定（对应 [driver.py:306-324](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L306-L324)）是四项的析取：
+存档条件的判定（对应 [driver.py:306-324](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L306-L324)）是四项的析取：
 
 \[
 \text{save} \iff (\text{到时且可存}) \ \lor\ \text{sentinel} \ \lor\ (\text{save\_final\_checkpoint} \land \text{最后一个 rollout}) \ \lor\ \text{周期 interval 到达}
@@ -186,63 +196,63 @@ train(args):
 
 #### 4.2.3 源码精读
 
-**启动期奖励注册表校验（本轮更新重点）**。[open_instruct/miles/execution/driver.py:43-48](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L43-L48) 在 `train()` 的最顶端插入了一段预检，触发条件有两项同时满足：
+**启动期奖励注册表校验（上一轮引入，本轮保留）**。[open_instruct/miles/execution/driver.py:43-48](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L43-L48) 在 `train()` 的最顶端插入了一段预检，触发条件有两项同时满足：
 
 1. `args.olmo_core.reward_config` 已配置（run 使用可信判分注册表）；
 2. `args.custom_rm_path` 指向 open-instruct 自己的两个奖励入口之一——`open_instruct.miles.rewards.rewards.registered_reward` 或 `rollout_reward`（自定义奖励模块不走这条路，预检对它没有管辖权）。
 
 命中后进入 `stage(args, "reward_registry_validation")` 计时阶段并调用 `rewards.validate_registry(args)`。**这段代码的位置就是它的语义**：执行到这里时 Ray 还未 `ray.init`（L94-95）、worker manager 还未 `wiring.launch_worker_manager`（L102-103）、W&B run 也未创建（L98）——注册表里的契约错误会在秒级、零副作用、零资源占用的阶段被拒绝。示例配置 `configs/miles/examples/tiny/node.toml`（`reward_config` 指向 math-ifeval-code 的 verifiers.json）与 `three-node.toml` 都会触发这条预检路径。
 
-**validate_registry 的两层检查**。入口在 [open_instruct/miles/rewards/rewards.py:384-388](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L384-L388)：先 `_registry(args.olmo_core.reward_config)` 构建注册表，再 `_validate_grading_context` 按 core 的判分模式收网。
+**validate_registry 的两层检查**。入口在 [open_instruct/miles/rewards/rewards.py:384-388](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L384-L388)：先 `_registry(args.olmo_core.reward_config)` 构建注册表，再 `_validate_grading_context` 按 core 的判分模式收网。
 
-第一层 `_registry`（[open_instruct/miles/rewards/rewards.py:328-353](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L328-L353)）逐名解析注册表文档：
+第一层 `_registry`（[open_instruct/miles/rewards/rewards.py:328-353](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L328-L353)）逐名解析注册表文档：
 
-- `_resolve_verifier`（[rewards.py:271-282](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L271-L282)）把 `factory` 字符串导入为类并用 `config` 字段构造验证器；历史注册表里的共享 `MathVerifier` 名字被透明重定向到 MILES 默认数学工厂；`isolate_symbolic=True` 让数学类工厂套上 `_IsolatedVerifier` 进程隔离（u8-l6 讲过的 math 守卫）；
-- `grading.verifier_policy(verifier, spec)` 为该验证器计算 **GradingPolicy**——objective（answer/process/format/composite）× scope（response/thinking/full）× require_response 的输入契约（完整语义见 u8-l12，定义在 [open_instruct/miles/rewards/grading.py:17-19](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/grading.py#L17-L19)）；`component_policies` 再校验复合验证器的各得分组件；
+- `_resolve_verifier`（[rewards.py:271-282](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L271-L282)）把 `factory` 字符串导入为类并用 `config` 字段构造验证器；历史注册表里的共享 `MathVerifier` 名字被透明重定向到 MILES 默认数学工厂；`isolate_symbolic=True` 让数学类工厂套上 `_IsolatedVerifier` 进程隔离（u8-l6 讲过的 math 守卫）；
+- `grading.verifier_policy(verifier, spec)` 为该验证器计算 **GradingPolicy**——objective（answer/process/format/composite）× scope（response/thinking/full）× require_response 的输入契约（完整语义见 u8-l12，定义在 [open_instruct/miles/rewards/grading.py:17-19](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/grading.py#L17-L19)）；`component_policies` 再校验复合验证器的各得分组件；
 - 两类硬错误在这里抛出：token 型验证器（`grading_uses_tokens`）必须 `scope=full`；声明的 scope 必须在验证器支持的 scope 列表内；
-- 外部工厂（factory 不以 `open_instruct.` 开头）若既没有 `grading` 声明、也未实现 `async_call_parts` 协议，会被记入 `_VerifierRegistry.undeclared_grading` 集合（[rewards.py:356-360](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L356-L360)）——源码注释点名了它防的事故：final-answer-only 模式下，外部打分器若不知道思考边界已被共享选择器切掉、再自己切一次，就会拿到空输入，历史上造成过 qualified-IF 全零奖励。
+- 外部工厂（factory 不以 `open_instruct.` 开头）若既没有 `grading` 声明、也未实现 `async_call_parts` 协议，会被记入 `_VerifierRegistry.undeclared_grading` 集合（[rewards.py:356-360](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L356-L360)）——源码注释点名了它防的事故：final-answer-only 模式下，外部打分器若不知道思考边界已被共享选择器切掉、再自己切一次，就会拿到空输入，历史上造成过 qualified-IF 全零奖励。
 
-第二层 `_validate_grading_context`（[open_instruct/miles/rewards/rewards.py:363-381](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L363-L381)）只在 `core.reward_final_answer_only=True`（本轮 #2250 新增字段，见下）时收网：
+第二层 `_validate_grading_context`（[open_instruct/miles/rewards/rewards.py:363-381](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L363-L381)）只在 `core.reward_final_answer_only=True` 时收网：
 
 - `undeclared_grading` 里的验证器此时直接 `ValueError`："External verifiers [...] must declare registry grading policy or implement async_call_parts before final-answer grading"；
 - 若 `core.reward_reasoning_mode="none"`（非思考 run），凡 thinking scope、声明 `grading_requires_reasoning`、或当前 scope 在 `grading_requires_reasoning_scopes` 里的验证器都被拒绝："requires reward_reasoning_mode=required for scope=..."。
 
-预检消费的两个 core 字段都是本轮新增的（[open_instruct/miles/configuration/config.py:46-51](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py#L46-L51)）：`reward_final_answer_only`（默认 False = 历史全文本分发；True = 共享选择思考边界后的 delivered response）与 `reward_reasoning_mode`（默认 "required"；非思考 run 必须显式设 "none"，取值校验在 `__post_init__`）。
+预检消费的两个 core 字段定义在 [open_instruct/miles/configuration/config.py:46-51](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L46-L51)：`reward_final_answer_only`（默认 False = 历史全文本分发；True = 共享选择思考边界后的 delivered response）与 `reward_reasoning_mode`（默认 "required"；非思考 run 必须显式设 "none"，取值校验在 `__post_init__`）。
 
-**测试佐证**。[open_instruct/test_miles_grading_consumers.py:158-175](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/test_miles_grading_consumers.py#L158-L175) 验证 reasoning 约定：`reward_final_answer_only=True` + `reward_reasoning_mode="none"` 时 R1FormatVerifier（format/full）与 ToolRLVerifier 都被预检拒绝；把 `reward_final_answer_only` 关掉（历史分发），同一注册表通过——预检只约束新模式。[open_instruct/test_miles_grading_consumers.py:178-184](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/test_miles_grading_consumers.py#L178-L184) 验证未声明契约的外部工厂（`external.Factory`）在 final-answer 模式下被拒绝。
+**测试佐证**。[open_instruct/test_miles_grading_consumers.py:158-175](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_grading_consumers.py#L158-L175) 验证 reasoning 约定：`reward_final_answer_only=True` + `reward_reasoning_mode="none"` 时 R1FormatVerifier（format/full）与 ToolRLVerifier 都被预检拒绝；把 `reward_final_answer_only` 关掉（历史分发），同一注册表通过——预检只约束新模式。[open_instruct/test_miles_grading_consumers.py:178-184](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_grading_consumers.py#L178-L184) 验证未声明契约的外部工厂（`external.Factory`）在 final-answer 模式下被拒绝。
 
-**入口与预算**。[open_instruct/miles/execution/driver.py:40-66](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L40-L66)：`train(args, *, export_hf=None)` 先校验 Ray 后端、做注册表预检（上文）、检查命名池（`prompt_provider=pools`）需要配套运行时能力；然后把 `max_run_seconds` 换算成单调钟 deadline，并判定时间停是否可恢复——L65 `resumable = not max_run_final and bool(save)`：**有存档路径且未声明「到时即终局」的时间停，等价于一次可恢复的中断，而不是 run 完成**。
+**入口与预算**。[open_instruct/miles/execution/driver.py:40-66](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L40-L66)：`train(args, *, export_hf=None)` 先校验 Ray 后端、做注册表预检（上文）、检查命名池（`prompt_provider=pools`）需要配套运行时能力；然后把 `max_run_seconds` 换算成单调钟 deadline，并判定时间停是否可恢复——L65 `resumable = not max_run_final and bool(save)`：**有存档路径且未声明「到时即终局」的时间停，等价于一次可恢复的中断，而不是 run 完成**。
 
-**启动：serving 与 trainer 的顺序约束**。[open_instruct/miles/execution/driver.py:102-145](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L102-L145)：默认先 `create_rollout_components`（serving，顺带拿到 `rollouts_per_epoch`——epoch 派生的节奏需要先知道 rollout 数据集长度），再建训练模型；只有「非 colocate、非 offload、且 `args.num_rollout is not None`」时才允许两者并行启动。**注意 L107 那个 `args.num_rollout is not None` 检查：epoch 预算的 run 在启动时 `num_rollout` 还未解析出来（由原生运行时在数据加载后填上），所以并行启动被自动关闭**（这是 4.3 更新点在 driver 侧的一个伏笔）。
+**启动：serving 与 trainer 的顺序约束**。[open_instruct/miles/execution/driver.py:102-145](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L102-L145)：默认先 `create_rollout_components`（serving，顺带拿到 `rollouts_per_epoch`——epoch 派生的节奏需要先知道 rollout 数据集长度），再建训练模型；只有「非 colocate、非 offload、且 `args.num_rollout is not None`」时才允许两者并行启动。**注意 L107 那个 `args.num_rollout is not None` 检查：epoch 预算的 run 在启动时 `num_rollout` 还未解析出来（由原生运行时在数据加载后填上），所以并行启动被自动关闭**（这是 4.3 更新点在 driver 侧的一个伏笔）。
 
-**主循环**。[open_instruct/miles/execution/driver.py:238-298](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L238-L298)：
+**主循环**。[open_instruct/miles/execution/driver.py:238-298](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L238-L298)：
 
 - L241-249 取 batch；若命名池耗尽（`PromptPoolExhausted`），L256-262 记录 `exhausted = final_stop = True`，若已有完成集则补一次存档再 `break`——**池耗尽是正常完成**；
 - L279-280 `learner.train(rollout_id, batch)` 是唯一推动参数前进的调用；
 - L281-283 命名池模式下提交曝光计数并打点 pool 指标（配合 u8-l5 的排空机制）；
 - L288-294 后台评估模式下，按「每次 collection 产生的优化器步数」收集已完成的导出快照。
 
-**存档边界**。[open_instruct/miles/execution/driver.py:306-324](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L306-L324)：四项存档触发里的第三项是 **L311** 的 `save_final_checkpoint and rollout_id == args.num_rollout - 1`——epoch 预算的 run 没有周期 `save_interval`，靠这一项在最后一个 rollout 把最终权重落盘。存档动作固定三步：`manager.save`（rollout 游标 + 待处理提示账本在同一把锁下快照）、`learner.save_model(force_sync=True)`、`learner.finalize_checkpoint`。L314-317 注释强调：已完成但未消费、以及 in-flight 的组都会在 resume 时再生，推理无需暂停。
+**存档边界**。[open_instruct/miles/execution/driver.py:306-324](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L306-L324)：四项存档触发里的第三项是 **L311** 的 `save_final_checkpoint and rollout_id == args.num_rollout - 1`——epoch 预算的 run 没有周期 `save_interval`，靠这一项在最后一个 rollout 把最终权重落盘。存档动作固定三步：`manager.save`（rollout 游标 + 待处理提示账本在同一把锁下快照）、`learner.save_model(force_sync=True)`、`learner.finalize_checkpoint`。L314-317 注释强调：已完成但未消费、以及 in-flight 的组都会在 resume 时再生，推理无需暂停。
 
-**提前退出的三种路径与最终导出**。[open_instruct/miles/execution/driver.py:333-362](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L333-L362)：时间到 → 若不可恢复则 `final_stop=True`（L335）；`debug_exit_after_rollout` 达到 → break（L351-353 注释明确：debug 停是「成功的执行」而非「完成的 run」，给 resume 留出目录）。L354 的 `reached_end = (completed[-1] + 1 ...) == args.num_rollout` 与 workflow 侧完成判定同构；L355-362 只有 `reached_end or final_stop`（且不是「零更新的池耗尽」，L357 的 `untrained_exhaustion`）才做最终 HF 导出——没有训过的权重不值得导出。
+**提前退出的三种路径与最终导出**。[open_instruct/miles/execution/driver.py:333-362](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L333-L362)：时间到 → 若不可恢复则 `final_stop=True`（L335）；`debug_exit_after_rollout` 达到 → break（L351-353 注释明确：debug 停是「成功的执行」而非「完成的 run」，给 resume 留出目录）。L354 的 `reached_end = (completed[-1] + 1 ...) == args.num_rollout` 与 workflow 侧完成判定同构；L355-362 只有 `reached_end or final_stop`（且不是「零更新的池耗尽」，L357 的 `untrained_exhaustion`）才做最终 HF 导出——没有训过的权重不值得导出。
 
-**有序清理**。[open_instruct/miles/execution/driver.py:380-436](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L380-L436)：`finally` 块里按表驱动顺序清理（先取消 prepared batch，再停止生成，再关权重传输，最后各角色 dispose），每步都有独立超时且失败不吞掉前面的错误；W&B 在失败时以退出码 1 显式收尾。
+**有序清理**。[open_instruct/miles/execution/driver.py:380-436](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L380-L436)：`finally` 块里按表驱动顺序清理（先取消 prepared batch，再停止生成，再关权重传输，最后各角色 dispose），每步都有独立超时且失败不吞掉前面的错误；W&B 在失败时以退出码 1 显式收尾。
 
-**结果字典**。[open_instruct/miles/execution/driver.py:437-445](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L437-L445)：`train` 返回的字典包含 `"num_rollout": args.num_rollout`——把**原生运行时解析后的 rollout 总数**带回给 workflow（epoch 预算完成判定的关键，见 4.3）；其余字段为 `completed_rollout_ids` / `pools_exhausted` / `start_rollout_id` / `stopped_for_time` / `time_stop_resumable` 等。
+**结果字典**。[open_instruct/miles/execution/driver.py:437-445](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L437-L445)：`train` 返回的字典包含 `"num_rollout": args.num_rollout`——把**原生运行时解析后的 rollout 总数**带回给 workflow（epoch 预算完成判定的关键，见 4.3）；其余字段为 `completed_rollout_ids` / `pools_exhausted` / `start_rollout_id` / `stopped_for_time` / `time_stop_resumable` 等。
 
 #### 4.2.4 代码实践
 
 **实践目标**：不改代码，通过 `stage()` 计时点在脑中「重放」一次 driver 的执行轨迹；并用单测验证注册表预检行为。
 
-1. 阅读 [open_instruct/miles/execution/timing.py:16-42](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/timing.py#L16-L42)：每个 `stage(args, name)` 把一条 JSONL 追加到 `<save>/driver_timing.jsonl`。
-2. 在 `driver.py` 里全局搜索 `stage(args,`，按出现顺序抄下阶段名。启动期为：`reward_registry_validation`（**本轮新增**，配置了 reward_config 时最先出现）→ `startup_cache_prepare` → `ray_readiness_wait` → `placement` → `serving_startup` → `trainer_startup` → `initial_publication` → `judge_readiness_wait`（engine_drain 模式另有 `engine_drain_startup`）；每个 rollout 期为：`generation_wait` → `training` →（命中时）`checkpoint` / `publication` / `evaluation`；收尾期为 `final_hf_export` 与若干 `*_dispose` 清理阶段。
+1. 阅读 [open_instruct/miles/execution/timing.py:16-42](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/timing.py#L16-L42)：每个 `stage(args, name)` 把一条 JSONL 追加到 `<save>/driver_timing.jsonl`。
+2. 在 `driver.py` 里全局搜索 `stage(args,`，按出现顺序抄下阶段名。启动期为：`reward_registry_validation`（配置了 reward_config 时最先出现）→ `startup_cache_prepare` → `ray_readiness_wait` → `placement` → `serving_startup` → `trainer_startup` → `initial_publication` → `judge_readiness_wait`（engine_drain 模式另有 `engine_drain_startup`）；每个 rollout 期为：`generation_wait` → `training` →（命中时）`checkpoint` / `publication` / `evaluation`；收尾期为 `final_hf_export` 与若干 `*_dispose` 清理阶段。
 3. 运行预检单测（CPU 即可）：
 
    ```bash
    uv run pytest open_instruct/test_miles_grading_consumers.py -v -k "registry_preflight"
    ```
 
-4. **需要观察的现象**：两个 `registry_preflight` 用例分别覆盖「reasoning 约定不匹配」（R1FormatVerifier / ToolRLVerifier 在 `reward_reasoning_mode="none"` 下被拒）与「未声明契约的外部工厂」被拒；同一注册表在 `reward_final_answer_only=False` 的历史模式下放行。真实 run 的 `driver_timing.jsonl` 中 `generation_wait` 的秒数在 async 模式下是「driver 等待时间」，与 GPU 实际生成时间并不相等（[timing.py:1-6](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/timing.py#L1-L6) 的模块 docstring 专门解释了这一点）。
+4. **需要观察的现象**：两个 `registry_preflight` 用例分别覆盖「reasoning 约定不匹配」（R1FormatVerifier / ToolRLVerifier 在 `reward_reasoning_mode="none"` 下被拒）与「未声明契约的外部工厂」被拒；同一注册表在 `reward_final_answer_only=False` 的历史模式下放行。真实 run 的 `driver_timing.jsonl` 中 `generation_wait` 的秒数在 async 模式下是「driver 等待时间」，与 GPU 实际生成时间并不相等（[timing.py:1-6](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/timing.py#L1-L6) 的模块 docstring 专门解释了这一点）。
 5. **预期结果**：预检用例全部通过；你能画出一行 rollout 对应的 JSONL 序列：`generation_wait(rollout_id=k)` → `training(rollout_id=k)` → 每逢 `save_interval` 出现 `checkpoint(rollout_id=k)`。
 6. 无 GPU 环境时计时轨迹部分是源码阅读型实践；真实轨迹**待本地验证**。
 
@@ -254,8 +264,8 @@ train(args):
 **练习 2**：为什么 debug 退出（`debug_exit_after_rollout`）不触发最终 HF 导出？
 **答案**：L351-353 注释说明：debug 停留下的是「可恢复的 workflow」；如果第一个进程创建了最终导出目录，被 resume 的第二个进程就无法把自己的新权重导到同一目录（导出器是独占的）。所以导出条件是 `reached_end or final_stop`，debug 停两者都不满足。
 
-**练习 3（本轮更新）**：为什么 `validate_registry` 必须发生在 worker 分配（`wiring.launch_worker_manager`）之前，而不是推迟到第一次打分时才发现问题？
-**答案**：三个理由层层递进。（1）**时序**：调用点在 `ray.init`、worker manager、W&B 初始化之前（[driver.py:43-48](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L43-L48) 早于 [driver.py:94-103](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L94-L103)），失败时不留任何需要清理的资源。（2）**成本**：若推迟到打分期，GPU 已分配、模型已加载、SGLang 引擎已起，错误在深达数分钟到数小时的初始化之后才出现，且每个打分 worker 都会各自失败一次。（3）**可观测性（最关键）**：有些契约违规不是异常而是**静默错判**——外部验证器在 final-only 模式下二次切分思考边界会拿到空输入，奖励全零、零方差组被过滤、训练空转，打分期根本不会「发现」（[rewards.py:343-346](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/rewards/rewards.py#L343-L346) 注释里点名的 qualified-IF 全零事故）。预检把这类错误变成启动期的显式 `ValueError`。
+**练习 3**：为什么 `validate_registry` 必须发生在 worker 分配（`wiring.launch_worker_manager`）之前，而不是推迟到第一次打分时才发现问题？
+**答案**：三个理由层层递进。（1）**时序**：调用点在 `ray.init`、worker manager、W&B 初始化之前（[driver.py:43-48](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L43-L48) 早于 [driver.py:94-103](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L94-L103)），失败时不留任何需要清理的资源。（2）**成本**：若推迟到打分期，GPU 已分配、模型已加载、SGLang 引擎已起，错误在深达数分钟到数小时的初始化之后才出现，且每个打分 worker 都会各自失败一次。（3）**可观测性（最关键）**：有些契约违规不是异常而是**静默错判**——外部验证器在 final-only 模式下二次切分思考边界会拿到空输入，奖励全零、零方差组被过滤、训练空转，打分期根本不会「发现」（[rewards.py:343-346](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/rewards/rewards.py#L343-L346) 注释里点名的 qualified-IF 全零事故）。预检把这类错误变成启动期的显式 `ValueError`。
 
 ### 4.3 完成判定与最终存档：epoch 预算如何被判定为 complete
 
@@ -292,15 +302,15 @@ workflow.execute：completed[-1]+1 == result["num_rollout"] → status=complete
 
 #### 4.3.3 源码精读
 
-**预算二选一**。[open_instruct/miles/configuration/run_spec.py:736-740](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/run_spec.py#L736-L740)：`num_epoch` 与 `num_rollout` 同时设置直接 `InputError`（"Choose num_epoch or num_rollouts; MILES would otherwise ignore num_epoch"——防止用户以为 epoch 生效实际被忽略）；只设 `num_epoch` 时**不再**补默认 `num_rollout=100`（旧版这个默认值无条件写入，正是 epoch 预算此前不可用的原因）。
+**预算二选一**。[open_instruct/miles/configuration/run_spec.py:736-740](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L736-L740)：`num_epoch` 与 `num_rollout` 同时设置直接 `InputError`（"Choose num_epoch or num_rollouts; MILES would otherwise ignore num_epoch"——防止用户以为 epoch 生效实际被忽略）；只设 `num_epoch` 时**不再**补默认 `num_rollout=100`（旧版这个默认值无条件写入，正是 epoch 预算此前不可用的原因）。
 
-**存档节奏的编译**。[open_instruct/miles/configuration/run_spec.py:788-797](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/run_spec.py#L788-L797)：`save_checkpoints=true` 时——有 `num_rollout` 则 `save_interval` 默认取它（只在结尾存）；否则（epoch 预算）`core.setdefault("save_final_checkpoint", True)`，L793-794 注释写明「Native MILES resolves the epoch budget after loading the dataset. Save the final update without inventing a periodic cadence here.」`save_checkpoints=false` 与显式 `save_interval` 冲突报错；与 `max_run_seconds` 组合则把时间停标记为终局（`max_run_final=True`，无可恢复之物）。
+**存档节奏的编译**。[open_instruct/miles/configuration/run_spec.py:788-797](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L788-L797)：`save_checkpoints=true` 时——有 `num_rollout` 则 `save_interval` 默认取它（只在结尾存）；否则（epoch 预算）`core.setdefault("save_final_checkpoint", True)`，L793-794 注释写明「Native MILES resolves the epoch budget after loading the dataset. Save the final update without inventing a periodic cadence here.」`save_checkpoints=false` 与显式 `save_interval` 冲突报错；与 `max_run_seconds` 组合则把时间停标记为终局（`max_run_final=True`，无可恢复之物）。
 
-**新 CoreConfig 字段**。[open_instruct/miles/configuration/config.py:84-85](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py#L84-L85)：`save_final_checkpoint: bool = False`，注释定位为「epoch 派生预算、无周期存档节奏时的 driver 策略」；它在 [config.py:239-264](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py#L239-L264) 的布尔字段校验表中（L244），并经 [config.py:819-840](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py#L819-L840) 的 `arguments()` 随 `--olmo-core-config` 的 JSON 传给运行时，最终出现在 driver 眼中的 `args.olmo_core.save_final_checkpoint`。`num_epoch` 的正整数校验在 [config.py:649-651](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/config.py#L649-L651)（`0`、负数、`true` 都被拒——注意 Python 里 `True` 是 `int`，所以这里显式检查 `type(...) is not int`）。
+**新 CoreConfig 字段**。[open_instruct/miles/configuration/config.py:84-85](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L84-L85)：`save_final_checkpoint: bool = False`，注释定位为「epoch 派生预算、无周期存档节奏时的 driver 策略」；它在 [config.py:239-264](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L239-L264) 的布尔字段校验表中（L244），并经 [config.py:819-840](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L819-L840) 的 `arguments()` 随 `--olmo-core-config` 的 JSON 传给运行时，最终出现在 driver 眼中的 `args.olmo_core.save_final_checkpoint`。`num_epoch` 的正整数校验在 [config.py:649-651](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L649-L651)（`0`、负数、`true` 都被拒——注意 Python 里 `True` 是 `int`，所以这里显式检查 `type(...) is not int`）。
 
-**driver 侧的最终存档与返回值**（已在 4.2.3 展开，这里只点名）：[driver.py:311](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L311) 的第三个存档触发条件与 [driver.py:437-445](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L437-L445) 返回字典中的 `num_rollout`。
+**driver 侧的最终存档与返回值**（已在 4.2.3 展开，这里只点名）：[driver.py:311](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L311) 的第三个存档触发条件与 [driver.py:437-445](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L437-L445) 返回字典中的 `num_rollout`。
 
-**workflow 的完成判定**。[open_instruct/miles/execution/workflow.py:413-423](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L413-L423)：
+**workflow 的完成判定**。[open_instruct/miles/execution/workflow.py:414-424](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L414-L424)：
 
 ```python
 completed = result.get("completed_rollout_ids") if result else None
@@ -315,9 +325,9 @@ complete = (
 )
 ```
 
-四个条件的语义：① driver 没有报告完成清单（视为完成，兼容旧返回）；② 命名池耗尽（数据用尽即目标达成）；③ 不可恢复的时间停（终局停）；④ 完成计数 +1 达到总数。**关键在第④项右侧**：`result.get("num_rollout", config.miles.get("num_rollout"))`——driver 返回的、由原生运行时在数据加载后解析出的总数优先；编译配置里的 `num_rollout` 只是旧运行时的回退。epoch 预算 run 正是靠第④项右侧的新值被正确判为 complete。判定后 [workflow.py:424-425](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L424-L425) 把 `complete`/`stopped` 与整个结果字典写进 `workflow.json`——而 4.1 里「已 complete 的 run 不可重启」正是消费这个状态。
+四个条件的语义：① driver 没有报告完成清单（视为完成，兼容旧返回）；② 命名池耗尽（数据用尽即目标达成）；③ 不可恢复的时间停（终局停）；④ 完成计数 +1 达到总数。**关键在第④项右侧**：`result.get("num_rollout", config.miles.get("num_rollout"))`——driver 返回的、由原生运行时在数据加载后解析出的总数优先；编译配置里的 `num_rollout` 只是旧运行时的回退。epoch 预算 run 正是靠第④项右侧的新值被正确判为 complete。判定后 [workflow.py:425-426](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L425-L426) 把 `complete`/`stopped` 与整个结果字典写进 `workflow.json`——而 4.1 里「已 complete 的 run 不可重启」正是消费这个状态。
 
-**测试佐证**。[open_instruct/test_miles_epoch_budget.py:10-36](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/test_miles_epoch_budget.py#L10-L36) 是这条链的验收：`num_epoch=2` 编译后 `miles["num_epoch"]==2` 且**没有** `num_rollout`；argv 含 `--num-epoch` 不含 `--num-rollout`；`compiled.core.save_final_checkpoint` 为真且无 `save_interval`；`training.num_rollouts` 与 `num_epoch` 并存、`num_epoch ∈ {0,-1,True}` 均抛 `ValueError`；`save_checkpoints=false` 时 `save_final_checkpoint` 不再默认为真。
+**测试佐证**。[open_instruct/test_miles_epoch_budget.py:10-36](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_epoch_budget.py#L10-L36) 是这条链的验收：`num_epoch=2` 编译后 `miles["num_epoch"]==2` 且**没有** `num_rollout`；argv 含 `--num-epoch` 不含 `--num-rollout`；`compiled.core.save_final_checkpoint` 为真且无 `save_interval`；`training.num_rollouts` 与 `num_epoch` 并存、`num_epoch ∈ {0,-1,True}` 均抛 `ValueError`；`save_checkpoints=false` 时 `save_final_checkpoint` 不再默认为真。
 
 #### 4.3.4 代码实践
 
@@ -350,10 +360,10 @@ complete = (
 #### 4.3.5 小练习与答案
 
 **练习 1**：为什么 workflow 不干脆在编译时把 `num_epoch` 换算成 `num_rollout`？
-**答案**：换算需要知道 rollout 数据集的长度（每个 epoch 含多少个 rollout），而数据集在**准备/加载之后**才知道大小——编译发生在 CPU 提交机上，连数据都可能没挂载（`plan` 阶段不要求路径存在）。源码注释直接陈述了这个分工：「Native MILES resolves the epoch budget after loading the dataset」（[run_spec.py:793-794](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/configuration/run_spec.py#L793-L794)）。
+**答案**：换算需要知道 rollout 数据集的长度（每个 epoch 含多少个 rollout），而数据集在**准备/加载之后**才知道大小——编译发生在 CPU 提交机上，连数据都可能没挂载（`plan` 阶段不要求路径存在）。源码注释直接陈述了这个分工：「Native MILES resolves the epoch budget after loading the dataset」（[run_spec.py:793-794](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L793-L794)）。
 
 **练习 2**：一个 epoch 预算 run 在最后一个 rollout 保存了最终权重。如果磁盘上这个存档损坏，resume 会发生什么？
-**答案**：`execute` 只在 `core-latest.json` 存在时才挂载 `load`（[workflow.py:396-398](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L396-L398)）；损坏的存档在原生运行时加载时报错，本次 attempt 失败、状态记为 `failed`。由于完成状态依赖 driver 实际跑完（而不是存档存在），它不会被误判为 complete。
+**答案**：`execute` 只在 `core-latest.json` 存在时才挂载 `load`（[workflow.py:397-399](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L397-L399)）；损坏的存档在原生运行时加载时报错，本次 attempt 失败、状态记为 `failed`。由于完成状态依赖 driver 实际跑完（而不是存档存在），它不会被误判为 complete。
 
 **练习 3**：`result.get("num_rollout", config.miles.get("num_rollout"))` 为什么要保留后面的回退项？
 **答案**：driver 与 workflow 可能来自不同版本的运行时（例如旧镜像里 driver 的返回字典还没有 `num_rollout` 字段）。此时回退到编译配置里的 `num_rollout`——rollout 预算 run 的值编译时已确定，行为与旧版完全一致。这是「新字段优先、旧字段兜底」的兼容式演进。
@@ -388,15 +398,15 @@ run(config)                                  # 每个 Beaker 副本一个进程
 
 #### 4.4.3 源码精读
 
-**Supervisor 的构造与启动预算**。[open_instruct/miles/execution/cluster.py:80-107](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L80-L107)：rank 0 把 `deadline = now + startup_timeout` 写进 `startup.json`，其余副本轮询该文件直到出现（超时即失败）——**整个集群对「启动要多久」只有一个预算**，避免各副本各算各的。
+**Supervisor 的构造与启动预算**。[open_instruct/miles/execution/cluster.py:80-107](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L80-L107)：rank 0 把 `deadline = now + startup_timeout` 写进 `startup.json`，其余副本轮询该文件直到出现（超时即失败）——**整个集群对「启动要多久」只有一个预算**，避免各副本各算各的。
 
-**心跳线程**。[open_instruct/miles/execution/cluster.py:109-154](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L109-L154)：每 2 秒写自己的心跳、检查对端心跳与子进程、按需探针 judge 健康。`check_peer_heartbeats` 有两个值得注意的细节：共享文件系统上的瞬时缺文件不算对端死亡（保留最后一次观测值，但不延长其期限）；心跳超过 `heartbeat_timeout` 即抛错。被监管子进程退出码非零同样抛错——但仅当 `complete.json` 还不存在（训练完成后的退出不是故障）。
+**心跳线程**。[open_instruct/miles/execution/cluster.py:109-154](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L109-L154)：每 2 秒写自己的心跳、检查对端心跳与子进程、按需探针 judge 健康。`check_peer_heartbeats` 有两个值得注意的细节：共享文件系统上的瞬时缺文件不算对端死亡（保留最后一次观测值，但不延长其期限）；心跳超过 `heartbeat_timeout` 即抛错。被监管子进程退出码非零同样抛错——但仅当 `complete.json` 还不存在（训练完成后的退出不是故障）。
 
-**judge 健康探针**。[open_instruct/miles/execution/cluster.py:156-184](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L156-L184)：judge 服务在真正 HTTP 200 之前只算「待就绪」并受启动 deadline 约束；进入稳态后每次探针失败计一次，**连续 3 次**失败才判死——容忍单次网络抖动。
+**judge 健康探针**。[open_instruct/miles/execution/cluster.py:156-184](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L156-L184)：judge 服务在真正 HTTP 200 之前只算「待就绪」并受启动 deadline 约束；进入稳态后每次探针失败计一次，**连续 3 次**失败才判死——容忍单次网络抖动。
 
-**check / wait**。[open_instruct/miles/execution/cluster.py:195-227](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L195-L227)：`check()` 汇总所有失败源（自身线程异常、startup 任务退出、对端 `failed-*.json`）并转发子进程日志；`wait()` 在 deadline 内轮询谓词，每 30 秒打一条「还在等」的警告。注意 L206-209 的注释：**显式 timeout 只用于训练后的完成等待**——训练阶段不受启动 deadline 约束（那会误杀长训练），由 Beaker 的 run timeout 与心跳兜底。
+**check / wait**。[open_instruct/miles/execution/cluster.py:195-227](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L195-L227)：`check()` 汇总所有失败源（自身线程异常、startup 任务退出、对端 `failed-*.json`）并转发子进程日志；`wait()` 在 deadline 内轮询谓词，每 30 秒打一条「还在等」的警告。注意 L206-209 的注释：**显式 timeout 只用于训练后的完成等待**——训练阶段不受启动 deadline 约束（那会误杀长训练），由 Beaker 的 run timeout 与心跳兜底。
 
-**run：从 rendezvous 到 workflow**。[open_instruct/miles/execution/cluster.py:270-411](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L270-L411)：
+**run：从 rendezvous 到 workflow**。[open_instruct/miles/execution/cluster.py:270-411](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L270-L411)：
 
 - L283-289：以 `OI_MILES_LAUNCH_ID` 为 attempt 标识 `rendezvous.join` 到全新目录；
 - L301-306：等所有 `node-{rank}.json` 到齐后由 `topology.assign` 定分工（head 取 IP 最小者）；
@@ -405,34 +415,135 @@ run(config)                                  # 每个 Beaker 副本一个进程
 - L357-392：`ray start --block`，head 与 worker 参数不同；
 - L394-405：**只有 head 调用 `start_workflow` 并写 `complete.json`**；其余副本轮询 `complete.json`，最后全体各写 `done-{rank}.json`，head 等全部 done 再停 Ray——保证没有副本在 head 收尾时还在用 Ray。
 
-**start_workflow：准备与就绪解耦**。[open_instruct/miles/execution/cluster.py:414-427](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L414-L427)：head 用 `start_task` 拉起两个**有限期**探针子进程（`--probe` 查 Ray 布局、`--probe-judges` 查 judge 就绪与 canary，见 [cluster.py:430-470](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L430-L470)），同时用 `run_child` 运行 `python -m open_instruct.miles train <config>`——即 4.1/4.2 的 workflow+driver。driver 在 `judge_readiness_wait` 阶段（[driver.py:193-196](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L193-L196)）等这些探针放行，期间可以并行做模型/数据准备。
+**start_workflow：准备与就绪解耦**。[open_instruct/miles/execution/cluster.py:414-427](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L414-L427)：head 用 `start_task` 拉起两个**有限期**探针子进程（`--probe` 查 Ray 布局、`--probe-judges` 查 judge 就绪与 canary，见 [cluster.py:430-470](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L430-L470)），同时用 `run_child` 运行 `python -m open_instruct.miles train <config>`——即 4.1/4.2 的 workflow+driver。driver 在 `judge_readiness_wait` 阶段（[driver.py:193-196](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L193-L196)）等这些探针放行，期间可以并行做模型/数据准备。
 
 #### 4.4.4 代码实践
 
 **实践目标**：源码阅读型实践——推演「一个 worker 副本心跳超时」的故障传播路径。
 
-1. 假设副本 1 的节点在训练中途失联。从 [cluster.py:125-154](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L125-L154) 出发，写出传播链。
+1. 假设副本 1 的节点在训练中途失联。从 [cluster.py:125-154](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L125-L154) 出发，写出传播链。
 2. 再回答：head 的 driver 此刻在做什么？它能否感知？（提示：driver 的 `ray_readiness_wait` 只在启动期；训练期对端失联靠谁发现？）
 3. **需要观察的现象**（纸上推演）：心跳线程抛 `RuntimeError("Replica 1 heartbeat expired")` → `self.failed` 被置位 → 主循环下一次 `supervisor.check()` 抛出 → `run` 的 `except` 写 `failed-0.json` → 对端（如果还活着）的 `check()` 读到 `failed-*.json` 也失败 → Beaker 层面任务失败，触发重试（`auto_resume` 时回到 4.1 的指纹恢复流程）。
 4. **预期结果**：任何单副本失联都会在 `heartbeat_timeout` 内让全体副本失败，且 `cluster/<attempt>/` 下留下 `failed-{rank}.json` 与心跳文件作为尸检证据。
-5. 无集群环境，属源码阅读型实践，结论**待本地验证**（可对照 `docs/miles/workflow.md` 的 "A killed process may leave the last recorded workflow state" 一节，[docs/miles/workflow.md:72-79](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/workflow.md#L72-L79)）。
+5. 无集群环境，属源码阅读型实践，结论**待本地验证**（可对照 `docs/miles/workflow.md` 的 "A killed process may leave the last recorded workflow state" 一节，[docs/miles/workflow.md:72-79](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/workflow.md#L72-L79)）。
 
 #### 4.4.5 小练习与答案
 
 **练习 1**：为什么 startup deadline 由 rank 0 统一发布，而不是各副本各自计算？
-**答案**：各副本启动时刻略有先后，若各自算 deadline，先启动的先到期，会出现「A 认为 B 超时而 B 认为自己还有时间」的分歧。统一预算（[cluster.py:84-93](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L84-L93)）让所有副本对「启动窗口何时关闭」有一致视图。
+**答案**：各副本启动时刻略有先后，若各自算 deadline，先启动的先到期，会出现「A 认为 B 超时而 B 认为自己还有时间」的分歧。统一预算（[cluster.py:84-93](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L84-L93)）让所有副本对「启动窗口何时关闭」有一致视图。
 
 **练习 2**：`start_task` 与 `start(..., monitor=True)` 有什么区别？为什么 ray-readiness 用前者、driver 用后者（`run_child`）？
-**答案**：`monitor=True` 的子进程一旦非零退出就被视为崩溃（[cluster.py:238-240](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L238-L240)）；`start_task` 专门承载「有限期的启动子进程」，其退出码由 `check()` 单独汇报（[cluster.py:199-201](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L199-L201)）。driver 走 `run_child`（不进 children 列表、逐秒 `check()`）：driver 的失败要有自己的清理与失败记录路径，而不是被当作「被监管子进程崩溃」一刀切。
+**答案**：`monitor=True` 的子进程一旦非零退出就被视为崩溃（[cluster.py:238-240](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L238-L240)）；`start_task` 专门承载「有限期的启动子进程」，其退出码由 `check()` 单独汇报（[cluster.py:199-201](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L199-L201)）。driver 走 `run_child`（不进 children 列表、逐秒 `check()`）：driver 的失败要有自己的清理与失败记录路径，而不是被当作「被监管子进程崩溃」一刀切。
 
 **练习 3**：driver 为什么要专门 `await startup.wait_ready("judges")`，而不是在起 judge 的地方同步等待？
-**答案**：准备模型/数据是 CPU+IO 工作，与 judge 加载（占自己的 GPU）互不依赖。cluster 侧用探针子进程并行检测就绪（[cluster.py:422-425](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/cluster.py#L422-L425)），driver 侧在首次发布后才等 judge（[driver.py:193-196](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L193-L196)，注释："GPU initialization and initial publication can finish while qualification runs"），把串行等待压缩成并行流水。
+**答案**：准备模型/数据是 CPU+IO 工作，与 judge 加载（占自己的 GPU）互不依赖。cluster 侧用探针子进程并行检测就绪（[cluster.py:422-425](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/cluster.py#L422-L425)），driver 侧在首次发布后才等 judge（[driver.py:193-196](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L193-L196)，注释："GPU initialization and initial publication can finish while qualification runs"），把串行等待压缩成并行流水。
+
+### 4.5 启动期资产预检：SciCode 参考路径与三道启动边界（本轮更新）
+
+#### 4.5.1 概念说明
+
+SciCode 是后台评估的一个外部任务：评估器要拿一份宿主机上的参考数据文件（`test_data.h5`）逐题比对。以前维护示例里写的是占位路径（`/weka/.../YOUR_USERNAME/scicode/test_data.h5`），用户若忘了替换，故障要到训练中途第一次评估分发时才暴露——看起来像「评估器崩了」，实际是配置错误。
+
+本轮（PR #2260）把这件事前移成**启动期资产预检**，并与上一轮的注册表预检构成同一主题：「**配置错误必须在任何 GPU / 资源分配之前显式失败**」。两条预检的对照：
+
+| | 注册表契约预检（上一轮） | SciCode 资产预检（本轮） |
+| --- | --- | --- |
+| 检查对象 | 判分注册表的 grading 输入契约 | SciCode 任务显式参考路径的「占位形态」 |
+| 主要调用点 | [driver.py:43-48](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L43-L48)（train 顶端，worker 分配前） | [workflow.py:350](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L350) 等**三道边界**（见下） |
+| 失败形态 | `ValueError` / `InputError`，秒级 | `InputError`，附完整自救说明 |
+| plan 期行为 | 不触发（train 命令才走到） | `launch_warnings` **软警告**（模板保持可加载） |
+| 缺省时 | 未配置 reward_config 则跳过 | 未写 `h5py_host_path` 则跳过（评估器解析默认秘密） |
+
+与注册表预检不同的一个设计点：**plan 不失败**。`plan` 的定位是「让模板可加载、可检查」，所以占位路径在 plan 期只进 `launch_warnings` 警告；硬拒绝留给三个真正要花资源的启动边界。
+
+#### 4.5.2 核心流程
+
+```text
+evaluation.parse（配置加载期，u8-l9）
+  └─ scicode 任务未写 h5py_host_path ?
+       → evaluation.secrets 自动注入 SCICODE_H5PY_HOST_PATH（默认 Beaker 秘密）
+
+plan（提交机，CPU）
+  └─ RunSpec.launch_warnings 捕获 InputError → 打印警告（不失败）
+
+三道启动边界（硬拒绝，互为冗余）：
+  ① launch.specification   → 拓扑规划 topology.plan 之前（提交 Beaker 前的最后关卡）
+  ② workflow.execute       → run_directory 锁/模型准备之前（本讲 4.1 的 L350）
+  ③ evaluation.specification → 评估回执组装开头（评估任务规格生成时）
+
+评估器内部（u8-l9 详述）：
+  └─ 解析秘密 → 校验参考文件存在 → 才开始推理；
+     秘密值不在提交机解析、不写进回执
+```
+
+「显式路径 > 秘密 > 默认」的优先级与秘密解析的安全模型属 u8-l9 的范围；本讲的边界是：**`workflow.execute` 与 `launch.specification` 各自独立拒绝占位路径，且都发生在任何 GPU 任务被分配之前**。
+
+#### 4.5.3 源码精读
+
+**预检本体**。[open_instruct/miles/evaluation/evaluation.py:241-260](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L241-L260) 的 `validate_scicode_reference_path`：遍历 `config["tasks"]`，只处理 `kind == "external"` 且 `task == "scicode"` 的任务；**没写 `h5py_host_path` 就跳过**（L250-251 注释：评估器负责解析默认 Beaker 秘密）；写了则要求它是一个「干净的绝对路径」，命中任何一条即抛 `InputError`：
+
+- 不是字符串 / 空 / 前后带空白（`" test.h5"` 也算脏）；
+- 不是绝对路径（`test.h5`、`~/test.h5` 都不行——波浪号不会被 shell 展开，交给远端就是死路径）；
+- 匹配占位形态正则 `YOUR_[A-Z_]+|[$<>]`——拦下 `YOUR_USERNAME`、`${USER}`、`<user>` 这些「等你来填」的写法。
+
+docstring（L242-246）同时说明了为什么**不做存在性检查**：「The path belongs to the remote worker, so existence is checked there rather than on the submitting workstation」——提交机上往往没挂载 WEKA，查了反而误伤；存在性由评估器在解析秘密后校验（u8-l9）。
+
+**错误信息即自救指南**。抛错携带的 `SCICODE_REFERENCE_HELP`（[evaluation.py:34-42](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L34-L42)）把三条出路全部列出：删掉 `arguments.h5py_host_path` 用默认 `SCICODE_H5PY_HOST_PATH` 秘密；或换成真实绝对路径；或用 `evaluation.secrets.SCICODE_H5PY_HOST_PATH` 指到别的秘密；不想要 SciCode 就删掉它的 `[[evaluation.tasks]]` 条目；最后提醒「rerun plan」。
+
+**默认秘密的注入点**。[open_instruct/miles/evaluation/evaluation.py:232-236](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L232-L236)：`parse` 在收尾时检查「存在 scicode 外部任务且未写 `h5py_host_path`」，命中则 `value["secrets"].setdefault(SCICODE_REFERENCE_SECRET, SCICODE_REFERENCE_SECRET)`——环境变量名与 Beaker 秘密名同名，按名注入（这是继 `CODE_EXECUTION_TOKEN` 之后第二个「Beaker 秘密按名注入」的实例，详见 u8-l8）。L204 的注释点明分工：「Templates stay loadable; validate_scicode_reference_path rejects unresolved paths at launch」。
+
+**三道启动边界**（冗余防御，任何一道先到都拒绝）：
+
+1. [open_instruct/miles/execution/launch.py:34-39](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/launch.py#L34-L39)：`specification()` 在 `spec.compile()` 与 `topology.plan` **之前**调用预检——提交 Beaker 实验前就把占位路径挡下，连拓扑规划都不必发生；
+2. [open_instruct/miles/execution/workflow.py:349-350](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L350)：`execute()` 的第一行。注意它位于 `with run_directory(spec)` **之外**——被拒时不会拿目录锁、不会写 `attempts.json`（不消耗重试额度）、不会把状态写成 `failed`：**配置错误不是 run 失败**，run 目录保持原样；
+3. [open_instruct/miles/evaluation/evaluation.py:367-369](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L367-L369)：`specification(receipt)` 组装评估任务规格时再查一次（防的是绕过前两道直接提交评估回执的路径），且位于 runner 源码哈希校验（L373）之前——注释写明「Asset validation precedes the remaining receipt/provenance checks」。
+
+**plan 期的软警告**。[open_instruct/miles/configuration/run_spec.py:904-909](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L904-L909)：`launch_warnings` 用 try/except 把同一个 `InputError` 转成警告字符串——同一份校验逻辑在 plan 期是提示、在启动期是拒绝，不需要维护两套规则。
+
+**示例配置同步更新**。[configs/miles/examples/tiny/three-node.toml:155-160](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/three-node.toml#L155-L160)：scicode 任务删去了占位 `h5py_host_path`，注释改为「Reference data defaults to the SCICODE_H5PY_HOST_PATH Beaker secret」——标准三节点模板从此开箱即用（秘密已在 `ai2/olmo-instruct` 与 `ai2/open-instruct-dev` 工作区预配，见 [docs/miles/background-evaluation.md:77-89](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/background-evaluation.md#L77-L89)）。
+
+**测试佐证**。[open_instruct/test_miles_scicode_reference.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py) 三组关键断言：
+
+- L18-36：十种占位/脏路径（`None`、空串、带空白、相对路径、`~/`、`YOUR_USERNAME`、`${USER}`、`<user>`…）全部被拒；
+- L39-47：合法绝对路径 `/weka/assets/test_data.h5` **不需要在提交机上存在**也能通过；非 scicode 任务不受影响；
+- L57-74：把占位路径注回 three-node 模板后，`launch` / `execute` / `evaluation` 三个边界参数化验证——`prepare_model` 被 mock 成「一旦调用即 AssertionError」，断言 `prepare.assert_not_called()`：**模型准备确实从未发生**；同时 L60-63 验证 plan 输出的 `launch_warnings` 包含 "Remove arguments.h5py_host_path to use the default" 与秘密名。
+
+#### 4.5.4 代码实践
+
+**实践目标**：用单测与 plan 命令亲身体验「同一校验，plan 期警告、启动期拒绝」的双面行为。
+
+1. 运行预检单测（CPU 即可，不依赖 GPU/WEKA）：
+
+   ```bash
+   uv run pytest open_instruct/test_miles_scicode_reference.py -v
+   ```
+
+2. 复刻测试里的占位场景：把 `configs/miles/examples/tiny/three-node.toml` 复制到 `/tmp/three-node-placeholder.toml`，在 scicode 任务的 `arguments` 里加回 `h5py_host_path = "/weka/oe-adapt-default/YOUR_USERNAME/scicode/test_data.h5"`（与 [test_miles_scicode_reference.py:50-54](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py#L50-L54) 的做法一致），然后：
+
+   ```bash
+   python -m open_instruct.miles plan /tmp/three-node-placeholder.toml
+   ```
+
+3. **需要观察的现象**：单测全绿（三个边界用例 + 占位参数化用例 + 回执用例）；`plan` **不会失败**，但输出的 `launch_warnings` 里出现一条包含 "Remove arguments.h5py_host_path to use the default SCICODE_H5PY_HOST_PATH Beaker secret" 的警告。
+4. **预期结果**：对照 4.5.3 的规则逐条核对——`YOUR_USERNAME` 命中占位正则被拦；未写路径的原始 three-node.toml（步骤 1 的模板加载路径）不产生该警告。
+5. 命令本地未实际执行，plan 警告的具体输出格式**待本地验证**（单测通过与否可直接作为判据）。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：`workflow.execute` 里的预检为什么放在 `with run_directory(spec)` 之外，而不是进去之后再查？
+**答案**：进不进 `run_directory` 决定了失败的「定性」。在里面抛错会把 run 状态写成 `failed`、可能消耗 `attempts.json` 的重试额度；在外面抛错则 run 目录原样不动——占位路径是**配置错误**而不是**运行失败**，不该让 Beaker 的自动重试机制为一个永远不会自愈的错误空转（对照 [workflow.py:349-351](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L351) 的语句顺序与 [test_miles_scicode_reference.py:64-74](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py#L64-L74) 的 `prepare.assert_not_called()`）。
+
+**练习 2**：为什么 `validate_scicode_reference_path` 只查「形态」不查「文件存在」？那存在性在哪里查？
+**答案**：路径指向的是**评估器所在主机**上的文件（通常在 WEKA 挂载上），提交机很可能没挂载那个文件系统，在这里查存在会误伤合法配置（[evaluation.py:242-246](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L242-L246) docstring；[test_miles_scicode_reference.py:39-47](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py#L39-L47) 用例名就叫 "does_not_need_to_exist_on_submitter"）。存在性由评估器在解析秘密后、开始推理前校验（evaluation_runner，详见 u8-l9）。
+
+**练习 3**：三道启动边界为什么需要冗余设置？任何一道单独存在不就够了吗？
+**答案**：它们防的是**不同的进入路径**：`launch.specification` 挡住 `run`/`submit` 命令（最常见的提交路径，在拓扑规划前拒绝）；`workflow.execute` 挡住 `train` 直跑与 Beaker 重试（不经过 launch 的执行路径）；`evaluation.specification` 挡住「直接组装评估回执」的路径（评估任务规格可以独立于训练提交）。任一路径单独绕过都不该把占位路径带进 GPU 任务——这是「纵深防御」在配置校验上的翻版。
 
 ## 5. 综合实践
 
-把本讲四个模块串成一份「run 生命周期 Runbook」。产物是一份 Markdown 笔记，包含四部分：
+把本讲五个模块串成一份「run 生命周期 Runbook」。产物是一份 Markdown 笔记，包含五部分：
 
-**任务 A：三阶段输入输出表**。对照 `execute`（[workflow.py:349-426](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/workflow.py#L349-L426)）与 [docs/miles/workflow.md](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/workflow.md)，填写：
+**任务 A：三阶段输入输出表**。对照 `execute`（[workflow.py:349-427](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L427)）与 [docs/miles/workflow.md](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/workflow.md)，填写：
 
 | 阶段 | 输入 | 输出（写到哪里） | 中断后可否复用 | 判据 |
 | --- | --- | --- | --- | --- |
@@ -442,18 +553,21 @@ run(config)                                  # 每个 Beaker 副本一个进程
 
 并用自己的话回答：**中断后哪些阶段可跳过、哪些必须重算？**（要点：指纹匹配 + 产物标记完整 → 模型/数据直接复用；训练阶段从最新 checkpoint 恢复，未消费的提示组再生。）
 
-**任务 B：完成判定追踪**。写一份 200 字左右的说明：epoch 预算 run（无显式 `num_rollouts`）如何被判定为 complete。必须覆盖四个数据点：编译期不补 `num_rollout` 默认值、`save_final_checkpoint` 的默认链、driver 返回字典里的 `num_rollout` 从哪来、workflow L415-423 四个析取条件各对应什么场景。
+**任务 B：完成判定追踪**。写一份 200 字左右的说明：epoch 预算 run（无显式 `num_rollouts`）如何被判定为 complete。必须覆盖四个数据点：编译期不补 `num_rollout` 默认值、`save_final_checkpoint` 的默认链、driver 返回字典里的 `num_rollout` 从哪来、workflow L416-424 四个析取条件各对应什么场景。
 
 **任务 C：验证**。运行：
 
 ```bash
 uv run pytest open_instruct/test_miles_epoch_budget.py -v
 uv run pytest open_instruct/test_miles_grading_consumers.py -v -k "registry_preflight"
+uv run pytest open_instruct/test_miles_scicode_reference.py -v
 ```
 
-把每条断言映射回任务 B 说明中的一个数据点（例如 `assert "save_interval" not in compiled.miles` ↔ 「不发明周期存档节奏」）；预检用例映射回任务 D。若断言失败，回到 4.3.3 / 4.2.3 对照源码找原因。
+把每条断言映射回任务 B 说明中的一个数据点（例如 `assert "save_interval" not in compiled.miles` ↔ 「不发明周期存档节奏」）；预检用例映射回任务 D 与任务 E。若断言失败，回到 4.3.3 / 4.2.3 / 4.5.3 对照源码找原因。
 
-**任务 D：预检调用点定位（本轮更新）**。在 [driver.py:43-48](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L43-L48) 找到 `validate_registry` 的调用点，写一段说明回答：① 预检的触发门槛为什么要求 `custom_rm_path` 指向 open-instruct 的两个奖励入口？② 它为什么必须发生在 `wiring.launch_worker_manager`（[driver.py:102-103](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/driver.py#L102-L103)）之前——从资源成本与「静默错判 vs 显式报错」两个角度展开（参考 4.2.5 练习 3 的答案自行组织语言）。
+**任务 D：注册表预检调用点定位（上一轮更新）**。在 [driver.py:43-48](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L43-L48) 找到 `validate_registry` 的调用点，写一段说明回答：① 预检的触发门槛为什么要求 `custom_rm_path` 指向 open-instruct 的两个奖励入口？② 它为什么必须发生在 `wiring.launch_worker_manager`（[driver.py:102-103](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/driver.py#L102-L103)）之前——从资源成本与「静默错判 vs 显式报错」两个角度展开（参考 4.2.5 练习 3 的答案自行组织语言）。
+
+**任务 E：SciCode 资产预检调用点定位（本轮更新）**。在 [workflow.py:349-350](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L350) 找到 `validate_scicode_reference_path` 的调用点，回答：① 它为什么必须发生在 `run_directory`（目录锁/attempt 记账）与模型准备之前？② 它与任务 D 的注册表预检共享哪条设计原则？差异又在哪里（提示：plan 期一个静默、一个软警告；一个在 driver 内、一个横跨三道启动边界）？③ 结合 [test_miles_scicode_reference.py:57-74](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/test_miles_scicode_reference.py#L57-L74) 说明测试如何**证明**「预检先于模型准备」这一顺序（mock 的 AssertionError 侧效 + `assert_not_called`）。
 
 ## 6. 本讲小结
 
@@ -461,13 +575,15 @@ uv run pytest open_instruct/test_miles_grading_consumers.py -v -k "registry_pref
 - `driver.train` 是单次尝试的协调循环：启动预检 → 取 batch → 优化器更新 → 存档边界 → 权重发布 → 评估分发；池耗尽、不可恢复的时间停、跑满预算三种情况算完成，debug 退出与可恢复时间停只算 stopped。
 - 完成判定的右侧使用 `result.get("num_rollout", ...)`——epoch 预算的 rollout 总数由原生运行时在数据加载后解析，driver 把它带回；`training.num_epoch` 与 `num_rollouts` 互斥，编译期不再补默认 100。
 - `core.save_final_checkpoint`（CoreConfig 字段）在 epoch 预算 + `save_checkpoints=true` 时默认置真，driver 在最后一个 rollout 落盘最终存档，替代缺失的周期 `save_interval`。
-- **本轮更新**：`driver.train` 在分配任何 worker 之前调用 `rewards.validate_registry`（新增 `reward_registry_validation` 计时阶段）——逐名解析可信注册表、为每个验证器计算 GradingPolicy，`reward_final_answer_only` 模式下拒绝未声明输入契约的外部验证器，`reward_reasoning_mode="none"` 时拒绝需要思考文本的验证器，把「静默错判」提前变成启动期显式失败。
+- 上一轮引入的 `driver.train` 注册表预检（`reward_registry_validation` 计时阶段）逐名解析可信注册表、为每个验证器计算 GradingPolicy，`reward_final_answer_only` 模式下拒绝未声明输入契约的外部验证器，把「静默错判」提前变成启动期显式失败。
+- **本轮更新**：`workflow.execute` 第一行新增 SciCode 资产预检——占位参考路径（`YOUR_*`/`$`/`<>` 等形态）在 plan 期进 `launch_warnings` 软警告，在 `launch.specification` / `workflow.execute` / `evaluation.specification` 三道启动边界被硬拒绝；`execute` 里的调用位于 `run_directory` 之外，配置错误不消耗重试额度、不弄脏 run 目录；未写路径时 `evaluation.parse` 自动注入默认 `SCICODE_H5PY_HOST_PATH` Beaker 秘密（完整秘密链路见 u8-l9）。
 - `cluster.Supervisor` 用统一启动预算、双贴心跳（写自己 + 查对端）、judge 三连失败判死和失败文件传播，把「多副本任何一个失联」变成全体有序失败，再交给 Beaker 重试与指纹恢复闭环。
 
 ## 7. 下一步学习建议
 
 - **u8-l4（数据源、混合、超长排除与源准备）**：本讲把 `prepare_data` 当黑盒，下一讲拆开它——mixture 混合、验证目标绑定与 `data.over_length` 排除策略。
+- **u8-l9（后台评估与推理记录）**：本讲只讲了 SciCode 参考路径的**预检**；秘密如何在评估器内解析、文件存在性校验、冻结任务身份与失败回执的可行动诊断，是同一条链路的下半程。
+- **u8-l8（启动、提交与运维）**：`launch.specification` 里那道 SciCode 边界的完整上下文——Beaker 实验编译、`SCICODE_H5PY_HOST_PATH` 与 `CODE_EXECUTION_TOKEN` 两个「按名注入、值不落盘」的秘密实例、以及运维完成判据。
 - **u8-l12（统一判分输入：ResponseParts、GradingPolicy 与 typed 奖励组件）**：本讲只把 `validate_registry` 当作启动期守门人；下一讲深入它校验的契约本身——`split_response` 的思考边界切分、objective × scope × require_response 的组合约束与 schema 2 证据隔离。
 - **u8-l6（MILES 奖励体系）**：注册表运行时分发、数学验证器隔离与命名裁判的完整图景，是本讲预检对象的「运行时版」。
-- **u8-l8（启动、提交与运维）**：本讲的 `cluster.run` 之上还有 launch/submit 把 run 编译成 Beaker 实验；`status` 与回执目录是运维视角的完成判据。
-- **源码延伸**：[open_instruct/miles/execution/rendezvous.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/rendezvous.py) 与 [open_instruct/miles/execution/startup.py](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/open_instruct/miles/execution/startup.py)（attempt 会合与就绪门槛），配合 [docs/miles/operations.md](https://github.com/allenai/open-instruct/blob/8cd7c9eb4e4d997cd482e9f88f5249d081728d9a/docs/miles/operations.md) 判断 run 是否真正完成。
+- **源码延伸**：[open_instruct/miles/execution/rendezvous.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/rendezvous.py) 与 [open_instruct/miles/execution/startup.py](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/startup.py)（attempt 会合与就绪门槛），配合 [docs/miles/operations.md](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/docs/miles/operations.md) 判断 run 是否真正完成。

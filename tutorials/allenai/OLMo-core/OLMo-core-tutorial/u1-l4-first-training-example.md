@@ -86,11 +86,11 @@ prepare_training_environment()  →  train(config)  →  teardown_training_envir
 
 **① 数据在哪里找。** 脚本先探测 AI2 内部集群的常用路径，找不到就回退到 HTTP 流式下载（慢），也可以用环境变量 `OLMO_DATA_ROOT` 自己指定：
 
-[src/examples/llm/train.py:L55-L81](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L55-L81) —— 探测 `/net/nfs/...` 与 `/weka/...` 目录，回退到 `http://olmo-data.org/examples/c4-en/gpt2`，拼出训练与验证数据路径 `c4-train.00000-00099.npy`、`c4-validation.00000-00008.npy`。注释里还提示可以 `wget http://olmo-data.org/examples/c4-en/gpt2/c4-train.00000-00099.npy` 手动下载。
+[src/examples/llm/train.py:L55-L81](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L55-L81) —— 探测 `/net/nfs/...` 与 `/weka/...` 目录，回退到 `http://olmo-data.org/examples/c4-en/gpt2`，拼出训练与验证数据路径 `c4-train.00000-00099.npy`、`c4-validation.00000-00008.npy`。注释里还提示可以 `wget http://olmo-data.org/examples/c4-en/gpt2/c4-train.00000-00099.npy` 手动下载。
 
 **② ExperimentConfig 本体。**
 
-[src/examples/llm/train.py:L84-L106](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L84-L106) —— 定义五个 Config 字段，外加三个实验级选项：
+[src/examples/llm/train.py:L84-L106](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L84-L106) —— 定义五个 Config 字段，外加三个实验级选项：
 
 ```python
 @dataclass
@@ -109,22 +109,22 @@ class ExperimentConfig(Config):
 
 **③ 命令行参数与 dotlist 覆盖的分离。**
 
-[src/examples/llm/train.py:L273-L312](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L273-L312) —— `parser_args()` 用 `parse_known_args()` 把参数分成两组：脚本自己的参数（`run_name`、`--model-factory` 默认 `llama2_271M`、`--sequence-length` 默认 2048、`--save-folder`、`--work-dir`、`--dry-run`）和剩余的「dotlist 覆盖」（如 `train_module.optim.lr=6e-3`），后者原样传给 `config.merge(overrides)`。
+[src/examples/llm/train.py:L273-L312](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L273-L312) —— `parser_args()` 用 `parse_known_args()` 把参数分成两组：脚本自己的参数（`run_name`、`--model-factory` 默认 `llama2_271M`、`--sequence-length` 默认 2048、`--save-folder`、`--work-dir`、`--dry-run`）和剩余的「dotlist 覆盖」（如 `train_module.optim.lr=6e-3`），后者原样传给 `config.merge(overrides)`。
 
-[src/examples/llm/train.py:L265-L268](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L265-L268) —— `config = config.merge(overrides)` 把命令行覆盖应用到整棵配置树上。这就是 u1-l1 提到的「点号路径覆盖参数」的落点。
+[src/examples/llm/train.py:L265-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L265-L268) —— `config = config.merge(overrides)` 把命令行覆盖应用到整棵配置树上。这就是 u1-l1 提到的「点号路径覆盖参数」的落点。
 
 **④ 五个 Config 怎么拼。**
 
-- [src/examples/llm/train.py:L154-L162](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L154-L162) —— 模型配置：`getattr(TransformerConfig, opts.model_factory)` 按名字取预置工厂方法（如 `llama2_271M`、`olmo2_190M`），并传入 `vocab_size=tokenizer_config.padded_vocab_size()`（把词表补齐到 128 的倍数）。
-- [src/examples/llm/train.py:L165-L176](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L165-L176) —— 数据集与加载器：`NumpyFSLDatasetConfig`（FSL = 固定序列长度切分），`global_batch_size=256 * 1024`，注释强调**单位是 token 不是实例**。
-- [src/examples/llm/train.py:L178-L193](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L178-L193) —— 训练模块：`rank_microbatch_size=16 * 1024`（同样是 token），`AdamWConfig(lr=1e-3, ...)`，用 `OptimGroupOverride` 给 `embeddings.weight` 单独设 `weight_decay=0.0`；`dp_config` 选择 FSDP（参数 bfloat16、规约 float32）；`compile_model=True` 开启 `torch.compile`；调度器 `CosWithWarmup(warmup_steps=100)`。
-- [src/examples/llm/train.py:L195-L255](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L195-L255) —— 训练器：`TrainerConfig(...)` 之后连续 `.with_callback(...)` 挂了 9 个回调（gpu_monitor、checkpointer、comet、wandb、config_saver、profiler、lm_evaluator、downstream_evaluator、gap_monitor）。其中 comet/wandb/profiler/gap_monitor 默认 `enabled=False`，checkpointer 每 1000 步存正式 checkpoint、每 100 步存临时（ephemeral）checkpoint，评估器每 250 步跑一次验证集 ppl 和 hellaswag。
+- [src/examples/llm/train.py:L154-L162](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L154-L162) —— 模型配置：`getattr(TransformerConfig, opts.model_factory)` 按名字取预置工厂方法（如 `llama2_271M`、`olmo2_190M`），并传入 `vocab_size=tokenizer_config.padded_vocab_size()`（把词表补齐到 128 的倍数）。
+- [src/examples/llm/train.py:L165-L176](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L165-L176) —— 数据集与加载器：`NumpyFSLDatasetConfig`（FSL = 固定序列长度切分），`global_batch_size=256 * 1024`，注释强调**单位是 token 不是实例**。
+- [src/examples/llm/train.py:L178-L193](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L178-L193) —— 训练模块：`rank_microbatch_size=16 * 1024`（同样是 token），`AdamWConfig(lr=1e-3, ...)`，用 `OptimGroupOverride` 给 `embeddings.weight` 单独设 `weight_decay=0.0`；`dp_config` 选择 FSDP（参数 bfloat16、规约 float32）；`compile_model=True` 开启 `torch.compile`；调度器 `CosWithWarmup(warmup_steps=100)`。
+- [src/examples/llm/train.py:L195-L255](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L195-L255) —— 训练器：`TrainerConfig(...)` 之后连续 `.with_callback(...)` 挂了 9 个回调（gpu_monitor、checkpointer、comet、wandb、config_saver、profiler、lm_evaluator、downstream_evaluator、gap_monitor）。其中 comet/wandb/profiler/gap_monitor 默认 `enabled=False`，checkpointer 每 1000 步存正式 checkpoint、每 100 步存临时（ephemeral）checkpoint，评估器每 250 步跑一次验证集 ppl 和 hellaswag。
 
-其中 `with_callback` 的定义在 [src/olmo_core/train/config.py:L76-L85](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/config.py#L76-L85) —— 它返回**新的**配置对象（`replace` + 深拷贝 callbacks 再添加），是不可变风格，所以可以链式调用。
+其中 `with_callback` 的定义在 [src/olmo_core/train/config.py:L76-L85](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/config.py#L76-L85) —— 它返回**新的**配置对象（`replace` + 深拷贝 callbacks 再添加），是不可变风格，所以可以链式调用。
 
 **⑤ main()：dry-run 在环境准备之前。**
 
-[src/examples/llm/train.py:L315-L325](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L315-L325) —— `main()` 先 `build_config`；若 `--dry-run` 则 `rich.print(config)` 后**直接 return**，根本不调用 `prepare_training_environment()`。这意味着 dry-run 不需要分布式环境；而 `build_config` 只构造配置对象、不构建数据集（构建发生在后面的 `config.dataset.build()`），所以 dry-run 也不下载数据。
+[src/examples/llm/train.py:L315-L325](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L315-L325) —— `main()` 先 `build_config`；若 `--dry-run` 则 `rich.print(config)` 后**直接 return**，根本不调用 `prepare_training_environment()`。这意味着 dry-run 不需要分布式环境；而 `build_config` 只构造配置对象、不构建数据集（构建发生在后面的 `config.dataset.build()`），所以 dry-run 也不下载数据。
 
 #### 4.1.4 代码实践
 
@@ -151,10 +151,10 @@ class ExperimentConfig(Config):
 #### 4.1.5 小练习与答案
 
 **练习 1**：`--dry-run` 为什么不需要 GPU 和数据文件？
-**答案**：`main()` 中 dry-run 分支在 `build_config()` 之后、`prepare_training_environment()` 之前直接 `return`；而 `build_config` 只创建配置对象（`TokenizerConfig.gpt2()` 也只是返回一个记录词表信息的 dataclass，见 [src/olmo_core/data/tokenizer.py:L122-L132](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/data/tokenizer.py#L122-L132)），数据集的真正读取发生在 `config.dataset.build()`，dry-run 走不到那一步。
+**答案**：`main()` 中 dry-run 分支在 `build_config()` 之后、`prepare_training_environment()` 之前直接 `return`；而 `build_config` 只创建配置对象（`TokenizerConfig.gpt2()` 也只是返回一个记录词表信息的 dataclass，见 [src/olmo_core/data/tokenizer.py:L122-L132](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/data/tokenizer.py#L122-L132)），数据集的真正读取发生在 `config.dataset.build()`，dry-run 走不到那一步。
 
 **练习 2**：想把默认的 271M llama2 架构换成 OLMo-2 系列小模型，除了 `--model-factory=olmo2_14M` 还能怎么做？
-**答案**：也可以在命令行传 dotlist 覆盖直接改 `model` 的结构字段，但更简单可靠的方式是换工厂方法——`TransformerConfig` 上的工厂方法（如 `olmo2_14M` 在 [src/olmo_core/nn/transformer/config.py:L587](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/nn/transformer/config.py#L587)）封装了一组互相匹配的超参，`build_config` 里就是用 `getattr(TransformerConfig, opts.model_factory)` 按名字取用的。
+**答案**：也可以在命令行传 dotlist 覆盖直接改 `model` 的结构字段，但更简单可靠的方式是换工厂方法——`TransformerConfig` 上的工厂方法（如 `olmo2_14M` 在 [src/olmo_core/nn/transformer/config.py:L597](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L597)）封装了一组互相匹配的超参，`build_config` 里就是用 `getattr(TransformerConfig, opts.model_factory)` 按名字取用的。
 
 **练习 3**：示例里 `global_batch_size=256*1024`，`rank_microbatch_size=16*1024`，假设 4 卡，每个 rank 每个优化器 step 要积累几个 microbatch？
 **答案**：梯度累积步数 \( m = \frac{B_{global}}{W \times B_{micro}} = \frac{262144}{4 \times 16384} = 4 \)。即每个 rank 做 4 次「前向+反向+梯度累加」，才凑齐一次全局 step 的 batch。这就是「以 token 计」的 batch size 与经典「以样本计」的主要区别。
@@ -193,7 +193,7 @@ TrainerConfig.build(train_module, data_loader) ──► Trainer
 
 **① 装配线本体。**
 
-[src/examples/llm/train.py:L109-L140](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L109-L140) —— `train(config)` 函数全貌。关键五行（L116-L123）：
+[src/examples/llm/train.py:L109-L140](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L109-L140) —— `train(config)` 函数全貌。关键五行（L116-L123）：
 
 ```python
 model = config.model.build(init_device="meta")
@@ -203,27 +203,27 @@ data_loader = config.data_loader.build(dataset, dp_process_group=train_module.dp
 trainer = config.trainer.build(train_module, data_loader)
 ```
 
-在调用之前还有 [L110-L114](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L110-L114)：rank 0 打印配置、`seed_all(config.init_seed)` 统一所有设备的随机种子（定义在 [src/olmo_core/utils.py:L209-L218](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/utils.py#L209-L218)），保证权重初始化可复现。
+在调用之前还有 [L110-L114](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L110-L114)：rank 0 打印配置、`seed_all(config.init_seed)` 统一所有设备的随机种子（定义在 [src/olmo_core/utils.py:L209-L218](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/utils.py#L209-L218)），保证权重初始化可复现。
 
 **② 模型为什么建在 meta 设备上。**
 
-[src/olmo_core/nn/transformer/config.py:L2084-L2094](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/nn/transformer/config.py#L2084-L2094) —— `TransformerConfig.build(init_device=...)`，docstring 明确说「分布式场景下通常应设为 `"meta"`」：模型先按形状「占位」创建、不占显存，随后由 train module 里的并行设置（本例是 FSDP）统一落位/切分，避免每张卡先完整实例化一遍大模型。
+[src/olmo_core/nn/transformer/config.py:L401-L411](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L401-L411) —— `TransformerConfig.build(init_device=...)`，docstring 明确说「分布式场景下通常应设为 `"meta"`」：模型先按形状「占位」创建、不占显存，随后由 train module 里的并行设置（本例是 FSDP）统一落位/切分，避免每张卡先完整实例化一遍大模型。另外，`build()` 开头还负责校验可选的参数化字段——例如本轮新增的 `completedp`（CompletedP 超参迁移参数化）只允许配合 `default` / `moe_fused_v2` 两类架构使用，配置不合法会在这里直接抛 `OLMoConfigurationError`（详见 [src/olmo_core/nn/transformer/config.py:L418-L425](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L418-L425)；该主题留给 u10-l8，本讲不必深究）。
 
 **③ train module build：模型 + 优化器在此汇合。**
 
-[src/olmo_core/train/train_module/transformer/config.py:L432-L457](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/train_module/transformer/config.py#L432-L457) —— `TransformerTrainModuleConfig.build(model, device=None, eval_only=False)` 把配置转成 `TransformerTrainModule`（若配置了流水线并行 `pp_config` 则返回 pipeline 变体）。`eval_only=True` 时跳过优化器构建。优化器（`AdamWConfig` 等）在内部按模型参数构建，所以模型必须先就位。
+[src/olmo_core/train/train_module/transformer/config.py:L432-L457](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L432-L457) —— `TransformerTrainModuleConfig.build(model, device=None, eval_only=False)` 把配置转成 `TransformerTrainModule`（若配置了流水线并行 `pp_config` 则返回 pipeline 变体）。`eval_only=True` 时跳过优化器构建。优化器（`AdamWConfig` 等）在内部按模型参数构建，所以模型必须先就位。
 
 **④ 数据加载器 build：需要知道数据并行的进程组。**
 
-[src/olmo_core/data/data_loader.py:L1121-L1137](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/data/data_loader.py#L1121-L1137) —— `NumpyDataLoaderConfig.build(dataset, *, dp_process_group=...)`：加载器要把全局 batch 切给数据并行的各个 rank，所以必须拿到进程组；示例直接传 `train_module.dp_process_group`。这是「装配顺序不可颠倒」的最直接证据。
+[src/olmo_core/data/data_loader.py:L1121-L1137](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/data/data_loader.py#L1121-L1137) —— `NumpyDataLoaderConfig.build(dataset, *, dp_process_group=...)`：加载器要把全局 batch 切给数据并行的各个 rank，所以必须拿到进程组；示例直接传 `train_module.dp_process_group`。这是「装配顺序不可颠倒」的最直接证据。
 
 **⑤ trainer build：组装 Checkpointer、区分两种回调。**
 
-[src/olmo_core/train/config.py:L147-L218](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/config.py#L147-L218) —— `TrainerConfig.build(train_module, data_loader)`：先由内嵌的 `CheckpointerConfig` 构建 Checkpointer（继承 trainer 的 `save_overwrite`/`work_dir`），然后把 callbacks 分成两类——**已是实例**的回调直接挂上，**还是 Config** 的（如 `LMEvaluatorCallbackConfig`）在构造出 `Trainer` 之后再 `cb_config.build(trainer)`，因为它们需要 trainer 引用（L196-L216）。
+[src/olmo_core/train/config.py:L147-L218](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/config.py#L147-L218) —— `TrainerConfig.build(train_module, data_loader)`：先由内嵌的 `CheckpointerConfig` 构建 Checkpointer（继承 trainer 的 `save_overwrite`/`work_dir`），然后把 callbacks 分成两类——**已是实例**的回调直接挂上，**还是 Config** 的（如 `LMEvaluatorCallbackConfig`）在构造出 `Trainer` 之后再 `cb_config.build(trainer)`，因为它们需要 trainer 引用（L196-L216）。
 
 **⑥ checkpoint 预加载逻辑。**
 
-[src/examples/llm/train.py:L129-L137](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L129-L137) —— 装配完成后、`fit()` 之前：若 save folder 里没有 checkpoint 且配置了 `load_path`，就从 `load_path` 加载权重（典型场景：从预训练模型微调）。`maybe_load_checkpoint()` 的返回值为 True 表示已加载，后续 `fit()` 里靠 `checkpoint_loaded` 标志避免重复加载。
+[src/examples/llm/train.py:L129-L137](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L129-L137) —— 装配完成后、`fit()` 之前：若 save folder 里没有 checkpoint 且配置了 `load_path`，就从 `load_path` 加载权重（典型场景：从预训练模型微调）。`maybe_load_checkpoint()` 的返回值为 True 表示已加载，后续 `fit()` 里靠 `checkpoint_loaded` 标志避免重复加载。
 
 #### 4.2.4 代码实践
 
@@ -231,7 +231,7 @@ trainer = config.trainer.build(train_module, data_loader)
 
 1. **实践目标**：把 4.2.1 的装配线图变成自己验证过的事实。
 2. **操作步骤**：
-   - 打开 [src/examples/llm/train.py:L116-L123](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L116-L123)，对每一行用「跳转到定义」找到对应 `build()` 的真实签名（本文 4.2.3 ②–⑤ 给出了四处）。
+   - 打开 [src/examples/llm/train.py:L116-L123](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L116-L123)，对每一行用「跳转到定义」找到对应 `build()` 的真实签名（本文 4.2.3 ②–⑤ 给出了四处）。
    - 做一张表：`build()` 所属 Config ｜ 输入参数 ｜ 返回类型 ｜ 定义文件与行号。
 3. **需要观察的现象**：`NumpyDatasetConfig.build()` 是唯一不接收其它组件的 build；`data_loader` 的 build 是唯一需要进程组的；`trainer` 的 build 会额外构建 Checkpointer。
 4. **预期结果**：五张「图纸」对应的「施工队」全部定位成功，且依赖顺序为 model → train_module → (dataset) → data_loader → trainer。
@@ -242,7 +242,7 @@ trainer = config.trainer.build(train_module, data_loader)
 **练习 1**：为什么 `data_loader` 的 build 要传 `train_module.dp_process_group`，而不是让 data_loader 自己建进程组？
 **答案**：进程组的划分由并行策略决定（数据并行、张量并行等多维并行共享一套进程网格）。train module 是并行配置（`dp_config` 等）的持有者，进程组在那里创建；数据加载器只是「消费者」，拿到同一个组才能保证全局 batch 的切分与梯度规约的 rank 集合一致。
 
-**练习 2**：`config.as_config_dict()`（[train.py:L126-L127](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L126-L127)）的结果被塞给了哪个回调？有什么用？
+**练习 2**：`config.as_config_dict()`（[train.py:L126-L127](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L126-L127)）的结果被塞给了哪个回调？有什么用？
 **答案**：塞给了 `config_saver`（`ConfigSaverCallback`）。它会把整份实验配置随 checkpoint 一起保存（也供 W&B 记录），从而任何一次训练都能事后追溯到确切配置——这是「可复现实验」闭环的最后一块。
 
 **练习 3**：如果把装配线第 1、2 行对调（先 build train module 再 build model）会发生什么？
@@ -275,11 +275,11 @@ torchrun 拉起 N 个进程（每进程设置 RANK/WORLD_SIZE/LOCAL_RANK 等环�
 
 **① 包 docstring 里的标准配方。**
 
-[src/olmo_core/train/__init__.py:L18-L35](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L18-L35) —— 官方推荐骨架：`prepare_training_environment()` → 构建 train module 与 data loader → `trainer_config.build(...)` → `trainer.fit()` → `teardown_training_environment()`。示例脚本就是这一配方的完整落地。
+[src/olmo_core/train/__init__.py:L18-L35](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L18-L35) —— 官方推荐骨架：`prepare_training_environment()` → 构建 train module 与 data loader → `trainer_config.build(...)` → `trainer.fit()` → `teardown_training_environment()`。示例脚本就是这一配方的完整落地。
 
 **② prepare_training_environment 的四个动作。**
 
-[src/olmo_core/train/__init__.py:L85-L148](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L85-L148) —— 函数体依次：
+[src/olmo_core/train/__init__.py:L85-L148](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L85-L148) —— 函数体依次：
 
 - L125-L129：把多进程启动方式设为 `"spawn"`（注释：规避 LUMI 上的数据加载器段错误）；
 - L131-L135：`backend` 非空时调用 `init_distributed(backend=backend, ...)`（内部还会调用 `torch.cuda.set_device()` 或 `torch.set_default_device()`），`backend=None` 则走单进程路径。默认 `cpu:gloo,cuda:nccl`——docstring（L110-L115）解释了为什么要带一个 CPU 后端：让异步 checkpoint 和簿记通信走 GLOO，不阻塞 NCCL 上的训练通信；
@@ -288,7 +288,7 @@ torchrun 拉起 N 个进程（每进程设置 RANK/WORLD_SIZE/LOCAL_RANK 等环�
 
 **③ teardown。**
 
-[src/olmo_core/train/__init__.py:L151-L156](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/__init__.py#L151-L156) —— `teardown_training_environment()`：分布式场景下 `dist.destroy_process_group()`，干净收尾。
+[src/olmo_core/train/__init__.py:L151-L156](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/__init__.py#L151-L156) —— `teardown_training_environment()`：分布式场景下 `dist.destroy_process_group()`，干净收尾。
 
 #### 4.3.4 代码实践
 
@@ -362,23 +362,23 @@ epoch += 1；data_loader.reset()
 
 **① checkpoint 恢复策略。**
 
-[src/olmo_core/train/trainer.py:L696-L728](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L696-L728) —— `fit()` 先尝试从 save folder 恢复（断点续训场景，连 trainer 状态、优化器状态一起加载），找不到再看 `load_path`；若 `LoadStrategy.always` 且两处都没有 checkpoint，直接抛 `FileNotFoundError`，否则打 warning「从头训练」。
+[src/olmo_core/train/trainer.py:L696-L728](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L696-L728) —— `fit()` 先尝试从 save folder 恢复（断点续训场景，连 trainer 状态、优化器状态一起加载），找不到再看 `load_path`；若 `LoadStrategy.always` 且两处都没有 checkpoint，直接抛 `FileNotFoundError`，否则打 warning「从头训练」。
 
 **② 信号处理与 dry-run batch。**
 
-[src/olmo_core/train/trainer.py:L739-L757](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L739-L757) —— 注册 SIGTERM/SIGINT 处理器（被抢占时能优雅保存）；训练前调用 `_dry_run_batch()`。
+[src/olmo_core/train/trainer.py:L739-L757](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L739-L757) —— 注册 SIGTERM/SIGINT 处理器（被抢占时能优雅保存）；训练前调用 `_dry_run_batch()`。
 
-[src/olmo_core/train/trainer.py:L1660-L1669](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L1660-L1669) —— `_dry_run_batch()` 用 `data_loader.get_mock_batch()` 造一个假 batch 跑一次 `train_batch(batch, dry_run=True)`：让 `torch.compile`（示例 `compile_model=True`）提前编译、提前暴露 OOM，避免训练几步后才炸。
+[src/olmo_core/train/trainer.py:L1660-L1669](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L1660-L1669) —— `_dry_run_batch()` 用 `data_loader.get_mock_batch()` 造一个假 batch 跑一次 `train_batch(batch, dry_run=True)`：让 `torch.compile`（示例 `compile_model=True`）提前编译、提前暴露 OOM，避免训练几步后才炸。
 
 **③ epoch 主循环与 step 编排。**
 
-[src/olmo_core/train/trainer.py:L760-L761](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L760-L761) —— `while not self.training_complete: self._fit_epoch()`：`training_complete` 由 `max_duration`（step/token/epoch 三种单位，见 [src/olmo_core/train/common.py:L36-L66](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/common.py#L36-L66) 的 `Duration`）驱动。
+[src/olmo_core/train/trainer.py:L760-L761](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L760-L761) —— `while not self.training_complete: self._fit_epoch()`：`training_complete` 由 `max_duration`（step/token/epoch 三种单位，见 [src/olmo_core/train/common.py:L36-L66](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/common.py#L36-L66) 的 `Duration`）驱动。
 
-[src/olmo_core/train/trainer.py:L1691-L1734](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L1691-L1734) —— 单个 step 的完整编排：记账（L1693-L1699）→ 跳步判定（L1701-L1706，`steps_to_skip` 区间）→ `pre_step` → `train_batch` → `pre_optim_step` → `optim_step` → `zero_grads` → `post_train_batch` → `post_step`。**Trainer 不亲自做前向反向**，全权委托 `train_module`；Trainer 的角色是「编排者 + 记账员 + 回调调度器」。回调钩子的插入位置在本讲只需建立直觉，第 6 单元会逐一展开。
+[src/olmo_core/train/trainer.py:L1691-L1734](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L1691-L1734) —— 单个 step 的完整编排：记账（L1693-L1699）→ 跳步判定（L1701-L1706，`steps_to_skip` 区间）→ `pre_step` → `train_batch` → `pre_optim_step` → `optim_step` → `zero_grads` → `post_train_batch` → `post_step`。**Trainer 不亲自做前向反向**，全权委托 `train_module`；Trainer 的角色是「编排者 + 记账员 + 回调调度器」。回调钩子的插入位置在本讲只需建立直觉，第 6 单元会逐一展开。
 
 **④ 异常路径。**
 
-[src/olmo_core/train/trainer.py:L762-L781](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L762-L781) —— 训练抛异常时：记录错误、触发 `callback.on_error(exc)`、`_shutdown(gracefully=False)`（不等簿记、不发额外集合通信，因为各 rank 已处于不一致状态，再做同步可能死锁），然后重新抛出；`finally` 恢复原信号处理器。正常路径则走 `post_train` 钩子与优雅 `_shutdown()`（L777-L782）。
+[src/olmo_core/train/trainer.py:L762-L781](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L762-L781) —— 训练抛异常时：记录错误、触发 `callback.on_error(exc)`、`_shutdown(gracefully=False)`（不等簿记、不发额外集合通信，因为各 rank 已处于不一致状态，再做同步可能死锁），然后重新抛出；`finally` 恢复原信号处理器。正常路径则走 `post_train` 钩子与优雅 `_shutdown()`（L777-L782）。
 
 #### 4.4.4 代码实践
 
@@ -386,10 +386,10 @@ epoch += 1；data_loader.reset()
 
 1. **实践目标**：用日志证据验证 4.4.2 的流程图。
 2. **操作步骤**：
-   - 通读 [src/olmo_core/train/trainer.py:L730-L757](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L730-L757)，列出 `fit()` 会输出的关键日志行（"Callback order:"、"Training for N steps"、"Starting forward/backward dry-run batch..."、"Dry-run complete"）。
+   - 通读 [src/olmo_core/train/trainer.py:L730-L757](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L730-L757)，列出 `fit()` 会输出的关键日志行（"Callback order:"、"Training for N steps"、"Starting forward/backward dry-run batch..."、"Dry-run complete"）。
    - 若本地具备运行条件（见 5. 综合实践），跑一次小训练，把这些日志行按出现顺序抄下来；不具备条件则在源码中标注每条日志对应的代码行。
 3. **需要观察的现象**：日志顺序为 callback 列表 → （若设了 max_steps）训练步数 → dry-run 相关两行 → "Starting epoch 0..."。
-4. **预期结果**：与 4.4.2 流程图一一对应；`_fit_epoch` 开头的 `"Starting epoch {epoch}..."` 日志（[L1683](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L1683)）可作为 epoch 循环开始的标志。
+4. **预期结果**：与 4.4.2 流程图一一对应；`_fit_epoch` 开头的 `"Starting epoch {epoch}..."` 日志（[L1683](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L1683)）可作为 epoch 循环开始的标志。
 5. 运行版本待本地验证；源码阅读版本可直接完成。
 
 #### 4.4.5 小练习与答案
@@ -400,8 +400,8 @@ epoch += 1；data_loader.reset()
 **练习 2**：`_fit_epoch()` 中 `pre_optim_step` 钩子为什么放在 `train_batch` 与 `optim_step` 之间，而不是 step 末尾？
 **答案**：这个位置是「梯度已就绪、尚未应用更新」的窗口，适合做需要检查或修改梯度的操作（例如记录梯度范数）。放在末尾就看不到本步梯度了。回调系统正是靠这些精细切分的钩子位点实现无侵入扩展。
 
-**练习 3**：示例配置 `metrics_collect_interval=5`（[train.py:L199](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py#L199)）在 `_fit_epoch` 的哪里生效？
-**答案**：[trainer.py:L1736-L1739](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/trainer.py#L1736-L1739)：`if first_batch or self.global_step % self.metrics_collect_interval == 0: self._log_metrics()`，即每 5 步（以及每个 epoch 的第一个 batch）收集一次指标，避免每步归约指标拖慢训练。
+**练习 3**：示例配置 `metrics_collect_interval=5`（[train.py:L199](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L199)）在 `_fit_epoch` 的哪里生效？
+**答案**：[trainer.py:L1736-L1739](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/trainer.py#L1736-L1739)：`if first_batch or self.global_step % self.metrics_collect_interval == 0: self._log_metrics()`，即每 5 步（以及每个 epoch 的第一个 batch）收集一次指标，避免每步归约指标拖慢训练。
 
 ## 5. 综合实践
 
@@ -409,7 +409,7 @@ epoch += 1；data_loader.reset()
 
 **步骤 1 —— 画流程图（必做，纯源码阅读）**
 
-通读 [src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/examples/llm/train.py) 全文，画一张覆盖以下要点的流程图：
+通读 [src/examples/llm/train.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py) 全文，画一张覆盖以下要点的流程图：
 
 1. 命令行如何分离「脚本参数」与「dotlist 覆盖」（L311 的 `parse_known_args`）；
 2. `build_config` 内五个 Config 的构造与 `merge`（L143-L270）；
@@ -448,7 +448,7 @@ torchrun --nproc-per-node=1 src/examples/llm/train.py my-first-run \
     data_loader.global_batch_size=16384 train_module.rank_microbatch_size=16384
 ```
 
-预期现象：日志依次出现 callback 顺序、dry-run batch、`Starting epoch 0...`，随后周期性打印 loss/优化器指标；`/tmp/my-first-run` 下出现 checkpoint 目录结构。训练时长由 `trainer.max_duration` 控制（默认 `Duration.epochs(1)`，见 [src/olmo_core/train/config.py:L45](https://github.com/allenai/OLMo-core/blob/075a7892d8a004242b085bf3c71b996389fd863c/src/olmo_core/train/config.py#L45)；用 dotlist 把它改成 10 steps 的写法——例如 `trainer.max_duration.value=10 trainer.max_duration.unit=steps`——是否可行**待本地验证**）。
+预期现象：日志依次出现 callback 顺序、dry-run batch、`Starting epoch 0...`，随后周期性打印 loss/优化器指标；`/tmp/my-first-run` 下出现 checkpoint 目录结构。训练时长由 `trainer.max_duration` 控制（默认 `Duration.epochs(1)`，见 [src/olmo_core/train/config.py:L45](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/config.py#L45)；用 dotlist 把它改成 10 steps 的写法——例如 `trainer.max_duration.value=10 trainer.max_duration.unit=steps`——是否可行**待本地验证**）。
 
 > 注意：本讲不会替你执行以上命令。所有「预期结果」均为基于源码的推断，请以本地实际输出为准，无法确定的都已标注「待本地验证」。
 
@@ -463,4 +463,4 @@ torchrun --nproc-per-node=1 src/examples/llm/train.py my-first-run \
 
 ## 7. 下一步学习建议
 
-至此单元一完结：你已经能读懂一个完整训练示例并安全地 dry-run 它。下一讲进入 [u2-l1-config-base-class.md](u2-l1-config-base-class.md)，拆开本讲反复使用的 `Config` 基类本身——`as_dict/save/load/merge` 的实现，以及为什么整套库建立在可序列化嵌套 dataclass 上。之后再回来精读本讲只当黑盒用的几块积木：`TransformerConfig`（u3-l2）、`TransformerTrainModuleConfig`（u6-l2）、`TrainerConfig` 与回调系统（u6-l1/u6-l3）。建议顺手浏览同目录的 `src/examples/moe/train.py` 与 `src/examples/llama_lns/train.py`——它们与 `llm/train.py` 骨架相同，只是换了个别积木，正好验证你对这套模式的理解。
+至此单元一完结：你已经能读懂一个完整训练示例并安全地 dry-run 它。下一讲进入 [u2-l1-config-base-class.md](u2-l1-config-base-class.md)，拆开本讲反复使用的 `Config` 基类本身——`as_dict/save/load/merge` 的实现，以及为什么整套库建立在可序列化嵌套 dataclass 上。之后再回来精读本讲只当黑盒用的几块积木：`TransformerConfig`（u3-l2）、`TransformerTrainModuleConfig`（u6-l2）、`TrainerConfig` 与回调系统（u6-l1/u6-l3）。建议顺手浏览同目录的 `src/examples/moe/train.py` 与 `src/examples/llama_lns/train.py`——它们与 `llm/train.py` 骨架相同，只是换了个别积木，正好验证你对这套模式的理解。另外，本轮提交（704625ad9）在 `src/examples/` 下新增了 `mup/`、`completedp/`、`olmo_ddp/` 三组示例：前两组是 muP / CompletedP 参数化的坐标检查脚本，属于高级内容（分别对应 u10-l7、u10-l8），现阶段只需知道它们存在即可。

@@ -1,6 +1,6 @@
 # 配置系统：TOML → RunSpec → RunConfig
 
-> 本讲为 update 增量版本。本轮（`8cd7c9eb → 28c181666`）对配置包只有一处小改动：`RunSpec.launch_warnings` 新增 SciCode 参考路径校验的警告分支——`plan` 阶段对未解析的占位 `h5py_host_path` 只警告不拦截（真正的拒绝在三个启动边界，见 u8-l9）。上一轮（`bae4209 → 8cd7c9eb`）的四组变化全文保留：`configuration/score_centering.py` CPU 预检与 score-centering 参数族；`CoreConfig` 的 `reward_reasoning_mode` 字段（`reward_final_answer_only` 进入全部维护示例）；评估采样默认对齐（temperature 1.0 / top-p 0.95 / 32768 响应上限）；`data.sampling.priority` 与 replay 互斥。再上一轮（`896a734 → bae4209`）的 priority 提供者、`data.over_length` 与 epoch 预算内容同样保留。
+> 本讲为 update 增量版本。本轮（`8cd7c9eb → 28c181666`）对配置包只有一处小改动：`RunSpec.launch_warnings` 新增 SciCode 参考路径校验的警告分支——`plan` 阶段对未解析的占位 `h5py_host_path` 只警告不拦截（真正的拒绝在三个启动边界，见 u8-l9）。同一提交还让 `evaluation.parse` 在 scicode 任务未显式给路径时自动把默认秘密 `SCICODE_H5PY_HOST_PATH` 注入 `evaluation.secrets`，three-node 示例随之删去了占位路径——这两处属于 u8-l9 的秘密链路，本讲只记录它们在配置层（解析与计划）的投影。上一轮（`bae4209 → 8cd7c9eb`）的四组变化全文保留：`configuration/score_centering.py` CPU 预检与 score-centering 参数族；`CoreConfig` 的 `reward_reasoning_mode` 字段（`reward_final_answer_only` 进入全部维护示例）；评估采样默认对齐（temperature 1.0 / top-p 0.95 / 32768 响应上限）；`data.sampling.priority` 与 replay 互斥。再上一轮（`896a734 → bae4209`）的 priority 提供者、`data.over_length` 与 epoch 预算内容同样保留。
 
 ## 1. 本讲目标
 
@@ -244,7 +244,20 @@ miles.setdefault("eval_max_response_len", min(response, 32768))
 
 **CoreConfig：本轮字段的引入位置**。[open_instruct/miles/configuration/config.py:43-51](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L43-L51)（判分输入声明，见 4.5）、[config.py:84-85](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L84-L85)（`save_final_checkpoint`）、[config.py:129-133](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L129-L133)（priority 三件套）。
 
-**RunConfig 与最终产物**。[open_instruct/miles/configuration/config.py:355-358](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L355-L358)：`RunConfig = (core, miles, inference_profile)`。`arguments()` 把 core 序列化成 JSON 塞进 `--olmo-core-config`，把 miles 编码成普通命令行旗标——「不 import CUDA/MILES/Core、不下载模型」就能产出 argv，这是 CPU 规划的基石。`plan()`（[run_spec.py:934-957](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L934-L957)）再包上 launch_warnings、评估计划与 GPU 拓扑分配，输出一份完整 JSON 计划。
+**RunConfig 与最终产物**。[open_instruct/miles/configuration/config.py:355-358](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/config.py#L355-L358)：`RunConfig = (core, miles, inference_profile)`。`arguments()` 把 core 序列化成 JSON 塞进 `--olmo-core-config`，把 miles 编码成普通命令行旗标——「不 import CUDA/MILES/Core、不下载模型」就能产出 argv，这是 CPU 规划的基石。`plan()`（[run_spec.py:938-961](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L938-L961)）再包上 launch_warnings、评估计划与 GPU 拓扑分配，输出一份完整 JSON 计划。
+
+**launch_warnings 的 SciCode 首查（本轮新增）**。[run_spec.py:904-909](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L904-L909)：`launch_warnings` 的第一条现在是对 SciCode 参考路径的计划期检查：
+
+```python
+def launch_warnings(self, miles, core=None) -> list[str]:
+    warnings = []
+    try:
+        evaluation.validate_scicode_reference_path(self.evaluation)
+    except InputError as error:
+        warnings.append(str(error))
+```
+
+被调用的 `validate_scicode_reference_path`（[evaluation.py:241-260](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L241-L260)）扫描 `[evaluation]` 里 `kind = "external"` 且 `task = "scicode"` 的条目：未写 `arguments.h5py_host_path` 的直接跳过（默认走 Beaker 秘密，由评估器在远端解析）；写了的必须是**非空、无首尾空白、绝对**的路径，且不能命中 `YOUR_[A-Z_]+`、`$`、`<>` 等占位形态。关键在 `try/except` 把 `InputError` **降级成警告**——docstring 明说「Examples remain loadable for planning」：模板与示例保持可加载、可 plan，真正的拒绝发生在三个启动边界——`launch.specification`（[launch.py:34-39](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/launch.py#L34-L39)，在拓扑规划之前）、`workflow.execute`（[workflow.py:349-350](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/execution/workflow.py#L349-L350)）与提交评估任务时的 `evaluation.specification`（[evaluation.py:367-369](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L367-L369)）（完整链路见 u8-l9）。配套地，`evaluation.parse` 现在会在存在「未显式给路径的 scicode 任务」时自动注入默认秘密（[evaluation.py:232-236](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L232-L236)：`value["secrets"].setdefault(SCICODE_REFERENCE_SECRET, SCICODE_REFERENCE_SECRET)`，秘密名常量见 [evaluation.py:34](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/evaluation/evaluation.py#L34)），[three-node.toml:155-160](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/three-node.toml#L155-L160) 因此删去了原来的 `h5py_host_path = "/weka/.../YOUR_USERNAME/scicode/test_data.h5"` 占位参数。
 
 #### 4.2.4 代码实践
 
@@ -287,7 +300,7 @@ miles.setdefault("eval_max_response_len", min(response, 32768))
 
 **练习 3**：`launch_warnings` 里周期性 checkpoint 的判定为什么容忍 `num_rollout` 缺席？
 
-**答案**：epoch 预算下 `miles["num_rollout"]` 是 None，旧式 `save_interval < num_rollout` 比较会出错。新代码（[run_spec.py:917-920](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L917-L920)）改为 `periodic = interval is not None and (total is None or interval < total)`，没有总 rollout 数时只要有 `save_interval` 就算周期性保存。
+**答案**：epoch 预算下 `miles["num_rollout"]` 是 None，旧式 `save_interval < num_rollout` 比较会出错。新代码（[run_spec.py:922-924](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/open_instruct/miles/configuration/run_spec.py#L922-L924)）改为 `periodic = interval is not None and (total is None or interval < total)`，没有总 rollout 数时只要有 `save_interval` 就算周期性保存。顺带一提：本轮在 `launch_warnings` 开头插入 SciCode 检查后，这段代码及其后所有行号整体下移了 4 行——给行号敏感的引用对版本时别忘了这一点。
 
 ---
 
@@ -612,11 +625,14 @@ score_centering_tis_clip = 2.0
 1. **准备**：复制 `configs/miles/examples/tiny/dev.toml` 为 `open-instruct-tutorial/` 之外的临时目录中的 `my-run.toml`（注意其中 [dev.toml:30-32](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/dev.toml#L30-L32) 已有 `over_length = "exclude"`，[dev.toml:71-77](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/dev.toml#L71-L77) 已有 `reward_final_answer_only = true` 与 `reward_reasoning_mode = "required"`）；把 `model.source`、`output.root` 换成本地占位路径，`launch.workspace/budget` 换成你有权限的值。
 2. **validate**：`uv run python -m open_instruct.miles validate my-run.toml`，应打印 `Run schema, topology and MILES/Core options validated; inputs and runtime checked during train`。
 3. **plan 与评估采样默认**：`uv run python -m open_instruct.miles plan my-run.toml > plan.json`，检查输出中的 runtime argv：找到 `--num-rollout 4` 与 `--save-interval 2`（对应 `num_rollouts=4`、`save_interval=2`）；再找到评估采样默认的证据——`--eval-temperature 1.0`、`--eval-top-p 0.95`（本文件在 `[inference]` 显式写了同值，删掉这两行重跑 plan，默认值应原样出现），以及 `--eval-max-response-len 256`（= `min(max_response_length=256, 32768)`）。同时浏览 `launch_warnings`、`stages` 与 `allocation`。
-4. **错字段实验**：把 `[trainer] gpus = 1` 改成 `gpu = 1` 运行 validate，记录报错（会走 `Unknown MILES option` 路径并带 did-you-mean 提示）；再把 `model.source` 改成 `model.sorce` 记录另一类报错。
-5. **三组约束实验**：按 4.4.4 的三个实验各做一次（priority 缺字段、over_length 非法值、num_epoch/num_rollouts 互斥），记录报错原文。
-6. **score-centering 实验**：按 4.5.4 做一次合法 plan 与三类非法配置，记录编译产物与报错。
-7. **示例家族对照**：`diff configs/miles/examples/tiny/dev.toml configs/miles/examples/small/dev.toml`，确认 small 版只多一行「起始拷贝、更大模型拓扑资格待完成」的注释；阅读 [configs/miles/examples/README.md:1-31](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/README.md#L1-L31) 的家族划分表，说明为什么 small 不等于「已验证的大模型配方」。
-8. **交付物**：一份表格，左列是每次故意制造的错误/默认值观察，右列是报错原文或 plan 中的取值，以及「哪一层拦下的/哪一层填的」（`_data` / `fields()` / `CoreConfig.__post_init__` / `RunConfig.validate` / `score_centering.validate` / `compile` 的互斥、冲突与 setdefault）。
+4. **SciCode 计划期警告实验（本轮新增行为的观察点）**：dev.toml 没有 `[evaluation]` 节，从 [three-node.toml:66-160](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/three-node.toml#L66-L160) 把整个 `[evaluation]` 节连同 scicode 任务（[L155-160](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/tiny/three-node.toml#L155-L160)）抄进 `my-run.toml`，分两次 plan：
+   - 原样抄入（scicode 任务不带 `h5py_host_path`）：plan 应**成功**且 `launch_warnings` 里**没有** SciCode 警告；检查 plan 输出的 `evaluation` 部分，`secrets` 里应出现自动注入的 `SCICODE_H5PY_HOST_PATH`（默认秘密，见 4.2.3）；
+   - 给 scicode 任务的 `arguments` 加回占位路径 `h5py_host_path = "/weka/YOUR_USERNAME/scicode/test_data.h5"`：plan 仍应**成功**（模板保持可加载），但 `launch_warnings` 第一条变成 SciCode 占位路径的帮助文本；对照 4.2.3 解释为什么这里只警告、真正的拒绝在启动边界。
+5. **错字段实验**：把 `[trainer] gpus = 1` 改成 `gpu = 1` 运行 validate，记录报错（会走 `Unknown MILES option` 路径并带 did-you-mean 提示）；再把 `model.source` 改成 `model.sorce` 记录另一类报错。
+6. **三组约束实验**：按 4.4.4 的三个实验各做一次（priority 缺字段、over_length 非法值、num_epoch/num_rollouts 互斥），记录报错原文。
+7. **score-centering 实验**：按 4.5.4 做一次合法 plan 与三类非法配置，记录编译产物与报错。
+8. **示例家族对照**：`diff configs/miles/examples/tiny/dev.toml configs/miles/examples/small/dev.toml`，确认 small 版只多一行「起始拷贝、更大模型拓扑资格待完成」的注释；阅读 [configs/miles/examples/README.md:1-31](https://github.com/allenai/open-instruct/blob/28c1816664491493242d453c2c7280ee56e6c20a/configs/miles/examples/README.md#L1-L31) 的家族划分表，说明为什么 small 不等于「已验证的大模型配方」。
+9. **交付物**：一份表格，左列是每次故意制造的错误/默认值观察，右列是报错原文或 plan 中的取值，以及「哪一层拦下的/哪一层填的」（`_data` / `fields()` / `CoreConfig.__post_init__` / `RunConfig.validate` / `score_centering.validate` / `launch_warnings` 的降级警告 / `compile` 的互斥、冲突与 setdefault）。
 
 ## 6. 本讲小结
 
@@ -627,10 +643,12 @@ score_centering_tis_clip = 2.0
 - 本轮更新一（判分输入）：`core.reward_final_answer_only`（进入全部维护示例，库默认仍 false）与新增 `core.reward_reasoning_mode`（`required`/`none`，choice 校验排在 `__post_init__` 首行）声明验证器看哪段输出、是否预期思考段。
 - 本轮更新二（score centering）：`loss_type="score_centering"` 参数族经 `score_centering.py` CPU 预检（FP32 head、GRPO 优势、十个旧开关互斥、TIS/MIS 参数）；`async.off_policy_correction="tis"` 在 centering 下改映射 `score_centering_is="tis"`，异步锚定与 refresh 资格扩展为「TIS 或 score-centering IS」；候选概率收集要求 `rollout_top_logprobs_num >= rollout_top_k`（任意 loss）。
 - 本轮更新三（评估采样）：编译默认 `eval_temperature=1.0`、`eval_top_p=0.95`、`eval_max_response_len=min(response, 32768)`；维护示例按模型家族重组为 `tiny/` 与 `small/`，示例统一声明判分输入字段。
+- 本轮小更新（SciCode 计划期警告，`8cd7c9eb → 28c181666`）：`launch_warnings` 首查 SciCode 参考路径——占位/非绝对的 `h5py_host_path` 在 plan 阶段**只警告不拦截**（模板与示例保持可加载），硬拒绝留给 `launch.specification` / `workflow.execute` / 评估提交三个启动边界；配套 `evaluation.parse` 对未显式给路径的 scicode 任务自动注入默认秘密 `SCICODE_H5PY_HOST_PATH`，three-node 示例随之删去占位路径（秘密解析链路见 u8-l9）。
 
 ## 7. 下一步学习建议
 
-- **u8-l3（工作流与执行）**：看 `compile()` 产出的配置如何被 `workflow.py`/`driver.py` 消费——特别是 driver 返回值携带 `num_rollout` 后完成判定的变化，以及 `save_final_checkpoint` 在最后一次更新时如何落盘。
+- **u8-l3（工作流与执行）**：看 `compile()` 产出的配置如何被 `workflow.py`/`driver.py` 消费——特别是 driver 返回值携带 `num_rollout` 后完成判定的变化，以及 `save_final_checkpoint` 在最后一次更新时如何落盘；本轮起 `workflow.execute` 开头多了 SciCode 参考路径预检，与注册表预检并列构成启动期资产校验。
+- **u8-l9（后台评估与推理记录）**：本轮的 `launch_warnings` SciCode 分支只是配置层的投影——默认秘密的评估器内解析、文件存在性校验、错误信息不回显秘密值、失败回执的可行动诊断都在那一讲展开。
 - **u8-l12（统一判分输入）**：本讲的 `reward_final_answer_only` / `reward_reasoning_mode` 只是入口；ResponseParts 切分、GradingPolicy 的 objective×scope×require_response 契约、验证器 `selected_input` 直通与注册表校验都在那一讲展开。
 - **u8-l14（score centering 专题）**：本讲只覆盖了配置入口与预检；训练目标的数学、TIS/MIS 的取值动机、refresh 集成与测量在那一讲深入，并演示 `test_miles_score_centering.py` 与 `tests/miles/test_score_centering.py` 的覆盖点。
 - **u8-l5 / u8-l11（rollout 提供者与 priority 采样）**：`data.sampling.priority` 的运行时组序、与 uniform/exposure 策略的组合测量，以及独立 priority provider 的组序遍历实现。
