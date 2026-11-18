@@ -68843,8 +68843,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "663de9736f53e7f1e4deab75b7aa766694825b2a",
-      "last_run_at": "2026-11-17T13:02:43Z",
-      "last_error": "ClaudeRunnerError: agent 非零退出（分类匹配）：\n76eab8a4afe\",\"tool_input\":{\"command\":\"git -C /home/runner/work/codeReader/codeReader/work/deepspeedai-DeepSpeed log --oneline 663de9736f53e7f1e4deab75b7aa766694825b2a..fd8be8161176d0359060cc44faa98383382b70d3\",\"description\":\"List commits between previous and current HEAD\"}},{\"tool_"
+      "last_run_at": "2026-11-18T13:02:57Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"33724fc3-b1ca-4d04-a1cb-4965a158ee85\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "triple-mu/fast-ulysses": {
       "prompt_hash": "b21aef51792b02df",
@@ -69071,7 +69071,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"4fa42a9c-5ceb-4c48-9912-c87d8ddfd755\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"0fd8af61-2fe7-4fd2-82b2-9169817ee4ca\",\"total_co"
         },
         "u9-l5": {
           "status": "pending",
@@ -69085,7 +69085,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/triple-mu/fast-ulysses/fast-ulysses-tutorial",
       "last_head": "ad1a4a06a42d8129a278f010b1d67a6e206d38e6",
-      "last_run_at": "2026-11-17T13:02:43Z",
+      "last_run_at": "2026-11-18T13:02:57Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "KellerJordan/Muon": {
@@ -69485,8 +69485,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/open-instruct/open-instruct-tutorial",
       "last_head": "28c1816664491493242d453c2c7280ee56e6c20a",
-      "last_run_at": "2026-11-17T13:02:43Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-11-18T13:02:57Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"281813e5-22b7-4884-903c-ea2c360667c8\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "allenai/OLMo-core": {
       "prompt_hash": "b21aef51792b02df",
@@ -69598,9 +69598,11 @@
           "error": null
         },
         "u5-l1": {
-          "status": "pending",
+          "status": "failed",
           "action": "new",
-          "retries": 0
+          "retries": 0,
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e695e794-6244-4f43-a0a7-6b676a70c8ee\",\"total_co"
         },
         "u5-l2": {
           "status": "pending",
@@ -69719,8 +69721,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/OLMo-core/OLMo-core-tutorial",
       "last_head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
-      "last_run_at": "2026-11-17T13:02:43Z",
-      "last_error": "near dead zone; will resume next window"
+      "last_run_at": "2026-11-18T13:02:57Z",
+      "last_error": "quota exhausted; will resume next window"
     },
     "allenai/olmocr": {},
     "allenai/OLMo": {},
