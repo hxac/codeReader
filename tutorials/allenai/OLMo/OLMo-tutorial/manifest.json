@@ -1,0 +1,1134 @@
+{
+  "head": "090253dac6688f2532509daa7aa2eb5fae50e956",
+  "project": "OLMo",
+  "rationale": "OLMo 是 AI2 全开源语言模型的训练与推理框架，核心代码集中在 olmo/ 包（模型、训练器、数据、优化器、检查点、评估），辅以 scripts/ 训练入口、configs/ 官方配置、hf_olmo/ 的 HuggingFace 集成以及 inference/、evaluation/ 工具。学习路线按「先跑通、再读懂、后扩展」设计：单元 1 让读者从零安装、借助 tiny 配置跑通训练入口并掌握 OmegaConf 配置体系；单元 2 沿「词表→memmap 数据→分布式数据加载→collator/自定义数据集扩展」讲解数据流水线；单元 3 自顶向下解剖 OLMo 模型（骨架→归一化→位置编码→注意力→block 形态→forward/KV Cache）；单元 4 沿 scripts/train.py→Trainer.fit→微批次梯度累积→train_step→评估循环走通训练主链路；单元 5 深入优化器、参数分组、调度器与 DDP/FSDP 分布式策略；单元 6 攻克检查点与断点续训这一工程难点（分片检查点、unshard 工具链）；单元 7 覆盖 beam search 生成解码、HF 集成、权重转换、量化与推理效率；单元 8 以下游评估体系、测试与数值稳定性收尾，并用二次开发综合实战串联全部知识。讲义间以 depends_on 显式标注依赖，全部实践任务均基于仓库真实源码、test_fixtures 与 tiny 配置，可在 CPU/单机上动手完成。",
+  "units": [
+    {
+      "id": "u1",
+      "level": "beginner",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "理解 OLMo 的定位与「数据、代码、checkpoint 全开源」的科学复现理念",
+            "知道仓库提供的核心能力：预训练、两阶段训练、HF 推理、量化、评估",
+            "了解 OLMo-2 系列 1B/7B/13B/32B 模型、官方训练配置与 checkpoint 的关系"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "项目定位",
+            "依赖与版本",
+            "包入口"
+          ],
+          "order": 1,
+          "practice_task": "安装项目（pip install -e .[all] 或 pip install ai2-olmo），运行 python -c \"from olmo import check_install; check_install()\" 验证安装，并记录打印出的 OLMo 版本号。",
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "olmo/__init__.py"
+          ],
+          "title": "项目总览：OLMo 是什么",
+          "topic": "介绍 OLMo 项目定位：AI2 开放语言模型的训练、微调与推理一体化框架，覆盖模型代码、训练配置、官方 checkpoint 与 HuggingFace 集成；同时说明本仓库现状（最新的 32B 训练已迁移到 OLMo-core 仓库）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-repo-layout.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "说出每个顶层目录（olmo、olmo_data、scripts、configs、hf_olmo、inference、evaluation、tests）的职责",
+            "理解 pyproject.toml 中 packages.find 实际打包哪些包、哪些目录被排除",
+            "知道 Makefile 提供的开发命令（run-checks、check-cpu-install 等）"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "目录职责",
+            "构建与打包",
+            "开发工具链"
+          ],
+          "order": 2,
+          "practice_task": "画出仓库顶层目录树并为每个目录写一句话职责说明；再在 pyproject.toml 的 [tool.setuptools.packages.find] 中找出实际会被打包的包名列表，解释 scripts、evaluation、inference 为何被排除。",
+          "source_files": [
+            "README.md",
+            "pyproject.toml",
+            "Makefile"
+          ],
+          "title": "仓库目录结构与代码地图",
+          "topic": "逐一讲解仓库顶层目录职责：olmo 核心库、olmo_data 内置数据资产、scripts 训练与工具脚本、configs 官方训练配置、hf_olmo HF 集成、inference/evaluation 推理与评估工具、tests 测试。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1",
+            "u1-l2"
+          ],
+          "filename": "u1-l3-run-tiny-training.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "掌握 torchrun 与 python 两种启动方式及其适用平台（多卡 vs Mac MPS/单机）",
+            "理解命令行 --setting=value 与 --setting.sub=value 的覆盖机制",
+            "对照 tiny 配置说出 model/optimizer/scheduler/data/evaluators 各段的作用"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "训练入口",
+            "tiny 配置",
+            "启动方式"
+          ],
+          "order": 3,
+          "practice_task": "通读 scripts/train.py 的 main(cfg)，对照 configs/tiny/OLMo-20M.yaml 标注每个配置段被 main 中哪段代码消费；然后尝试 python scripts/train.py configs/tiny/OLMo-20M.yaml --dry_run=true --save_overwrite=true（数据在 S3，若下载失败请分析报错发生在入口流程的哪一步并记录）。",
+          "source_files": [
+            "scripts/train.py",
+            "configs/tiny/OLMo-20M.yaml",
+            "README.md"
+          ],
+          "title": "跑通第一个训练：tiny 配置实战",
+          "topic": "以 configs/tiny/OLMo-20M.yaml 为例演示如何在 Mac/单机上启动一次训练，理解 torchrun 与 python 两种启动方式、命令行配置覆盖，以及训练入口从初始化到 trainer.fit 的整体流程。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l4-config-system.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "理解 BaseConfig.new/load/save 如何用 OmegaConf structured schema 校验与合并配置",
+            "掌握 path.glob、path.choose、path.last_checkpoint 三个 resolver 的用途",
+            "会用命令行 dotlist 覆盖任意嵌套配置项"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "BaseConfig",
+            "OmegaConf resolver",
+            "配置加载"
+          ],
+          "order": 4,
+          "practice_task": "运行 python scripts/init_config.py /tmp/my-config.yaml --model.d_model=128 --model.n_layers=2 生成一份配置文件，再写三行 Python 用 TrainConfig.load 加载并打印 model 字段，确认覆盖生效且其余字段取默认值。",
+          "source_files": [
+            "olmo/config.py",
+            "scripts/init_config.py",
+            "configs/tiny/OLMo-20M.yaml"
+          ],
+          "title": "配置系统：BaseConfig 与 OmegaConf",
+          "topic": "解析 olmo/config.py 中 BaseConfig 的 new/load/save/asdict 实现与 OmegaConf resolver（path.glob、path.choose、path.last_checkpoint），以及 --setting.subsetting=value 形式的命令行覆盖机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u1-l5-trainconfig-tour.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "说出 TrainConfig 各子配置（Model/Optimizer/Scheduler/Data/Evaluator/Wandb）分别流向哪个组件",
+            "理解 save_interval/save_interval_unsharded/try_load_latest_load 等保存与恢复相关字段",
+            "读懂官方 1B 配置中为大规模训练设置的工程选项"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "TrainConfig",
+            "官方配置",
+            "保存策略"
+          ],
+          "order": 5,
+          "practice_task": "对比 configs/official-0425/OLMo2-1B-stage1.yaml 与 configs/tiny/OLMo-20M.yaml，列出至少 8 个只在官方大模型配置中出现的设置（如 fsdp、activation_checkpointing、save_interval_unsharded、stop_at 等），并逐个解释其在大规模训练中的必要性。",
+          "source_files": [
+            "olmo/config.py",
+            "configs/official-0425/OLMo2-1B-stage1.yaml",
+            "configs/official-1124/OLMo2-7B-stage1.yaml"
+          ],
+          "title": "TrainConfig 全字段导览",
+          "topic": "系统过一遍 TrainConfig 的关键字段：模型、优化器、调度器、数据、评估器、保存策略、分布式策略、wandb 监控等，弄清它们分别被哪个组件消费，并对照官方 OLMo2-1B/7B 配置加深理解。"
+        }
+      ],
+      "order": 1,
+      "title": "入门：认识 OLMo 并跑起来"
+    },
+    {
+      "id": "u2",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u2-l1-tokenizer.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "掌握 Tokenizer.from_file/from_pretrained/from_checkpoint 三种加载方式",
+            "理解 eos/pad token 处理与 truncate_direction 截断行为",
+            "知道 olmo_data 包如何通过 importlib_resources 分发内置 tokenizer 与数据文件"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "Tokenizer 类",
+            "数据资产加载",
+            "编码与解码"
+          ],
+          "order": 1,
+          "practice_task": "写一段 Python：先用 olmo_data 的 get_data_path 取出内置词表文件 olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json 的路径，再用 Tokenizer.from_file 加载，encode 两句英文并 decode 回来，打印 vocab_size 与 eos_token 对应的 token id。",
+          "source_files": [
+            "olmo/tokenizer.py",
+            "olmo_data/data.py",
+            "olmo_data/tokenizers/allenai_gpt-neox-olmo-dolma-v1_5.json"
+          ],
+          "title": "Tokenizer 封装与内置词表",
+          "topic": "讲解 olmo/tokenizer.py 如何轻量包装 HF tokenizers 库：from_train_config/from_checkpoint 的加载路径选择、EOS/PAD 处理、截断方向，以及 olmo_data 包内置 tokenizer 资产的按需释放机制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-memmap-dataset.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "理解内存映射数组如何按 chunk_size 切分为训练实例以及余数丢弃行为",
+            "掌握 label_mask、doc_lens、instance_filter 等可选功能的配置方式",
+            "知道 MemMapDataset 支持本地路径、S3/GCS/HTTP 等远端路径"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MemMapDataset",
+            "chunk 切分",
+            "实例过滤"
+          ],
+          "order": 2,
+          "practice_task": "用 numpy 生成一个长度为 100 的 uint16 .npy 文件（内容为随机 token id），以 chunk_size=16 实例化 MemMapDataset，打印前 3 个样本的 input_ids 长度，并验证 len(dataset) 与 100//16 的关系（余数被忽略）。",
+          "source_files": [
+            "olmo/data/memmap_dataset.py",
+            "olmo/data/util.py",
+            "olmo/config.py"
+          ],
+          "title": "MemMapDataset：内存映射训练数据",
+          "topic": "分析 MemMapDataset 如何把 numpy 内存映射 token 数组按 chunk_size 切成训练实例，以及元数据、label mask、文档长度生成、实例过滤（InstanceFilterConfig）等机制的实现。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l3-prepare-dataset.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "掌握从 json.gz 原始文本到 .npy token 数组的完整数据准备流程",
+            "理解多进程 tokenize 与输出拼接的组织方式",
+            "了解官方预训练/退火数据配方的定义与引用方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "数据准备脚本",
+            "数据混合定义",
+            "tokenize 流程"
+          ],
+          "order": 3,
+          "practice_task": "运行脚本文档中给出的示例命令 python scripts/prepare_memmap_dataset.py test_fixtures/*.json.gz -o /tmp/out.npy 生成数据，再用 np.memmap(np.uint16) 读回并验证文件大小与 token 数一致；然后在 olmo/data/named_data_mixes.py 中找出一个数据混合常量，列出它包含的数据源类型。",
+          "source_files": [
+            "scripts/prepare_memmap_dataset.py",
+            "olmo/data/named_data_mixes.py",
+            "olmo/tokenizer.py"
+          ],
+          "title": "从原始文本到训练数据：prepare_memmap_dataset 与数据配方",
+          "topic": "讲解 scripts/prepare_memmap_dataset.py 如何把 json.gz 文档流多进程 tokenize 成 memmap 数组，并介绍 olmo/data/named_data_mixes.py 中官方数据混合（如 dolmino、olmo-mix）的组织方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u2-l4-iterable-dataloader.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "理解种子+epoch 决定的打乱顺序如何保证跨重启可复现",
+            "掌握 rank/world_size 切分与 work_dir 状态文件的作用",
+            "知道训练与评估 dataloader 在 sampler、shuffle、drop_last 上的差异"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "IterableDataset",
+            "dataloader 组装",
+            "分布式切分"
+          ],
+          "order": 4,
+          "practice_task": "对同一个小的 MemMapDataset，分别以 (world_size=2, rank=0) 和 (world_size=2, rank=1) 构建两个 IterableDataset 各迭代 2 个 batch，验证两 rank 数据互不重叠；再运行 python scripts/run_dataloader.py configs/tiny/OLMo-20M.yaml /tmp/dl-out 观察真实配置产出的批次形状（数据在 S3，可改指向本地 .npy）。",
+          "source_files": [
+            "olmo/data/iterable_dataset.py",
+            "olmo/data/__init__.py",
+            "olmo/util.py"
+          ],
+          "title": "IterableDataset 与分布式数据加载",
+          "topic": "分析 IterableDataset 如何实现可确定性重启的打乱与分片（start_index/epoch/work_dir 机制），以及 build_train_dataloader/build_eval_dataloader 如何组装 DataLoader、DistributedSampler 与 collator。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-collator-custom-dataset.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "理解 DataCollator 对不等长样本的左右填充与各字段的批处理",
+            "掌握通过配置字符串动态导入自定义 Dataset 类与 collate 函数的机制",
+            "能够为微调场景接入自己的数据格式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "DataCollator",
+            "自定义数据集",
+            "动态导入"
+          ],
+          "order": 5,
+          "practice_task": "实现一个自定义 collate 函数（例如在批字典中额外加入每个样本的 token 数统计字段），保存为可导入模块，然后参照 tests/data/custom_dataset_test.py 通过 CustomDatasetConfig.collate_fn 指向你的函数并调用 build_collator/build_train_dataloader 验证输出批中包含你的新字段。",
+          "source_files": [
+            "olmo/data/collator.py",
+            "olmo/data/custom_datasets.py",
+            "olmo/data/__init__.py"
+          ],
+          "title": "Collator 与自定义数据集扩展点",
+          "topic": "讲解 DataCollator 的填充方向、attention mask、label mask、doc_lens 批处理逻辑，以及通过 CustomDatasetConfig 用字符串路径动态导入自定义 Dataset 与 collate_fn 的扩展机制。"
+        }
+      ],
+      "order": 2,
+      "title": "数据流水线：从文本到训练批次"
+    },
+    {
+      "id": "u3",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l4"
+          ],
+          "filename": "u3-l1-olmo-model-anatomy.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "说出 OLMo.transformer 各子模块（wte/emb_drop/blocks/ln_f/ff_out/wpe）的作用与条件创建逻辑",
+            "理解 weight_tying 与 embedding_size/vocab_size 分离的设计动机",
+            "会从 ModelConfig 出发构建小模型并检查参数量"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OLMo 类",
+            "ModelConfig",
+            "参数量统计"
+          ],
+          "order": 1,
+          "practice_task": "写脚本用 ModelConfig(d_model=64, n_heads=4, n_layers=2, vocab_size=256, embedding_size=256, init_device=\"cpu\") 等参数构建小模型，打印 num_params() 与 num_params(include_embedding=False)，并手动按公式计算理论参数量进行对比；再参照 tests/model_test.py 断言 forward 输出 logits 形状为 (batch, seq, vocab)。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/config.py",
+            "tests/model_test.py"
+          ],
+          "title": "OLMo 模型总体解剖",
+          "topic": "从 OLMo.__init__ 出发梳理模型骨架：wte 词嵌入、可选 wpe 位置嵌入、N 个 block、ln_f、可选 ff_out 与权重绑定（weight_tying），以及 embedding_size 与 vocab_size 分离的设计。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-layernorm.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "理解 LayerNormBase 的模板方法设计与 build 工厂",
+            "掌握 RMSNorm 与标准 LayerNorm 的公式差异与 elementwise_affine 的作用",
+            "知道 LayerNormType 与 layer_norm_with_affine 配置如何映射到实现"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LayerNormBase",
+            "RMSLayerNorm",
+            "归一化配置"
+          ],
+          "order": 2,
+          "practice_task": "分别构建 layer_norm_type 为 rms 与 layer_norm 的两个归一化层，输入同一随机张量比较输出；再按 RMSNorm 公式（x * w / sqrt(mean(x^2)+eps)) 手工实现一遍并验证与框架输出一致。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/config.py"
+          ],
+          "title": "LayerNorm 家族：标准归一化与 RMSNorm",
+          "topic": "逐行阅读 LayerNormBase/LayerNorm/RMSLayerNorm 实现，理解 elementwise_affine、layer_norm_eps、layer_norm_with_affine 等配置如何影响归一化层的构建。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u3-l3-rope-bias.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "理解 rope/alibi/学习式位置嵌入三选一的互斥校验逻辑",
+            "掌握 RotaryEmbedding 的频率构造与 q/k 旋转实现",
+            "知道 causal bias 与 alibi bias 的矩阵构造与缓存复用"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "RotaryEmbedding",
+            "注意力偏置",
+            "位置编码配置"
+          ],
+          "order": 3,
+          "practice_task": "构建两个只差 rope=true/false 的 mini 模型（都不用 alibi），对同一段输入比较 logits 差异；再从 RotaryEmbedding 内部取出旋转使用的 cos/sin 权重，打印前 4 个位置的前 8 个频率维度，验证频率随维度递减。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/config.py"
+          ],
+          "title": "位置信息：RoPE、学习式位置嵌入与 ALiBi",
+          "topic": "讲解三种位置编码的选择逻辑（rope/wpe/alibi 的互斥关系）、RotaryEmbedding 的旋转实现与缓存，以及 causal_attention_bias/alibi_attention_bias 的构造和 BufferCache 复用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l3"
+          ],
+          "filename": "u3-l4-attention.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "理解 GQA 下 q/k/v 头数不一致时的 repeat_interleave 处理",
+            "掌握 flash_attn_func 与 SDPA 的分支选择条件",
+            "知道 doc_lens/max_doc_lens 如何驱动 flash_attn_varlen 的文档级掩码"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "注意力计算",
+            "GQA",
+            "文档掩码"
+          ],
+          "order": 4,
+          "practice_task": "设置 n_kv_heads 小于 n_heads 构建带 GQA 的小模型（flash_attention=false，走 SDPA 分支）跑一次 forward 验证形状；再利用 forward 的 doc_lens/max_doc_lens 参数把序列切成两段文档，比较与不做文档掩码时输出 hidden states 的差异，验证文档间不互相注意。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/torch_util.py"
+          ],
+          "title": "注意力实现：SDPA、FlashAttention、GQA 与文档掩码",
+          "topic": "深入 OLMoBlock.attention 与 _scaled_dot_product_attention：GQA 的 kv 头复制、flash_attn 与 PyTorch SDPA 的分支选择、layer_past 拼接，以及 flash_attn_varlen 实现的文档内注意力掩码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l4"
+          ],
+          "filename": "u3-l5-block-types.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "对比两种 block 的归一化位置与前后向计算顺序差异",
+            "理解 OLMoBlock.build 工厂与 BlockType 的关系",
+            "知道 block_group_size 打组的性能动机与取值约束（必须整除 n_layers）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OLMoBlock",
+            "sequential/llama block",
+            "block 分组"
+          ],
+          "order": 5,
+          "practice_task": "分别用 block_type=sequential 与 llama 构建两个小模型，print 其中一个 block 的模块树对比子模块差异；再用 block_group_size=2 与 =1 各跑一次 forward，验证两者输出一致（同 seed 初始化）。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/config.py"
+          ],
+          "title": "Block 形态：sequential、llama 与 block group",
+          "topic": "对比 OLMoSequentialBlock 与 OLMoLlamaBlock 两种 transformer block 的归一化位置差异，以及 OLMoBlockGroup 如何把多个 block 打组（block_group_size）以减少 Python 层循环开销。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5"
+          ],
+          "filename": "u3-l6-forward-cache.md",
+          "id": "u3-l6",
+          "learning_goals": [
+            "理解 attention_mask 到 attention_bias 的转换与 -inf 合并处理",
+            "掌握 use_cache/past_key_values/last_logits_only 三个推理加速开关",
+            "理解 ActivationCheckpointingStrategy 如何按层选择性重算"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "forward 主流程",
+            "KV Cache",
+            "激活检查点"
+          ],
+          "order": 6,
+          "practice_task": "用同一小模型实现两步生成：方式 A 每步喂完整序列（use_cache=False），方式 B 喂增量 token 并传入上一步的 attn_key_values，验证两种方式得到的下一个 token logits 一致；再用 last_logits_only=True 对比输出形状与耗时差异。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/torch_util.py"
+          ],
+          "title": "OLMo.forward 全流程与 KV Cache",
+          "topic": "完整走读 OLMo.forward：嵌入→位置信息→attention mask/bias 合并与 ensure_finite_→逐 block（含激活检查点分支）→ln_f→logits，以及 use_cache/past_key_values/last_logits_only 带来的推理优化。"
+        }
+      ],
+      "order": 3,
+      "title": "模型架构：读懂 OLMo 的每一层"
+    },
+    {
+      "id": "u4",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u2-l4",
+            "u3-l1"
+          ],
+          "filename": "u4-l1-train-entry.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "理解 __main__ 中按 CUDA/MPS/CPU 选择后端与初始化进程组的逻辑",
+            "掌握 device_train_batch_size/device_train_grad_accum 的推导",
+            "理清 torch.compile、activation_checkpointing 与三种 DistributedStrategy 包装的先后顺序"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "进程组初始化",
+            "模型包装",
+            "Trainer 组装"
+          ],
+          "order": 1,
+          "practice_task": "在 scripts/train.py 的 main() 中按执行顺序列出至少 10 个关键步骤（从 run_name 校验到 trainer.fit）各配一行说明；然后在 Mac/CPU 上跑 python scripts/train.py configs/tiny/OLMo-20M.yaml --dry_run=true --save_overwrite=true（入口会自动切到 single/CPU），对照日志验证你总结的步骤顺序。",
+          "source_files": [
+            "scripts/train.py",
+            "olmo/torch_util.py",
+            "olmo/util.py"
+          ],
+          "title": "训练入口 scripts/train.py 全景",
+          "topic": "从 __main__ 到 main(cfg) 走读训练入口：进程组初始化（nccl/gloo/MPS 适配）、配置补全、wandb 初始化、dataloader 与 evaluator 构建、模型构建与编译、激活检查点设置、DDP/FSDP/Single 包装、Trainer 组装与训练前 checkpoint 预保存。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u4-l2-trainer-fit.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 global_step/global_train_tokens_seen/epoch 等状态字段的维护",
+            "掌握 max_duration 三种写法（步数/1ep/4001T）到 max_steps 的换算",
+            "理清 fit 循环中日志、评估、保存、取消检查的触发条件"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Trainer 状态",
+            "fit 主循环",
+            "训练时长控制"
+          ],
+          "order": 2,
+          "practice_task": "阅读 fit() 后画出主循环流程图（epoch→batch→log→eval→save→canceled check）；然后手工推演 max_duration 分别为 1000、\"1ep\"、\"1000T\" 时 max_steps 与 max_tokens 的计算结果（结合 tests/train_test.py 中的用法验证思路）。",
+          "source_files": [
+            "olmo/train.py",
+            "olmo/config.py",
+            "tests/train_test.py"
+          ],
+          "title": "Trainer 状态机与 fit 主循环",
+          "topic": "分析 Trainer dataclass 的状态字段（global_step、global_train_tokens_seen、epoch、checkpoint 列表、loss 跟踪）与 fit() 主循环：epoch 迭代、日志间隔、eval_interval、should_check_cancelled、checkpoint 保存触发与 SpeedMonitor/LRMonitor。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u4-l3-microbatch-loss.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 split_batch 按 device_train_microbatch_size 切分的规则",
+            "掌握 DDP batch 模式下 no_sync 只在非最后微批次启用的原因",
+            "理解 ce_loss 与可选 z_loss 按批内 token 数归一化的方式"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "微批次切分",
+            "梯度累积",
+            "损失函数"
+          ],
+          "order": 3,
+          "practice_task": "用 CPU 小模型与假数据直接调用 Trainer 的 split_batch/train_batch（可参照 tests/train_test.py 的夹具方式），让同一 global batch 分别按 1 个和 2 个微批次执行，验证两次的 ce loss 数值一致；再设 softmax_auxiliary_loss=true 观察返回的 z_loss。",
+          "source_files": [
+            "olmo/train.py",
+            "olmo/config.py"
+          ],
+          "title": "微批次切分、梯度累积与损失计算",
+          "topic": "讲解 split_batch/train_batch/train_micro_batch 的梯度累积实现、DDP no_sync 的使用时机、autocast 混合精度，以及 cross_entropy_loss 的实现（按 token 数归一化、可选 z-loss、可选 fused loss）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l3"
+          ],
+          "filename": "u4-l4-train-step.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "理解 dist.reduce 聚合各 rank loss 的方式与除以 world_size 的含义",
+            "掌握 scheduler_current/scheduler_max 如何驱动每步 lr 与 max_grad_norm 更新",
+            "知道 train/CrossEntropyLoss、train/Perplexity 等指标的来源"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "train_step",
+            "梯度裁剪",
+            "指标收集"
+          ],
+          "order": 4,
+          "practice_task": "手动模拟一个 train_step：对同一小模型分别设置 max_grad_norm=1.0 与 max_grad_norm_ratio=0.8，打印 clip 前后的全局梯度范数（可调用 optim.clip_grads_and_collect_metrics 的返回值）；再人为把某步 loss 置为 NaN，确认触发 ValueError(\"nan loss encountered\")。",
+          "source_files": [
+            "olmo/train.py",
+            "olmo/optim.py"
+          ],
+          "title": "train_step：梯度裁剪、学习率更新与指标收集",
+          "topic": "逐段分析 train_step：zero_grad、forward/backward、跨 rank reduce loss、clip_grads_and_collect_metrics（含 max_grad_norm 与 max_grad_norm_ratio 两种裁剪）、按调度器逐参数组更新 lr 与 max_grad_norm、optim.step、NaN 检测与指标记录。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u4-l5-eval-loop.md",
+          "id": "u4-l5",
+          "learning_goals": [
+            "理解 Evaluator 的 reset/compute 生命周期与 eval_subset_num_batches 的作用",
+            "掌握 lm 与 downstream 两类 EvaluatorConfig 的差异",
+            "知道评估指标如何进入 wandb 与控制台日志"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "评估循环",
+            "Evaluator 构建",
+            "指标输出"
+          ],
+          "order": 5,
+          "practice_task": "为一份 CPU 小训练配置添加一个 lm 类型 evaluator（data.paths 指向你用 scripts/prepare_memmap_dataset.py 从 test_fixtures 生成的 .npy），运行若干步训练，在日志/wandb 中找到形如 eval/.../CrossEntropyLoss 的指标并解释其数值含义。",
+          "source_files": [
+            "olmo/train.py",
+            "olmo/eval/__init__.py",
+            "olmo/eval/evaluator.py"
+          ],
+          "title": "训练中的评估循环",
+          "topic": "讲解 Trainer.eval()/eval_step/eval_batch 的流程、build_evaluators 如何依据 EvaluatorConfig 构建困惑度（lm）与下游（downstream）两类评估器，以及指标如何被汇总、命名并写入 wandb。"
+        }
+      ],
+      "order": 4,
+      "title": "训练主循环：从入口到每一步"
+    },
+    {
+      "id": "u5",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4"
+          ],
+          "filename": "u5-l1-optimizers.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "理解 Optimizer 基类如何嵌入指标收集与梯度裁剪",
+            "掌握 LionW 的 sign 更新与解耦 weight decay 公式",
+            "知道 build_optimizer 如何按 OptimizerType 分发"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Optimizer 基类",
+            "LionW",
+            "AdamW 封装"
+          ],
+          "order": 1,
+          "practice_task": "用同一组人工构造的梯度序列分别以 AdamW 和 LionW 更新同一个参数张量 100 步，打印每 10 步的参数值对比更新轨迹；再运行 pytest tests/optim_test.py 熟悉官方对优化器的断言方式。",
+          "source_files": [
+            "olmo/optim.py",
+            "tests/optim_test.py"
+          ],
+          "title": "优化器体系：AdamW 与 LionW",
+          "topic": "阅读 olmo/optim.py 中 Optimizer 基类的指标收集与裁剪接口、AdamW 的封装，以及 LionW 的完整实现（sign 更新、weight decay 因子），对比两者更新公式差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-param-groups.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "掌握 _is_residual 标记与 decay/no-decay 参数组的划分规则",
+            "理解 decay_norm_and_bias 与 decay_embeddings 两个开关的组合行为",
+            "知道优化器 state_dict 键名与模型参数的对应关系如何修复"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "参数分组",
+            "权重衰减",
+            "状态修复"
+          ],
+          "order": 2,
+          "practice_task": "构建小模型后调用 get_param_groups（传入含 optimizer 配置的 TrainConfig），打印 decay 与 no-decay 两组参数名，验证 LayerNorm 权重、bias、嵌入的分组是否符合你的配置；再切换 decay_embeddings=true/false 对比两组清单变化。",
+          "source_files": [
+            "olmo/optim.py",
+            "olmo/model.py"
+          ],
+          "title": "参数分组与权重衰减策略",
+          "topic": "分析 get_param_groups 如何依据 decay_norm_and_bias/decay_embeddings 与模块上的 _is_residual 标记把参数分成 decay/no-decay 组，以及 fix_optim_state_dict 在恢复优化器状态时的键名修复作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l2"
+          ],
+          "filename": "u5-l3-schedulers.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "掌握 cosine/linear/inv_sqrt/constant 各调度器的 lr 曲线形状与参数含义",
+            "理解 t_warmup、alpha_f、warmup_min_lr 的语义",
+            "知道 SchedulerUnits.steps 与 tokens 两种计量与 trainer 的联动"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Scheduler 抽象",
+            "cosine warmup",
+            "调度器单位"
+          ],
+          "order": 3,
+          "practice_task": "用 build_scheduler 构建 cosine_with_warmup 调度器（t_warmup=100, alpha_f=0.1），打印 0→1000 步每 50 步的 lr，验证 warmup 上升与终值=learning_rate*alpha_f；再把 scheduler.units 设为 tokens，对比 Trainer.scheduler_current 取值来源的变化。",
+          "source_files": [
+            "olmo/optim.py",
+            "olmo/train.py",
+            "olmo/config.py"
+          ],
+          "title": "学习率调度器家族",
+          "topic": "讲解 Scheduler 抽象与 CosWithWarmup/LinearWithWarmup/InvSqrtWithWarmup/ConstantWithWarmup 等实现、warmup_min_lr 与 alpha_f 衰减系数、SchedulerUnits（steps/tokens），以及 BoltOnWarmupScheduler 在重置优化器后续训时的作用。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l1"
+          ],
+          "filename": "u5-l4-distributed.md",
+          "id": "u5-l4",
+          "learning_goals": [
+            "理解 FSDPWrapStrategy 各策略决定哪些模块被单独包裹",
+            "掌握 HYBRID_SHARD 下 device_mesh 与副本数的计算",
+            "理解 DDPGradSyncMode.micro_batch 与 batch 的 no_sync 语义差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "DDP 包装",
+            "FSDP 包装",
+            "梯度同步模式"
+          ],
+          "order": 4,
+          "practice_task": "写一段独立脚本：用 torchrun --nproc_per_node=2（无 GPU 时用 gloo 后端+CPU 模拟）分别以 DDP 和 FSDP（FSDPWrapStrategy.wrap_everything 或 by_block）包装小 OLMo 模型，对一个假 batch 执行 backward 并调用 peak_gpu_memory 对比；记录两种策略下可训练 batch 上限的差异结论。",
+          "source_files": [
+            "scripts/train.py",
+            "olmo/config.py",
+            "olmo/torch_util.py"
+          ],
+          "title": "分布式策略：DDP、FSDP 与混合分片",
+          "topic": "分析 scripts/train.py 中三种 DistributedStrategy 的包装细节、FSDPWrapStrategy 各包装策略、HYBRID_SHARD 的 device_mesh 与副本数推导、DDPGradSyncMode 与 no_sync 的配合，以及 SingleAccelerator 在单机训练中的角色。"
+        }
+      ],
+      "order": 5,
+      "title": "优化器、调度器与分布式策略"
+    },
+    {
+      "id": "u6",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l2"
+          ],
+          "filename": "u6-l1-checkpointer-base.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "理解 Checkpointer 三个抽象方法与 unshard_checkpoint 的分工",
+            "掌握 _temporary_wd 原子替换目录与 wait_for 处理 NFS 可见性延迟的技巧",
+            "知道一次完整保存包含模型、优化器、trainer state 与 RNG 状态"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Checkpointer 接口",
+            "原子写入",
+            "FullCheckpointer"
+          ],
+          "order": 1,
+          "practice_task": "用 FullCheckpointer 在单进程下保存再恢复一个小模型+优化器（可参照 tests/checkpoint_test.py），逐张量比较恢复前后参数是否一致；再在不设 save_overwrite 的情况下重复保存到同一目录，验证 FileExistsError 报错路径。",
+          "source_files": [
+            "olmo/checkpoint.py",
+            "olmo/train.py",
+            "tests/checkpoint_test.py"
+          ],
+          "title": "Checkpointer 抽象与 FullCheckpointer",
+          "topic": "讲解 Checkpointer 基类接口（save_checkpoint/restore_checkpoint/unshard_checkpoint）、_temporary_wd 的原子目录替换与 NFS 竞态处理，以及 FullCheckpointer 对模型、优化器、trainer state、RNG state 的非分片保存与恢复。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-sharded-checkpointers.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "对比 torch.distributed.checkpoint 新旧 API 的产物差异",
+            "理解 LocalShardedCheckpointer 按 flat param 分片的设计",
+            "会按 ShardedCheckpointerType 选择合适的实现"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "分片检查点",
+            "dist_cp 存储",
+            "工厂函数"
+          ],
+          "order": 2,
+          "practice_task": "在单进程（或 torchrun 2 进程）下分别用 build_sharded_checkpointer 构建至少两种分片 checkpointer 各保存一次，列出产物文件清单（如 .distcp、rank 元数据）并对比差异；再用 load_model_state 从各自产物恢复模型并验证参数一致。",
+          "source_files": [
+            "olmo/checkpoint.py",
+            "olmo/config.py"
+          ],
+          "title": "分片检查点的多种实现",
+          "topic": "对比 TorchNewStyleShardedCheckpointer（torch.distributed.checkpoint + RemoteFileSystemWriter/Reader）、TorchLegacyShardedCheckpointer、LocalShardedCheckpointer 与 OlmoCoreCheckpointer 的设计取舍，以及 build_sharded_checkpointer 工厂的选择逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l3-resume-training.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "掌握 trainer_state_dict 的内容与 restore_rng_state 的必要性",
+            "理解 restore_dataloader=False 与 fast_forward_batches 的使用场景（如 loss spike 后跳过数据）",
+            "掌握 reset_optimizer_state/reset_trainer_state 与 BoltOnWarmupScheduler 的组合"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "保存编排",
+            "状态恢复",
+            "自动续训"
+          ],
+          "order": 3,
+          "practice_task": "模拟一次中断续训：让小训练跑到第 N 步保存 checkpoint 后停止，再以 load_path 指向该 checkpoint 重启，验证 global_step、dataloader 位置与 loss 曲线延续；接着测试 load_path + reset_optimizer_state=true 的重启，观察 lr 从 warmup 重新爬升（BoltOnWarmupScheduler 生效）。",
+          "source_files": [
+            "olmo/train.py",
+            "olmo/checkpoint.py",
+            "scripts/train.py"
+          ],
+          "title": "断点续训与 trainer state 恢复",
+          "topic": "分析 Trainer.save_checkpoint/restore_checkpoint 的编排、trainer_state_dict 包含的状态（global_step、dataloader 位置、RNG state）、restore_dataloader/fast_forward_batches 的数据跳过策略，以及 scripts/train.py 中 try_load_latest_save 的本地/远端自动恢复逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-unshard-tools.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "掌握把分片 checkpoint 合并加载为完整模型的方法",
+            "理解 safetensors 格式与 docs/Safetensors.md 的约定",
+            "知道 util.py 对 s3/gs/http 多协议的统一抽象"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "unshard 脚本",
+            "safetensors",
+            "远端存储抽象"
+          ],
+          "order": 4,
+          "practice_task": "把上一讲保存的分片 checkpoint 用 python scripts/unshard.py 合并到输出目录（分别尝试默认与 --safe_tensors 选项），然后用 load_model_state 或直接构造 OLMo 加载合并后的权重，逐张量验证与原始模型一致。",
+          "source_files": [
+            "scripts/unshard.py",
+            "olmo/safetensors_util.py",
+            "olmo/util.py",
+            "docs/Safetensors.md"
+          ],
+          "title": "工具链：unshard、safetensors 与远端存储",
+          "topic": "讲解 scripts/unshard.py 的分片合并流程、state_dict_to_safetensors_file 与 Safetensors 格式约定，以及 olmo/util.py 中对 S3/GCS/HTTP 远端读写、find_latest_checkpoint 的多后端适配。"
+        }
+      ],
+      "order": 6,
+      "title": "检查点与容错：保存、分片与续训"
+    },
+    {
+      "id": "u7",
+      "level": "intermediate",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6"
+          ],
+          "filename": "u7-l1-beam-search.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "理解 Sampler 抽象与各采样器在节点/束两级采样的分工",
+            "掌握 BeamSearch.search 的状态字典传递与束重组机制",
+            "会用 RepeatedNGramBlockingConstraint 等约束定制解码"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "BeamSearch",
+            "Sampler 家族",
+            "约束与打分"
+          ],
+          "order": 1,
+          "practice_task": "不依赖模型，直接实例化 BeamSearch 并配合自定义 step 函数（返回固定构造的 log probs）跑 beam_size=3 的搜索，观察搜索路径；再用 TopPSampler(p=0.9) 替换默认采样器并对比选择差异，最后运行 pytest tests/beam_search_test.py。",
+          "source_files": [
+            "olmo/beam_search.py",
+            "tests/beam_search_test.py"
+          ],
+          "title": "Beam Search 算法实现",
+          "topic": "系统阅读 beam_search.py（改编自 AllenNLP）：Sampler 家族（Deterministic/Multinomial/TopK/TopP/Gumbel）、FinalSequenceScorer 两种打分、RepeatedNGramBlockingConstraint 约束，以及 BeamSearch.search 的状态机循环。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1"
+          ],
+          "filename": "u7-l2-generate.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "理解 past_key_values 如何展平进 beam search 状态字典",
+            "掌握增量解码时只喂最后一个 token 的条件分支",
+            "会用不同 Sampler 改变生成行为"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "generate 方法",
+            "状态扁平化",
+            "采样策略"
+          ],
+          "order": 2,
+          "practice_task": "用 CPU 小模型分别以 beam_size=1（贪心）与 beam_size=4 对同一段提示词调用 model.generate，比较生成文本；再分别传入 MultinomialSampler 与 TopPSampler(0.9) 观察随机性与多样性差异。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/beam_search.py"
+          ],
+          "title": "OLMo.generate：基于 KV Cache 的生成解码",
+          "topic": "分析 OLMo.generate 如何把 forward 的 past_key_values 扁平化进 beam search 状态、增量解码时只喂上一个 token、动态扩展 attention_mask，以及与 BeamSearch 各组件的衔接。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l6",
+            "u7-l2"
+          ],
+          "filename": "u7-l3-hf-integration.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解 create_model_config_from_pretrained_config 的字段映射与注意力实现适配",
+            "掌握 OLMoForCausalLM.forward 中 labels 位移计算 loss 的方式",
+            "知道 tie_weights 设为 no-op 的原因与 resize_token_embeddings 对 embedding_size 的特殊处理"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "OLMoForCausalLM",
+            "OLMoConfig",
+            "AutoModel 注册"
+          ],
+          "order": 3,
+          "practice_task": "参照 tests/hf_olmo/hf_olmo_test.py 与 tests/hf_olmo/hf_pipeline_test.py，用 AutoModelForCausalLM.from_pretrained 加载 test_fixtures/test-olmo-model，先 forward 打印 logits 形状，再传 labels 得到 loss，最后用 transformers pipeline(\"text-generation\") 跑一次生成。",
+          "source_files": [
+            "hf_olmo/modeling_olmo.py",
+            "hf_olmo/configuration_olmo.py",
+            "hf_olmo/tokenization_olmo_fast.py",
+            "tests/hf_olmo/hf_olmo_test.py"
+          ],
+          "title": "HuggingFace 集成：OLMoForCausalLM",
+          "topic": "讲解 hf_olmo 包如何用极薄包装把 OLMo 接入 transformers 生态：OLMoConfig 与 ModelConfig 的字段映射、OLMoForCausalLM.forward/prepare_inputs_for_generation 适配、weight tying 的 no-op 处理与 resize_token_embeddings 特殊逻辑，以及 AutoModelForCausalLM.register 注册。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l4",
+            "u7-l3"
+          ],
+          "filename": "u7-l4-weight-conversion.md",
+          "id": "u7-l4",
+          "learning_goals": [
+            "掌握 OLMo 原生命名（transformer.blocks.N...）与 HF 命名（model.layers.N...）的映射规律",
+            "理解转换脚本如何合并分片、写出 config/tokenizer/权重三类文件",
+            "会验证转换前后的数值等价性"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "键名映射",
+            "分片合并",
+            "产物写出"
+          ],
+          "order": 4,
+          "practice_task": "把你此前训练或 unshard 出的小 checkpoint 用 hf_olmo/convert_olmo_to_hf.py（或 scripts/convert_olmo_to_hf_new.py / convert_olmo2_to_hf.py，视 checkpoint 结构而定）转成 HF 格式，用 transformers 加载转换产物，对同一输入比较转换前后两个模型的 logits 是否一致。",
+          "source_files": [
+            "hf_olmo/convert_olmo_to_hf.py",
+            "scripts/convert_olmo2_to_hf.py",
+            "scripts/convert_olmo_to_hf_new.py"
+          ],
+          "title": "权重转换：OLMo checkpoint 到 HF 格式",
+          "topic": "讲解 hf_olmo/convert_olmo_to_hf.py 与 scripts/convert_olmo2_to_hf.py 等脚本的参数键名映射、分片合并、config/tokenizer 拷贝流程，说明 OLMo 原生格式与 HF 格式（Olmo2Config/Olmo2ForCausalLM）的差异。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l3"
+          ],
+          "filename": "u7-l5-quantization-efficiency.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "掌握 GPTQ 量化脚本的输入输出与调用链",
+            "理解效率基准脚本测量的指标（延迟、吞吐、显存）",
+            "了解用 Modal 托管 OpenAI 兼容服务的最小路径"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GPTQ 量化",
+            "效率基准",
+            "Modal 部署"
+          ],
+          "order": 5,
+          "practice_task": "阅读 inference/compression/run_olmo_quantization.sh 与 run_quantization.py，写出量化参数（bits、group size 等）从 shell 到 Python 的传递链；有 GPU 时对 allenai/OLMo-2-0425-1B 做 int8 量化并对比量化前后的生成结果与显存占用，无 GPU 时用 load_in_8bit=True 的 README 示例验证量化推理路径。",
+          "source_files": [
+            "inference/README.md",
+            "inference/compression/run_quantization.py",
+            "inference/efficiency/run_efficiency_benchmark.py",
+            "scripts/olmo2_modal_openai.py"
+          ],
+          "title": "量化、效率基准与在线服务",
+          "topic": "介绍 inference 目录：GPTQ 量化流程（run_quantization.py 与 run_olmo_quantization.sh）、效率基准（run_efficiency_benchmark.py）、MMLU 评测脚本，以及 scripts/olmo2_modal_openai.py 用 Modal 提供 OpenAI 兼容 API 的示例。"
+        }
+      ],
+      "order": 7,
+      "title": "生成、推理与 HuggingFace 生态"
+    },
+    {
+      "id": "u8",
+      "level": "advanced",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l5"
+          ],
+          "filename": "u8-l1-downstream-eval.md",
+          "id": "u8-l1",
+          "learning_goals": [
+            "掌握 acc/len_norm/pmi_dc/ce_loss/bpb 各指标的计算口径",
+            "理解 ICLMultiChoiceTaskDataset 的五个 doc_to_* 抽象方法",
+            "知道 build_evaluators 如何把任务 label 映射到数据集类"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "ICLMetric",
+            "多选任务抽象",
+            "任务注册表"
+          ],
+          "order": 1,
+          "practice_task": "参照 tests/eval/downstream_test.py 与现有任务（如 PIQA）的实现，新建一个继承 ICLMultiChoiceTaskDataset 的迷你任务（例如「反转字符串」二选一），实现 doc_to_text/doc_to_continuations/doc_to_label，注册进 label_to_task_map 并通过 build_downstream_evaluator 跑通一次评估。",
+          "source_files": [
+            "olmo/eval/downstream.py",
+            "olmo/eval/__init__.py",
+            "evaluation/README.md"
+          ],
+          "title": "下游评估：ICLMetric 与任务体系",
+          "topic": "讲解 ICLMetric 的多种指标（acc/len_norm/pmi_dc/ce_loss/bpb）计算方式、ICLMultiChoiceTaskDataset 的 doc_to_text/doc_to_continuations 抽象与内置任务（piqa、hellaswag、mmlu 系列等），并介绍 evaluation/ 目录的 tango+catwalk 评估管线入口。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u4-l4",
+            "u3-l6"
+          ],
+          "filename": "u8-l2-testing.md",
+          "id": "u8-l2",
+          "learning_goals": [
+            "掌握 conftest.py 与 test_fixtures 提供的夹具（小模型、小数据）",
+            "理解 Makefile run-checks 的质量门禁组成",
+            "能为模型新特性补一个最小测试"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "测试组织",
+            "pytest 夹具",
+            "质量门禁"
+          ],
+          "order": 2,
+          "practice_task": "运行 CUDA_VISIBLE_DEVICES='' pytest -v tests/model_test.py tests/config_test.py 熟悉测试风格；然后为 OLMoLlamaBlock 写一个最小的 forward 形状与梯度测试（放入 tests/model_test.py 或新文件），确保被 pytest 收集并通过。",
+          "source_files": [
+            "conftest.py",
+            "tests/model_test.py",
+            "tests/train_test.py",
+            "Makefile"
+          ],
+          "title": "测试体系与测试夹具",
+          "topic": "梳理 tests/ 的组织（模型、训练、检查点、数据、eval、hf_olmo 各有专属测试文件）、conftest.py 与 test_fixtures 提供的小模型/小数据夹具，以及 Makefile run-checks（ruff/black/mypy/pytest）和 gpu marker 的约定。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u8-l3-init-stability.md",
+          "id": "u8-l3",
+          "learning_goals": [
+            "掌握三种 InitFnType 的尺度公式（含 full_megatron 的 sqrt(2*n_layers) 因子）",
+            "理解截断正态 init_normal 的实现细节",
+            "掌握 AMP 下 attention bias 的 -inf 防 NaN 处理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "初始化策略",
+            "截断正态",
+            "数值稳定"
+          ],
+          "order": 3,
+          "practice_task": "用三种 init_fn 分别初始化同一 mini 模型，统计每个 block 输出的 L2 范数并做成表格观察深度方向的方差保持情况；再构造带 padding 的 attention bias 并模拟 fp16 下溢场景，重现 -inf 相加产生 NaN 的问题，验证 ensure_finite_ 的修复效果。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/initialization.py",
+            "olmo/torch_util.py"
+          ],
+          "title": "参数初始化与数值稳定性",
+          "topic": "分析 InitFnType 三种初始化（normal/mitchell/full_megatron）在 reset_parameters 中的尺度差异、olmo/initialization.py 的截断正态实现，以及 ensure_finite_、attention bias 的 AMP 类型转换等数值稳定手段。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l5",
+            "u2-l5",
+            "u5-l3"
+          ],
+          "filename": "u8-l4-extend-olmo.md",
+          "id": "u8-l4",
+          "learning_goals": [
+            "盘点 OLMo 的主要扩展点及其注册/配置机制",
+            "能把一个自定义组件从配置一路接入训练循环",
+            "综合运用模型、数据、优化器、训练与评估知识完成端到端改造"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "扩展点盘点",
+            "组件注册",
+            "端到端接入"
+          ],
+          "order": 4,
+          "practice_task": "综合实战二选一：(A) 实现一个玩具 block 类型（如对 hidden 做固定扰动的 ParityBlock），在 BlockType 中注册并通过 block_type 配置启用，跑通 forward 与若干步训练；(B) 实现一个从本地 csv 读取文本的自定义 Dataset（经 custom_dataset 配置接入），用你准备的数据完成 100 步训练，在日志中确认 loss 呈下降趋势。",
+          "source_files": [
+            "olmo/model.py",
+            "olmo/config.py",
+            "olmo/data/custom_datasets.py",
+            "olmo/eval/downstream.py"
+          ],
+          "title": "二次开发实战：扩展 OLMo",
+          "topic": "总结项目全部扩展点：新增 BlockType/激活函数、新增数据集与 collator、新增评估任务、新增 Checkpointer；以「添加一种新 block 或接入一种新数据源」为综合实战，串联模型、数据、训练与测试知识。"
+        }
+      ],
+      "order": 8,
+      "title": "评估、质量保障与二次开发"
+    }
+  ]
+}

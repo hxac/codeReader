@@ -1,7 +1,7 @@
 {
-  "head": "28c1816664491493242d453c2c7280ee56e6c20a",
+  "head": "2f7889da9248629f9415a80a45ba882544b82f1f",
   "project": "open-instruct",
-  "rationale": "本轮增量（8cd7c9eb→28c181666）只有两个提交，影响面清晰。其一，#2258 把此前仅存在于内部分支的 MoE（OLMoE3/A4B，KDA/MoE v2）checkpoint 转 HF 工具以 scripts/train/debug/convert_moe_checkpoint_to_hf.py 入库，并默认向 generation_config.json 写入 chat EOS 列表 [100265, 100257]——缺 <|im_end|> 会让 vLLM OpenAI 服务无法停止回合、工具调用重复到 token 预算；脚本同时处理 OLMoDDP 融合优化器 .main 权重布局并记录 KDA 严格校验失效等使用告诫，这是 u7 权重转换主题下独立的实践点，故新增 u7-l4（依赖讲权重转换的 u7-l3）。其二，#2260 把 MILES SciCode 参考数据默认指向 SCICODE_H5PY_HOST_PATH Beaker 秘密：evaluation.parse 自动注入默认秘密（three-node 示例删去占位路径），validate_scicode_reference_path 以计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝未解析的占位路径，evaluation_runner 在评估器内部解析秘密、校验文件存在且不回显秘密值，同时保持冻结任务身份以兼容 resume，失败回执保留 InputError 的可行动诊断——主体落在 u8-l9（其上一轮 grading 契约更新尚未落盘，继续 update 并扩充），边界改动小幅波及 u8-l2（launch_warnings 新增警告分支）、u8-l3（execute 预检）、u8-l8（launch 预检与第二个按名注入秘密的实例）。上一轮已由 worker 重写完毕且本轮源码无变化的 u6-l3、u6-l6、u8-l1、u8-l4 翻转为 keep；上一轮尚未落盘的 u8-l5、u8-l6、u8-l11 的 update 与 u8-l12～l14 的 new 继续保留；SFT/DPO/RM/GRPO/OLMo-core 其余各篇与工程化单元无变化，全部保持原动作。",
+  "rationale": "本轮增量（28c181666→2f7889da9）共三个提交，全部落在 MILES。其一，#2271 把维护示例的损失基线从 per-response 翻转为 token-mean（所有示例 calculate_per_token_loss=true，库省略默认仍保留 response-mean 兼容），Tiny 学习示例统一为 256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup，examples README、development-defaults、grpo.md、run-controls、throughput-profiles 同步改写——已落盘的 u8-l1（small 目录故事与练习引用已删除的 small/dev.toml）与 u8-l2（基线表述与练习步骤）不再准确，均转 update。其二，#2280 删除 small/dev.toml 占位、新增实测的 OLMo 3.5 Small（A4B，KDA+MoE）B300 三档配方（two-node-mech/four-node/eight-node）、configs/miles/moe_configs 的 SGLang fused-MoE tile 调优文件与 README、230 行的 docs/miles/olmo35-small.md（布局/显存账目/吞吐审计/失败记录），并把 driver.py 终端刷新清理改为无条件 abort 未完成工作——实测配方体系在 u8 拓扑与吞吐主题下自成一讲，新增 u8-l15（依赖讲配置系统的 u8-l2 与讲拓扑吞吐的 u8-l10）；driver 的终端清理小改并入 u8-l3（update）。其三，#2286 允许 judge 绑定表覆盖数据子集未使用的绑定（judge_registry.validate_data 删除 unused 报错，active 绑定的 judge_query/引用目标校验保留，managed-judges.md 记录，test_miles_judging.py 补用例），直接落进 u8-l6（update 扩充）与以 abstention 绑定为动机案例的 u8-l13（new，扩充目标与实践）。上一轮已落盘且本轮内容不受影响的 u1-l1、u1-l2、u6-l3、u6-l6、u6-l7、u6-l8、u7-l4、u8-l4、u8-l11 置 keep；上一轮尚未落盘的 u8-l5、u8-l8、u8-l9 的 update 与 u8-l12～l14 的 new 继续保留；SFT/DPO/RM/GRPO/OLMo-core 其余各篇与工程化单元无变化，全部保持原动作。",
   "units": [
     {
       "id": "u1",
@@ -977,7 +977,7 @@
           "topic": "讲解 olmo_core_hybrid.py 的混合注意力（滑动+全量）模型构建与 HF↔OLMo-core 权重转换，以及 HSDP 分片策略的原理与默认值。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l3"
           ],
@@ -1013,7 +1013,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u6-l4"
           ],
@@ -1023,24 +1023,27 @@
             "说出 MILES 与 grpo.py/grpo_fast.py 的关系与适用范围",
             "理解三层所有权划分",
             "会用 python -m open_instruct.miles 的五个子命令",
-            "知道维护示例按模型家族重组在 configs/miles/examples/tiny/ 与 small/ 下"
+            "知道维护示例按模型家族组织在 configs/miles/examples/tiny/ 与 small/ 下，且 small/ 本轮从 dev 占位副本升级为实测的 OLMo 3.5 Small B300 配方（two-node-mech/four-node/eight-node）"
           ],
           "level": "advanced",
           "minimal_modules": [
             "CLI 入口",
             "架构分层",
-            "文档地图"
+            "文档地图",
+            "示例家族划分（tiny/small）"
           ],
           "order": 1,
-          "practice_task": "阅读 docs/miles/index.md 与 architecture.md，绘制 MILES 三层架构图，并用 `python -m open_instruct.miles plan`（无 GPU 也可运行）对 configs/miles/examples/tiny/dev.toml 做计划验证；浏览 docs/miles/grading.md 与 abstention.md 的新目录条目，了解文档地图本轮的扩展。",
+          "practice_task": "阅读 docs/miles/index.md 与 architecture.md，绘制 MILES 三层架构图，并用 `python -m open_instruct.miles plan`（无 GPU 也可运行）对 configs/miles/examples/tiny/dev.toml 做计划验证；浏览 docs/miles/grading.md、abstention.md 与本轮新增的 olmo35-small.md 目录条目，了解文档地图的扩展，并对照 configs/miles/examples/README.md 说明 tiny/ 与 small/ 两个家族当前的分工（Tiny 力学/学习示例 vs Small B300 实测配方，详见 u8-l15）。",
           "source_files": [
             "docs/miles/index.md",
             "docs/miles/architecture.md",
             "open_instruct/miles/__main__.py",
-            "docs/miles/grpo.md"
+            "docs/miles/grpo.md",
+            "configs/miles/examples/README.md",
+            "docs/miles/olmo35-small.md"
           ],
           "title": "MILES 总览与架构分层",
-          "topic": "介绍 MILES 的定位与分层：open-instruct 负责配置/数据/奖励集成，MILES 运行时负责 rollout 编排与共享 RL 机制，Core 适配器经 OLMo-core 训练、SGLang 服务。更新点：grpo.md 指南的最终答案奖励一节改写为共享判分输入并链接 grading.md，示例配置移动到 configs/miles/examples/tiny/ 与 small/（按模型家族分组）。"
+          "topic": "介绍 MILES 的定位与分层：open-instruct 负责配置/数据/奖励集成，MILES 运行时负责 rollout 编排与共享 RL 机制，Core 适配器经 OLMo-core 训练、SGLang 服务。更新点一：grpo.md 指南的最终答案奖励一节改写为共享判分输入并链接 grading.md，示例配置移动到 configs/miles/examples/tiny/ 与 small/（按模型家族分组）；更新点二（本轮）：small/dev.toml 占位被删除、small/ 改为实测 OLMo 3.5 Small B300 三档配方，文档地图新增 olmo35-small.md，全部维护示例的损失基线改为 token-mean（详见 u8-l2 与 u8-l15）。"
         },
         {
           "action": "update",
@@ -1054,7 +1057,8 @@
             "理解 RunSpec.compile 到 RunConfig 的编译链",
             "会用 --set 覆盖与 validate 命令排查配置错误",
             "掌握 prompt_provider=priority 约束（priority 设置要求 provider=priority 且需 rollout_global_dataset）、data.over_length 取值校验，以及 num_epoch/num_rollout 互斥与 save_final_checkpoint 默认策略",
-            "掌握本轮新增的编译期字段与默认值：core.reward_final_answer_only / reward_reasoning_mode、score-centering 系列参数（loss_type=score_centering、score_centering_is 及 fp32_lm_head 要求）、评估采样默认（temperature 1.0、top_p 0.95、max_response_len 上限 32768）"
+            "掌握此前新增的编译期字段与默认值：core.reward_final_answer_only / reward_reasoning_mode、score-centering 系列参数（loss_type=score_centering、score_centering_is 及 fp32_lm_head 要求）、评估采样默认（temperature 1.0、top_p 0.95、max_response_len 上限 32768）",
+            "掌握本轮维护示例基线的翻转：所有示例改用 token-mean loss（miles.calculate_per_token_loss=true，省略该设置时库默认仍为 response-mean 以兼容既有 run），Tiny 学习示例统一为 256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup，small/dev.toml 占位被实测 B300 配方取代（见 u8-l15）"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1062,19 +1066,21 @@
             "CoreConfig/RunConfig 编译",
             "校验与约束",
             "priority/over_length/epoch 预算新字段",
-            "判分与 score-centering 编译选项"
+            "判分与 score-centering 编译选项",
+            "示例基线（token-mean loss 与 Tiny batch/LR）"
           ],
           "order": 2,
-          "practice_task": "复制 configs/miles/examples/tiny/dev.toml（注意其中的 [data] over_length = \"exclude\" 与 core 的 reward_final_answer_only/reward_reasoning_mode），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；同时设置 training.num_epoch 与 num_rollouts 观察互斥报错；最后对照 configs/miles/examples/small/dev.toml 观察示例按模型家族的划分，并在 plan 产物中找出评估采样默认值。",
+          "practice_task": "复制 configs/miles/examples/tiny/dev.toml（注意其中的 [data] over_length = \"exclude\"、[core] 的 reward_final_answer_only/reward_reasoning_mode，以及本轮改为 true 的 [miles] calculate_per_token_loss），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；同时设置 training.num_epoch 与 num_rollouts 观察互斥报错；最后对照 configs/miles/examples/small/two-node-mech.toml 与 docs/miles/development-defaults.md 的「Tiny learning batch and LR」「Loss weighting」条目，观察示例家族划分与 token-mean / batch 2048 / LR 6e-6 新基线，并在 plan 产物中找出评估采样默认值。",
           "source_files": [
             "open_instruct/miles/configuration/run_spec.py",
             "open_instruct/miles/configuration/config.py",
             "open_instruct/miles/configuration/validation.py",
             "open_instruct/miles/configuration/score_centering.py",
-            "docs/miles/configuration-intro.md"
+            "docs/miles/configuration-intro.md",
+            "docs/miles/development-defaults.md"
           ],
           "title": "配置系统：TOML → RunSpec → RunConfig",
-          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；更新点：新增 priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认；又新增 reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束。本轮小更新：run_spec.launch_warnings 新增 SciCode 参考路径校验的警告分支（SciCode 秘密链路详见 u8-l9）。"
+          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；此前更新：priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认，reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束；run_spec.launch_warnings 的 SciCode 参考路径警告分支（详见 u8-l9）。本轮更新（#2271）：维护示例基线从 per-response 翻转为 token-mean loss（examples README、grpo.md、run-controls、development-defaults 同步），Tiny 学习示例改为 256 prompts × 8 / batch 2048 / 恒定 LR 6e-6，small/dev.toml 占位删除。"
         },
         {
           "action": "update",
@@ -1089,7 +1095,8 @@
             "理解指纹（fingerprint）如何支撑 resume",
             "理解 driver 返回值携带 num_rollout 后 workflow 完成判定的变化，以及 save_final_checkpoint 如何在最后一个 rollout 落盘最终存档",
             "理解 driver.train 在分配 worker 之前调用 rewards.validate_registry 的启动期奖励注册表校验",
-            "理解 workflow.execute 在模型准备前对 SciCode 参考资产的预校验：占位路径在分配任何 GPU 任务之前被拒绝（详见 u8-l9）"
+            "理解 workflow.execute 在模型准备前对 SciCode 参考资产的预校验：占位路径在分配任何 GPU 任务之前被拒绝（详见 u8-l9）",
+            "理解本轮终端刷新清理的变化（#2280）：最后一次 refresh 的 core_publication_boundary 无条件 abort，取消未完成的推理收尾工作，避免所有训练更新完成后排空剩余长响应导致超时"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1097,10 +1104,11 @@
             "driver 协调循环",
             "Supervisor 启动监管",
             "完成判定与最终存档",
-            "启动期预检（注册表 + SciCode 资产）"
+            "启动期预检（注册表 + SciCode 资产）",
+            "终端刷新清理"
           ],
           "order": 3,
-          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证；最后定位 driver.train 中 validate_registry 与 workflow.execute 开头 validate_scicode_reference_path 的调用点，说明这两类启动期预检为何必须发生在 worker/资源分配之前。",
+          "practice_task": "对照 workflow.py 与 docs/miles/workflow.md 列出准备/训练/导出各阶段的输入输出，并解释中断后哪些阶段可跳过、哪些必须重算；再跟踪 driver.train 的返回字典与 workflow.execute 的 complete 判定，说明 epoch 预算 run（无显式 num_rollout）如何被判定为 complete，并运行 open_instruct/test_miles_epoch_budget.py 验证；然后定位 driver.train 中 validate_registry 与 workflow.execute 开头 validate_scicode_reference_path 的调用点，说明这两类启动期预检为何必须发生在 worker/资源分配之前；最后定位 driver.train 终端清理处 core_publication_boundary(True, abort=True) 的调用，对照其注释解释为何成功结束的 run 也要取消未完成的推理工作（排空 surplus 长响应可能超时）。",
           "source_files": [
             "open_instruct/miles/execution/workflow.py",
             "open_instruct/miles/execution/driver.py",
@@ -1108,7 +1116,7 @@
             "docs/miles/workflow.md"
           ],
           "title": "工作流与执行：driver、workflow 与集群启动",
-          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；更新点：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存；driver 新增 rewards.validate_registry 启动校验——在分配 worker 前解析可信注册表，拒绝未声明输入契约的外部验证器或不兼容的 reasoning 约定。本轮小更新：workflow.execute 在 run_directory 与模型准备之前新增 evaluation.validate_scicode_reference_path 预检，与注册表预检并列构成启动期资产校验（SciCode 秘密链路详见 u8-l9）。"
+          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；此前更新：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存，driver 新增 rewards.validate_registry 启动校验，workflow.execute 在 run_directory 与模型准备之前新增 evaluation.validate_scicode_reference_path 预检（SciCode 秘密链路详见 u8-l9）。本轮小更新（#2280）：driver 的终端刷新清理改为无条件 abort——成功结束的 run 也不等待未完成的推理收尾工作，因为全部请求的训练更新完成后排空剩余长响应可能超时。"
         },
         {
           "action": "keep",
@@ -1190,27 +1198,30 @@
             "掌握验证器工厂与 metadata.verifiers 的绑定",
             "理解 Math-Verify 不安全等式的探针式守卫：为何用已知错误等式探测参考、为何 _requires_legacy_verifier 只缓存判定而非解析结果、_legacy_compare 如何按等号分段回退到旧版比较",
             "了解 complete_code 改用库内 execution_client 后的依赖与凭据模型（Beaker 秘密注入 CODE_EXECUTION_TOKEN）",
-            "理解注册表加载期的 grading 策略解析：_VerifierRegistry 存储每个验证器的 GradingPolicy 与未声明契约的外部工厂集合，_IsolatedVerifier 透传 grading_* 声明"
+            "理解注册表加载期的 grading 策略解析：_VerifierRegistry 存储每个验证器的 GradingPolicy 与未声明契约的外部工厂集合，_IsolatedVerifier 透传 grading_* 声明",
+            "理解本轮 #2286 放宽的绑定校验：judge 绑定表可覆盖比所选数据子集更多的源，validate_data 不再对未出现的绑定报错，但被引用的 judge 服务与 rubric 仍须有效、数据中真正出现的绑定仍要求 judge_query 与参考目标"
           ],
           "level": "advanced",
           "minimal_modules": [
             "奖励桥接与注册表",
             "数学验证器隔离与安全回退",
             "complete_code 与库内执行客户端",
-            "命名裁判注册"
+            "命名裁判注册与绑定校验"
           ],
           "order": 7,
-          "practice_task": "在一个 JSON 注册表中登记你在 u6-l3 写的验证器（factory + config），构造携带该验证器名的样本元数据，走 rewards.py 的分发路径验证调用与超时行为；再运行 open_instruct/test_miles_math_verifier.py，找到触发 legacy 回退的等式类参考样例，解释假等式哨兵（\\boxed{1 + 2 = 8}）的探测原理与 lru_cache 只缓存布尔判定的原因；最后对照 docs/miles/dataset-verifiers.md 说明判分器依赖如今如何随 MILES 镜像分发，并观察 validate_registry 对未声明 grading 契约的外部工厂抛出的错误。",
+          "practice_task": "在一个 JSON 注册表中登记你在 u6-l3 写的验证器（factory + config），构造携带该验证器名的样本元数据，走 rewards.py 的分发路径验证调用与超时行为；再运行 open_instruct/test_miles_math_verifier.py，找到触发 legacy 回退的等式类参考样例，解释假等式哨兵（\\boxed{1 + 2 = 8}）的探测原理与 lru_cache 只缓存布尔判定的原因；然后对照 docs/miles/dataset-verifiers.md 说明判分器依赖如今如何随 MILES 镜像分发，并观察 validate_registry 对未声明 grading 契约的外部工厂抛出的错误；最后构造一份含 abstention 绑定但数据行只引用 general-quality 的 judging 配置，对照 open_instruct/test_miles_judging.py 的 test_unused_c033_binding_is_allowed_for_dolci_subset 与 test_active_judge_still_requires_query_and_reference，验证未使用绑定被放行、active 绑定缺 judge_query 或参考目标仍报错。",
           "source_files": [
             "open_instruct/miles/rewards/rewards.py",
             "open_instruct/miles/rewards/verifiers.py",
             "open_instruct/miles/rewards/math_verifier.py",
             "open_instruct/miles/rewards/complete_code.py",
+            "open_instruct/miles/rewards/judge_registry.py",
             "docs/miles/dataset-verifiers.md",
-            "docs/miles/managed-judges.md"
+            "docs/miles/managed-judges.md",
+            "open_instruct/test_miles_judging.py"
           ],
           "title": "MILES 奖励体系：可信验证器注册表、数学守卫与裁判",
-          "topic": "讲解 rewards 包：rewards.py 把样本元数据映射到可信注册表中的验证器工厂（数据不能自带任意代码）、math/task 验证器的进程隔离、托管裁判服务；更新点一：math_verifier 新增对 Math-Verify 0.9.0 空解算子缺陷的守卫（假等式探针 + 缓存的 legacy 比较回退），complete_code 改用库内 execution_client，判分器依赖随 MILES 镜像分发；更新点二：_registry 现在为每个验证器解析 grading 策略并存入 _VerifierRegistry（含未声明契约的外部工厂集合），_IsolatedVerifier 透传 grading_* 声明，最终答案模式下的输入选择与门控详见 u8-l12。"
+          "topic": "讲解 rewards 包：rewards.py 把样本元数据映射到可信注册表中的验证器工厂（数据不能自带任意代码）、math/task 验证器的进程隔离、托管裁判服务；更新点一：math_verifier 新增对 Math-Verify 0.9.0 空解算子缺陷的守卫（假等式探针 + 缓存的 legacy 比较回退），complete_code 改用库内 execution_client，判分器依赖随 MILES 镜像分发；更新点二：_registry 现在为每个验证器解析 grading 策略并存入 _VerifierRegistry（含未声明契约的外部工厂集合），_IsolatedVerifier 透传 grading_* 声明（最终答案模式下的输入选择与门控详见 u8-l12）；更新点三（本轮 #2286）：judge_registry.validate_data 删除「bindings absent from train/eval data」报错——绑定表可整表声明而数据子集只用其中一部分，active 绑定的 judge_query/引用目标校验保留（managed-judges.md 同步记录）。"
         },
         {
           "action": "new",
@@ -1259,27 +1270,30 @@
             "理解 nemo_abstention_v1 源契约：保留原始 system/user 问题、闭卷（禁止 tools）、输出结构化 question/answer 目标并校验",
             "掌握 rubric+binding 配置：[rubrics.abstention] 挂 nvidia/qa-abstention-v1 profile（rubric SHA256 固定、lambda 固定 0.5），[judging.bindings.abstention] 复用既有 judges.general 裁判服务，绑定名需与 verifiers.json 对齐",
             "理解打分语义：规范化 [IDK] 直接得 0.5 且绝不调用裁判；CORRECT/INCORRECT/NOT_ATTEMPTED 对应 1/0/0.5；boxed 抽取取最后一个平衡括号并回退剩余输出",
-            "理解失败策略与诊断：空回复/传输错误/不完整生成走既有 strict/zero 策略并保持 ungraded，verifier_diagnostics 区分显式弃答与裁判给出的 NOT_ATTEMPTED"
+            "理解失败策略与诊断：空回复/传输错误/不完整生成走既有 strict/zero 策略并保持 ungraded，verifier_diagnostics 区分显式弃答与裁判给出的 NOT_ATTEMPTED",
+            "理解 #2286 的配套边界：abstention 绑定可以不出现在所选数据子集中（未使用绑定被允许），一旦数据行引用它即沿用 judge_query 与目标校验"
           ],
           "level": "advanced",
           "minimal_modules": [
             "abstention rubric 与 A/B/C 解析器",
             "nemo_abstention_v1 源适配器",
             "rubric/binding 注册与 NamedJudgeVerifier",
-            "失败策略与探针控制"
+            "失败策略与探针控制",
+            "未使用绑定的允许边界"
           ],
           "order": 9,
-          "practice_task": "运行 open_instruct/test_miles_abstention.py 并记录覆盖点（显式弃答不调用裁判、boxed 抽取、失败策略、数据绑定控制）；再用 abstention 的解析函数对一组裁判回复（含 A./B./C. 风格、NOT_ATTEMPTED 与畸形输出）手工验证分数，并核对 normalized [IDK] 得 0.5 的分支；最后参照 docs/miles/abstention.md 写出 [rubrics.abstention] 与 [judging.bindings.abstention] 的 TOML 片段，指出 verifier 绑定名为何要与导出的 verifiers.json 中的实际名字对齐。",
+          "practice_task": "运行 open_instruct/test_miles_abstention.py 并记录覆盖点（显式弃答不调用裁判、boxed 抽取、失败策略、数据绑定控制）；再用 abstention 的解析函数对一组裁判回复（含 A./B./C. 风格、NOT_ATTEMPTED 与畸形输出）手工验证分数，并核对 normalized [IDK] 得 0.5 的分支；然后参照 docs/miles/abstention.md 写出 [rubrics.abstention] 与 [judging.bindings.abstention] 的 TOML 片段，指出 verifier 绑定名为何要与导出的 verifiers.json 中的实际名字对齐；最后对照 open_instruct/test_miles_judging.py 的 test_unused_c033_binding_is_allowed_for_dolci_subset，解释为什么 Dolci 子集可以带着未使用的 abstention 绑定通过 judge_registry.validate_data，以及 active 绑定缺 judge_query 时会发生什么。",
           "source_files": [
             "open_instruct/miles/rewards/abstention.py",
             "docs/miles/abstention.md",
             "open_instruct/miles/rewards/general_judge.py",
             "open_instruct/miles/rewards/judge_registry.py",
             "open_instruct/miles/datasets/source_preparation.py",
-            "open_instruct/test_miles_abstention.py"
+            "open_instruct/test_miles_abstention.py",
+            "open_instruct/test_miles_judging.py"
           ],
           "title": "Abstention QA 奖励：Nemotron 数据、rubric 与裁判服务复用",
-          "topic": "讲解新增的原生 Nemotron abstention QA 奖励链路：source_preparation 的 nemo_abstention_v1 源适配器、abstention.py 从 NVIDIA-NeMo/Gym 移植的 rubric 与宽容 A/B/C 解析（1/0/0.5，[IDK] 归一化后免裁判得 0.5）、judge_registry 的 rubric/binding 声明生成 NamedJudgeVerifier 注册项，以及 general_judge 的 abstention 分支如何复用既有裁判服务并在诊断中区分显式弃答与裁判错误。"
+          "topic": "讲解新增的原生 Nemotron abstention QA 奖励链路：source_preparation 的 nemo_abstention_v1 源适配器、abstention.py 从 NVIDIA-NeMo/Gym 移植的 rubric 与宽容 A/B/C 解析（1/0/0.5，[IDK] 归一化后免裁判得 0.5）、judge_registry 的 rubric/binding 声明生成 NamedJudgeVerifier 注册项，以及 general_judge 的 abstention 分支如何复用既有裁判服务并在诊断中区分显式弃答与裁判错误。本轮补充（#2286）：绑定表可整表声明而数据子集只用其中一部分——abstention 绑定未出现在子集中时 validate_data 放行，active 绑定的 judge_query/引用目标校验保留。"
         },
         {
           "action": "keep",
@@ -1368,7 +1382,7 @@
             "SciCode 参考秘密的注入/校验/解析"
           ],
           "order": 13,
-          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义；再演练 --grading-policy 在混合契约证据上的必填报错与 schema 1 表仅限 legacy 模式的行为；对照 docs/miles/background-evaluation.md 的「Shared in-loop policy evaluation」一节说明采样默认值与覆盖方式；最后运行 open_instruct/test_miles_scicode_reference.py 并记录覆盖点，把 configs/miles/examples/tiny/three-node.toml 的 scicode 任务分别改成占位符路径（观察 plan 的 launch_warnings 与 launch 拒绝）与删除该路径（观察 evaluation.secrets 的自动注入），对照 docs/miles/background-evaluation.md 的 SciCode 小节梳理「显式路径 > 秘密 > 默认」的优先级与秘密值不在提交机解析、不写入回执的安全模型。",
+          "practice_task": "用 `python -m open_instruct.miles records summarize`（对示例 store 或自造的小记录集）产出汇总，再用 select 过滤 all_zero 组，解释筛选规则对后续数据分析的意义；再演练 --grading-policy 在混合契约证据上的必填报错与 schema 1 表仅限 legacy 模式的行为；对照 docs/miles/background-evaluation.md 的「Shared in-loop policy evaluation」一节说明采样默认值与覆盖方式；最后运行 open_instruct/test_miles_scicode_reference.py 并记录覆盖点，把 configs/miles/examples/tiny/three-node.toml 的 scicode 任务分别改成占位符路径（观察 plan 的 launch_warnings 与 launch 拒绝）与删除该路径（观察 evaluation.secrets 的自动注入），对照 docs/miles/background-evaluation.md 的 SciCode 小节梳理「显式路径 > 秘密 > 默认」的优先级与秘密值不在提交机解析、不写入回执的安全模型（three-node.toml 本轮还同步了 Tiny batch 2048 / LR 6e-6 / token-mean 新基线，可顺带对照）。",
           "source_files": [
             "open_instruct/miles/evaluation/evaluation.py",
             "open_instruct/miles/evaluation/evaluation_runner.py",
@@ -1380,7 +1394,7 @@
             "configs/miles/examples/tiny/three-node.toml"
           ],
           "title": "后台评估与推理记录",
-          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点一：GradingRecorder 把 grading 契约写入组行并扩展 input_key，record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝，评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限）。更新点二（本轮）：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密——evaluation.parse 在 scicode 任务未显式给 h5py_host_path 时自动注入默认秘密（three-node 示例删去占位路径、模板保持可加载），validate_scicode_reference_path 以 launch_warnings 计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝占位符路径（正则拦截 YOUR_*、$、<> 等占位形态），evaluation_runner.resolve_scicode_reference 在评估器内部解析秘密并校验文件存在（错误信息不回显秘密值、向命令注入解析结果时保持冻结任务身份以兼容完成/resume），submit 失败回执保留 InputError 的可行动诊断。"
+          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点一：GradingRecorder 把 grading 契约写入组行并扩展 input_key，record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝，评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限）。更新点二：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密——evaluation.parse 在 scicode 任务未显式给 h5py_host_path 时自动注入默认秘密（three-node 示例删去占位路径、模板保持可加载），validate_scicode_reference_path 以 launch_warnings 计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝占位符路径（正则拦截 YOUR_*、$、<> 等占位形态），evaluation_runner.resolve_scicode_reference 在评估器内部解析秘密并校验文件存在（错误信息不回显秘密值、向命令注入解析结果时保持冻结任务身份以兼容完成/resume），submit 失败回执保留 InputError 的可行动诊断。"
         },
         {
           "action": "update",
@@ -1448,7 +1462,7 @@
             "docs/miles/async-pipeline.md"
           ],
           "title": "高阶主题：序列打包、长序列与吞吐调优",
-          "topic": "汇总性能相关专题：文档隔离的序列打包语义、长序列的预算与准入控制、topology 的 GPU 布局与容量规划、吞吐画像与队列指标。"
+          "topic": "汇总性能相关专题：文档隔离的序列打包语义、长序列的预算与准入控制、topology 的 GPU 布局与容量规划、吞吐画像与队列指标（本轮 throughput-profiles 的示例数字已随 512-response/batch 2048 基线同步更新；B300 实测配方见 u8-l15）。"
         },
         {
           "action": "update",
@@ -1484,7 +1498,42 @@
             "scripts/miles/check_verifier_dependencies.py"
           ],
           "title": "启动、提交、判分器依赖与运维",
-          "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断；更新点一：launching.md 新增任务判分器依赖一节——ReasoningGym/RDKit 等判分依赖随镜像分发并在构建期自检，代码判分只需在 launch.secrets 里配置 Beaker 秘密名注入 CODE_EXECUTION_TOKEN；更新点二（本轮）：launch.specification 在拓扑规划前调用 validate_scicode_reference_path 拒绝未解析的 SciCode 占位路径，SCICODE_H5PY_HOST_PATH 经 evaluation.secrets 按名注入成为第二个「Beaker 秘密按名注入」的实例（完整链路详见 u8-l9）。"
+          "topic": "讲解 MILES 的 launch/submit 如何把 run 编译成 Beaker 实验（GPU 布局、挂载、副本）以及 operations 文档中的完成判据、指标与故障诊断；更新点一：launching.md 新增任务判分器依赖一节——ReasoningGym/RDKit 等判分依赖随镜像分发并在构建期自检，代码判分只需在 launch.secrets 里配置 Beaker 秘密名注入 CODE_EXECUTION_TOKEN；更新点二：launch.specification 在拓扑规划前调用 validate_scicode_reference_path 拒绝未解析的 SciCode 占位路径，SCICODE_H5PY_HOST_PATH 经 evaluation.secrets 按名注入成为第二个「Beaker 秘密按名注入」的实例（完整链路详见 u8-l9）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u8-l2",
+            "u8-l10"
+          ],
+          "filename": "u8-l15-b300-small-recipes.md",
+          "id": "u8-l15",
+          "learning_goals": [
+            "会按规模选择 Small 配方：two-node-mech 做 4 更新力学检查（含每更新的 serving 权重比对）、four/eight-node 做 30 更新计时布局（无 checkpoint），并解释为何 Small 没有单 GPU 训练配方、两节点是其最小已测配置",
+            "理解配方中的关键实测设置：sglang_attention_backend=\"trtllm_mha\"（fa4 在 head_dim=256 上崩溃）、OLMO_SGLANG_CORE_COMPAT=\"rounding\" 的 HF/SGLang 一致性、R=96 准入参数组（sglang_max_running_requests/sglang_max_mamba_cache_size/sglang_server_concurrency/sglang_cuda_graph_max_bs_decode/async_max_concurrent_samples=96×引擎数）的联动",
+            "掌握 fused-MoE tile 调优的分发机制：configs/miles 随镜像拷贝到 /opt/core-rl/configs/miles、SGLANG_MOE_CONFIG_DIR 指向 moe_configs、目录名必须匹配镜像的 Triton 版本（triton_3_7_1）、_down 文件缺失时复用 tile 的行为，以及实测收益（kernel -9% @batch 96、decode +1.6% @R=96）",
+            "会读 olmo35-small.md 的显存账目（trainer EP8 峰值 220.5 GiB、2×EP8 169.7 GiB；engine 权重 135 GB + KDA 状态 17.9 GB + KV 63.8 GB 的分解）与吞吐审计表（cycle 从 generation_wait.started_unix 到 publication 结束、每列独立中位数），并理解历史计时用 batch 1024/LR 1e-6/response-mean 且未启用 code grading 的告诫",
+            "理解全部维护示例共享的 Tiny 学习基线（256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup、token-mean loss）：LR/batch 探索用的是 response-mean，保留 token-mean 是工程选择而非联合最优"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Small 三档配方的布局与用途",
+            "显存账目与关键引擎设置",
+            "fused-MoE tile 调优与镜像分发",
+            "吞吐审计与配方对齐告诫"
+          ],
+          "order": 15,
+          "practice_task": "对照 docs/miles/olmo35-small.md 的 Layout and memory 表，为三档 Small 配方各写一份 GPU 分配摘要（trainer EP 划分、引擎数、裁判模型、每配方请求的受保护时长）；再对 configs/miles/examples/small/two-node-mech.toml 运行或阅读 plan 输出，找出 R=96 准入联动的五个参数并解释它们为何要成组设置；然后追踪 SGLANG_MOE_CONFIG_DIR 从 configs/miles/moe_configs/README.md 到镜像内 /opt/core-rl/configs/miles 的拷贝链路，回答「pinned Triton 升级后 tile 文件为何可能失效」与「_down 文件缺失时 SGLang 如何退化」；最后对照 configs/miles/examples/README.md 的 Recipe alignment 说明，解释当前配方（batch 2048/LR 6e-6/token-mean）与历史计时（batch 1024/LR 1e-6/response-mean、未启用 code grading）的差异为何要求重测吞吐而不是直接沿用旧数字。",
+          "source_files": [
+            "docs/miles/olmo35-small.md",
+            "configs/miles/examples/README.md",
+            "configs/miles/examples/small/two-node-mech.toml",
+            "configs/miles/examples/small/four-node.toml",
+            "configs/miles/examples/small/eight-node.toml",
+            "configs/miles/moe_configs/README.md"
+          ],
+          "title": "B300 实测配方：OLMo 3.5 Small 布局、MoE tile 调优与吞吐审计",
+          "topic": "讲解 #2280/#2271 新增的实测配方体系：configs/miles/examples/small/ 的 two-node-mech/four-node/eight-node 三个 OLMo 3.5 Small（A4B，KDA+256 专家 MoE）B300 布局（8/8/16 训练 GPU、7/23/47 推理引擎、1 个 Qwen3-32B 裁判）、docs/miles/olmo35-small.md 的显存账目与从 Beaker 工件独立重算的吞吐审计、configs/miles/moe_configs/ 的 SGLang fused-MoE tile 调优（E=256,N=3072，SGLang tuner 生成、随镜像分发、目录名匹配 Triton 版本），以及所有维护示例统一采用的 Tiny 学习基线（batch 2048、恒定 LR 6e-6、token-mean loss）；同时记录 CODE_EXECUTION_TOKEN 占位秘密与 fa4 崩溃等失败/告诫条目。"
         }
       ],
       "level": "advanced",

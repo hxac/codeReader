@@ -2,384 +2,433 @@
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+fast-ulysses 的 README 里有一堆数字——1.60–2.17× 于 `torch.distributed` 路径、传输达 fabric 上限 90–99%、hidden% 等。本讲要回答的问题是：**这些数字是怎么测出来的，以及为什么这样测才可信**。学完本讲，你应该能够：
 
-1. 对 `bench_a2a.py` 的七种模式（stages / overlap / padding / zerocopy / sweep / link / zerosm）各写出一句话的问题定义，并说出各自的判读方法。
-2. 解释两个归一化指标的确切含义：`hidden%`（异步调用藏进计算的比例）与 `of the fabric`（传输达到裸 fabric 天花板的比例）。
-3. 解释为什么「barrier 列是 floor（地板），不是待优化项」。
-4. 复述 `tools/exclusive.sh` 的三段式工作方式与 `EXCLUSIVE` / `CONTENDED` 两种判定的语义，说明为什么共享 GPU 上得到的数字不是数字。
-5. 说明 `benchmark/collect.sh` 为什么要在任何数字之前先记录环境指纹（机器、commit、驱动、时钟、拓扑）。
-
-本讲是「测量的方法」课，不是「新机制」课：u5 已经讲清了零 SM 的物理来源，本讲讲的是**如何用代码把这些性质变成可信的数字**。
+1. 对 `benchmark/bench_a2a.py` 的七种模式各写出一句话的问题定义与判读方法，重点掌握 stages 分解中每一列回答什么问题。
+2. 解释 `hidden%` 与 `of the fabric` 两个归一化指标的定义、分子分母各自量的是什么。
+3. 复述 zerosm A/B 的双列联读法，以及代码里为让这两列可信所付出的全部设计代价。
+4. 说明独占执行（EXCLUSIVE/CONTENDED）为何是一切数字有效的前提，并掌握 `tools/exclusive.sh` 的三段式工作流。
 
 ## 2. 前置知识
 
-- **CUDA 事件计时**：`torch.cuda.Event(enable_timing=True)` 在流上打时间戳，`elapsed_time` 给出两个戳之间的毫秒数。打一个戳只花主机时间、不占设备时间——这是「分段测量之和等于整体」的前提。
-- **中位数而非均值**：GPU 计时的分布有长尾（偶发的调度抖动、时钟升降），均值会被尾巴拖走，中位数不会。本基准的所有数字都是中位数。
-- **拷贝引擎（CE）与 SM 的分工**（u5-l1/u5-l2）：跨 NVLink 的远端拷贝由拷贝引擎执行、不占 SM；同设备拷贝与计算竞争同一套内存系统。
-- **一次调用的五段流水线**（u6-l2）：prepare 校验 → 开路屏障 → CE 传输 → 收尾屏障 → copy_out。本讲的 stages 分解就是给这四段计时。
-- **集合通信由最慢的 rank 定节奏**：屏障要把所有 rank 汇齐，一个迟到的 rank 会把所有人的 `barr_in` 都拉长——这既是 sweep 模式「barrier 是 floor」的原因，也是共享 GPU 破坏测量结果的机制。
-- **torchrun / rank / world_size**：基准用 `torchrun --nproc_per_node=N` 启动 N 个进程，每进程绑一张卡。
-- **nvidia-smi**：可以查询每张 GPU 上正在运行的进程（`--query-compute-apps`）和当前 SM 时钟（`--query-gpu=clocks.sm`）——`exclusive.sh` 的巡检就用这两个查询。
+- **CUDA 事件计时 vs 主机墙钟**：`torch.cuda.Event(enable_timing=True)` 在流上打时间戳，度量的是设备侧两件事之间的时间；`time.perf_counter()` 度量的是主机提交代码的耗时。二者回答不同问题——本讲会看到两个都用的地方。
+- **中位数与预热**：GPU 上首次调用含缓存分配、JIT、驱动懒初始化等一次性成本，所以每次测量都先 warmup 再取多次运行的中位数（对离群邻居干扰更稳）。
+- **集合通信的计时要对齐 rank**：一次 all-to-all 的耗时由最慢的 rank 决定。若各 rank 的 warmup 次数不同，一个 rank 的预热残留会落进另一个 rank 的计时窗口，故计时前要 `dist.barrier()`。
+- **共享 GPU 与邻居进程**：基准机往往是共享的，任务随时到来。邻居进程占用 SM、带宽、还会让 SM 时钟掉频——这些都不受你控制，却全部落进你的计时窗口。
+- **fabric 带宽**：NVLink 互联（fabric）能搬运的每秒字节数有物理上限。「用了 fabric 的百分之多少」是判断「还有没有调度空间」的判据。
+- **承接前讲**：u6-l2 讲过一次调用是「prepare 校验 → 开路屏障 → CE 传输 → 收尾屏障 → copy_out」五段；u5-l2 讲过零 SM 仅属跨链路远端拷贝、zerosm 用双臂 A/B 检验。本讲把这些性质变成**可测、可判读的数字**。
 
 ## 3. 本讲源码地图
 
-| 文件 | 作用 |
-|---|---|
-| `benchmark/bench_a2a.py` | 基准主程序：七种模式、计时基建（Stopwatch / median / submit_us）、每种模式的测量与打印 |
-| `tools/exclusive.sh` | 独占执行守卫：先等 GPU 空闲、运行期间持续采样、最后给出 EXCLUSIVE / CONTENDED 判定 |
-| `benchmark/collect.sh` | 一台机器的完整测量编排：环境指纹 + 正确性门 + 按序跑全部模式 |
-| `docs/benchmark.md` | 已发表的数字与完整方法论声明（机器、二进制、节点一致性） |
-| `src/bindings.cc` | `all_to_all_4d_timed` 算子：stages 模式的计时来源 |
-| `python/fast_ulysses/group.py` | `_timed()`：把四个阶段时长包成带名字的字典 |
-| `docs/design.md` | zerosm A/B 的设计论证（本讲只引用、已在 u5-l2 详述） |
+| 文件 | 行数 | 作用 |
+|---|---|---|
+| `benchmark/bench_a2a.py` | 681 | 七种测量模式的主脚本；模块 docstring 本身就是一份判读手册 |
+| `tools/exclusive.sh` | 113 | 独占执行守门人：等空闲 → 边跑边采样 → 打出 EXCLUSIVE/CONTENDED 判决 |
+| `benchmark/collect.sh` | 139 | 一台机器的完整测量流程：指纹头 → 正确性门 → 依次跑全部模式 |
+| `docs/benchmark.md` | 336 | 已发表数字与全部方法论纪律（两台机器、单一 wheel、撤回记录、未测量清单） |
+| `python/fast_ulysses/group.py` | — | `_timed()`：基准专用的分段计时探针（L251–L265） |
+| `src/bindings.cc` | — | `all_to_all_4d_timed` 算子：在四段之间记录 CUDA 事件（L624–L654） |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 stages 分解：让各阶段相加等于整次调用
+### 4.1 stages 分解：一次调用的时间去哪了
 
 #### 4.1.1 概念说明
 
-一个微基准只有能**归因**（attribution）才有价值：「整次调用快了 1.8×」是一个数字，「基线把 47% 的时间花在本库根本没有的重排上」才是一个论证。stages 分解把两条路径各自拆成相加等于整体的阶段，于是列与列之间可以同口径对比，而不是只能相关。
+stages 模式回答的问题是：**「两边各自的时间都花在哪了」**。它把两条路径各自拆成若干段，使各段**相加等于整个调用**，而不是仅仅与总和相关。这一点是整个 fast-ulysses 性能论证的地基：
 
-七种模式各自回答的问题，全部写在模块 docstring 里：
+- BASE 是 sglang `usp.py` 的路径：permute → `all_to_all_single` → permute，拆成三段；
+- OURS 是本库的调用，拆成四段：`barr_in / transfer / barr_out / copy_out`（transfer 里含本 rank 自份额）；
+- 另测一个 `raw`：单独跑平坦的 `all_to_all_single`——同样的字节数、不做任何重排、结果是错误布局，所以它是**传输下界**，不是可选方案。
 
-| 模式 | 一句话问题 | 判读方法 |
-|---|---|---|
-| `stages` | 两条路径的时间各去了哪，相加等于整次调用 | `a2a` 对 `transfer` 是同口径对；`relayout%`、`copyout%` 是归因列 |
-| `overlap` | 异步调用能藏多少进并发的 GEMM 链 | `hidden%`，但分布有真实散布，读作区间 |
-| `padding` | 不均分路径是否与均分同价 | `ours cost ≈ 1.00×` 则丢弃 padding 在这里是免费的 |
-| `zerocopy` | `out=`（来自 `empty_output()`）值多少 | `saved` 应约等于 stages 模式量出的 `copy_out` 阶段 |
-| `sweep` | 各阶段如何随消息尺寸变化 | barrier 份额是一条曲线；读作 floor，不是待优化项 |
-| `link` | fabric 裸拷贝的天花板是多少 | `transfer` 对照单流天花板即得利用率 |
-| `zerosm` | 一次拷贝占不占 SM | 两列联读（见 4.3），单独任何一列都不足为凭 |
+拆段之后，「基线的重排内核占了多少」「我们的握手占了多少」从猜测变成算术。模块 docstring 说得很直白：`a2a` 对 `transfer` 是同类项对比（like-for-like pair），其余各段是每条路径围绕它必须多付的——「这整个就是论证本身，因为基线的重排是 SM 工作，会和这个设计想要藏身的计算相竞争」。
 
 #### 4.1.2 核心流程
 
-计时的核心不变量是：**事件按严格顺序排在同一条流上，所以分段之和等于整段**。stages 模式对两条路径分别这么做：
+`run_stages` 对 `SHAPES` 里每个真实模型形状（wan-720p / wan-480p / h3-t2va-5s）执行：
 
-1. 基线侧（`baseline_stages`）：`permute → all_to_all_single → permute` 三段，四个事件戳出三个阶段。
-2. 本库侧（`all_to_all_4d_timed` 算子）：`开路屏障 → CE 传输 → 收尾屏障 → copy_out` 四段，五个事件戳出四个阶段。
-3. 另测 `raw`（裸 `all_to_all_single`，同字节、无重排、结果布局是错的）作为**传输地板**——它是下界参照而不是备选方案。
-4. 每个数字都是多次迭代的中位数；逐阶段分别取中位数（`median_of`）。
+1. 头数不能整除 world_size 则跳过该形状（mode 0 散射头轴）。
+2. `s_total` 向下取整到 ws 的倍数——这是基线需要的「padded shard」。
+3. 分配输入 `x` 与等长的平坦 `send`/`recv`。
+4. `base = median_of(baseline_stages(...))` → 基线三段的中位数。
+5. `ours = median_of(group._timed(...))` → 本库四段的中位数。
+6. `raw = median_ms(all_to_all_single(recv, send))` → 平坦传输下界。
+7. `submit = submit_us(...)` → 主机提交一次同步调用的微秒数。
+8. rank 0 打印一行，`dist.barrier()` 对齐后进入下一形状。
+
+计时基建的三个关键设计：
+
+- **Stopwatch**：CUDA 事件只在流上按序记录，最后一次读出相邻事件差。打点花的是主机时间、不占设备时间，所以「细分过的运行测出的总和与不细分的相同」。
+- **median_of**：对每次运行收集各段耗时列表，再**对每个段位独立取中位数**。注意一个细节：表中 BASE/OURS 总计是各段中位数之和，不是「总时的中位数」——各段无交叠、无空隙（同一条流上严格排序），所以任何时间都被归因到某一段。
+- **median_ms**：预热后先 `dist.barrier()` 再计时（对齐各 rank 起跑线）；**baseline_stages 只在 run_stages 里用**，因为它的 `read()` 会主机同步，落进任何外层计时区都会污染测量。
 
 #### 4.1.3 源码精读
 
-**Stopwatch：分段计时器**。[benchmark/bench_a2a.py:84-98](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L84-L98) 定义了一个「预先建好 N 个事件、依次打戳、最后一次性读出相邻差值」的计时器。它的 docstring 说出关键性质：打戳只花主机时间、不花设备时间，所以**分了段的运行和不分的运行测的是同一个总时间**——分段不引入测量偏置。
+计时的底层是基准专用算子：[python/fast_ulysses/group.py:L251-L265](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L251-L265)——`_timed()` 调用 `all_to_all_4d_timed` 算子，把返回的四个数贴上 `("barrier_in", "transfer", "barrier_out", "copy_out")` 的名字。docstring 明说「各段之和等于整个调用，因为它们在一条流上严格有序；读事件会同步」。
 
-```python
-class Stopwatch:
-    """CUDA events between stages, read once at the end. A mark costs host time and no device
-    time, so a subdivided run measures the same total as an undivided one."""
-```
+事件打在哪里：[src/bindings.cc:L624-L654](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L624-L654)——五个事件把复制路径（`prepare(..., std::nullopt, kSyncWindow, lend=false)`，即不带 out= 的普通调用）切成四段：`fast_barrier` → `launch_a2a_ce` → `fast_barrier` → `copy_out`，与 u6-l2 的流水线一一对应。注释特意说明事件用默认标志（不禁用计时），因为 `cudaEventElapsedTime` 需要时间戳。
 
-**逐阶段中位数**。[benchmark/bench_a2a.py:101-107](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L101-L107) 的 `median_of` 对函数返回的**每个下标分别**取多次运行的中位数，返回一条阶段中位数向量。注意 [benchmark/bench_a2a.py:110-123](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L110-L123) 的 `median_ms` 在计时循环前有一次 `dist.barrier()`——先把各 rank 对齐，避免上一次迭代的到达偏斜漏进下一次的计时窗口。
+Stopwatch 与三个中位数工具：[benchmark/bench_a2a.py:L84-L137](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L84-L137)——`Stopwatch.mark()` 只记录事件、`read()` 在末尾统一读出差值；`median_of` 按段位取中位数；`median_ms` 在预热后加 `dist.barrier()`；`submit_us` 用 `perf_counter` 测主机提交耗时（批折叠要压平的正是这个量）。
 
-**计时来自库内一个专用算子**。stages 模式量本库路径用的是 `group._timed(x, mode=0)`，它转发到 C++ 的 `all_to_all_4d_timed`：[src/bindings.cc:624-656](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L624-L656)。五个事件把四段夹开，注释（[src/bindings.cc:621-623](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/src/bindings.cc#L621-L623)）说明了一个容易误读的细节：`transfer` 阶段**包含本 rank 自份额**——自份额走调用者流、在远端拷贝下面运行，无法单独计时，所以被算进 transfer。Python 侧把四个数包成带名字的字典：[python/fast_ulysses/group.py:251-265](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/python/fast_ulysses/group.py#L251-L265)。
+基线的两种形态：[benchmark/bench_a2a.py:L140-L165](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L140-L165)——`baseline_padded` 无插桩（可被整体计时），`baseline_stages` 在三段间打事件。注意 L153–L154 的 docstring：`read()` 会主机同步，故仅 `run_stages` 使用。
 
-```python
-names = ("barrier_in", "transfer", "barrier_out", "copy_out")
-return out, dict(zip(names, (float(v) for v in stages), strict=True))
-```
+主表与全部派生列：[benchmark/bench_a2a.py:L168-L214](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L168-L214)——表头在 L175–L181，四组测量在 L197–L202，打印在 L204–L213。三个派生列的计算就在打印行里：
 
-**run_stages 的测量与三列派生指标**。[benchmark/bench_a2a.py:197-213](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L197-L213) 依次量基线三段、本库四段、`raw` 和提交耗时，然后打印：
+- `raw/CE = raw / ours[1]`（L209）——平坦 `all_to_all_single` 除以本库 transfer 段；
+- `relayout% = (base[0] + base[2]) / base_total`（L210）——基线两个 permute 占其总时间的份额；
+- `copyout% = ours[3] / ours_total`（L211）——copy_out 占本库总时间的份额。
 
-- `raw/CE = raw / transfer`：裸 `all_to_all_single` 比本库的 CE 传输慢多少倍（基线传输不如本库传输的直接证据）；
-- `relayout% = (perm_in + perm_out) / BASE`：基线花在重排上的份额——本库一侧这一列根本不存在；
-- `copyout% = copy_out / OURS`：本库 copying 路径花在拷出上的份额——zerocopy 模式要消除的对象。
-
-**submit_us：主机侧提交耗时**。[benchmark/bench_a2a.py:126-137](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L126-L137) 用 `time.perf_counter` 量**发起**一次调用花的主机时间。docstring 点明它的用途：批折叠（u3-l1 的 `push_batched`）想把什么保持不涨，量的就是这个。
-
-**四个派生模式是 stages 思想的变体**：
-
-- **zerocopy**（[benchmark/bench_a2a.py:327-364](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L327-L364)）：对同一输入量 `copying`（默认路径）与 `zerocopy`（`out=` 来自 `empty_output()` 的缓冲，[benchmark/bench_a2a.py:350-353](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L350-L353)）两种整调用时间，再用 `_timed` 量出 `copy_out` 阶段做归因——`saved` 应当约等于那个阶段。这是**交叉验证**：两种独立测量互相印证省的确实是 copy-out 而不是别的。
-- **sweep**（[benchmark/bench_a2a.py:367-399](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L367-L399)）：固定头数与 d，扫 `s_local`，输出四阶段对消息尺寸的曲线。跨链路字节数的算法在 [benchmark/bench_a2a.py:391-392](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L391-L392)：
-
-  \[ \text{crossed MB} = \text{MB/rank} \times \frac{ws - 1}{ws} \]
-
-  即「除本 rank 自份额外、真正过链路的字节」，GB/s 一列就是用它除以 transfer 时间。
-- **link**（[benchmark/bench_a2a.py:402-443](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L402-L443)）：绕开本算子，直接用 torch 对称内存做平坦 64 MiB peer 拷贝，量单流与全流两种带宽——**天花板必须独立于被评判的对象建立**（docstring 原话）。结尾的打印（[benchmark/bench_a2a.py:442-443](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L442-L443)）明说了用法：stages 的 `transfer` 按跨链路字节折算后对照这里的单流数字，就是「用了多少 fabric」。
-- **padding**（[benchmark/bench_a2a.py:262-306](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L262-L306)）：对基线与本库各量「补齐到 ws 倍数」与「每 rank 差一个 token 的不均分」两种输入。注意 [benchmark/bench_a2a.py:309-324](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L309-L242) 的 `_baseline_unpadded` 是**重写的基线**（带 split sizes、逐 peer reshape、`cat`），而不是拿 `dist.all_to_all` 列表版凑数——docstring 说得直白：拿另一个基线对比就是在量两个不同的基线，不是在量 padding 的代价。
-
-**docstring 的七模式自述**。[benchmark/bench_a2a.py:10-53](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L10-L53) 是每个模式的权威一句话定义。其中 stages 一节（L10-16）给出了最重要的对比关系：`raw` 是传输地板而非备选；`a2a` 对 `transfer` 是同口径对；「其余各列是每条路径围绕它必须做的事，而**这整个论证就建立在这里**——基线的重排是要与本库藏进去的计算抢 SM 的 SM 工作」。
+**读表陷阱**：表中的 `a2a` 列是**基线的** `all_to_all_single` 段，不是本库调用；本库的对应列叫 `transfer`。这一对才是 like-for-like。
 
 #### 4.1.4 代码实践
 
-**实践目标**：为 stages 模式的输出写一列一句的判读模板，把「每列回答什么问题」固化成你自己的速查表。
+**实践目标**：为 stages 输出的每一列写一行判读模板，并用 `docs/benchmark.md` 已发表的一行数字手工验证派生列的算术。
 
 **操作步骤**：
 
-1. 精读 [benchmark/bench_a2a.py:168-214](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L168-L214)（`run_stages` 全函数），对照表头（L175-181）确认每列由哪个表达式产生。
-2. 对照 [docs/benchmark.md:62-87](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L62-L87) 的已发表数字，检验你的模板能否逐列解释这些数。
-3. 写出模板（见下面「预期结果」的参考版）。
+1. 精读 [benchmark/bench_a2a.py:L10-L16](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L10-L16)（stages 模式 docstring）与 L175–L181 的表头。
+2. 抄下 `docs/benchmark.md` H200 行（wan-720p）：perm_in 0.358、a2a 0.826、perm_out 0.385、BASE 1.569、transfer 0.680、copy_out 0.143、OURS 0.860、raw 0.859。
+3. 手工复算三个派生列并与表中 47.3%、1.26×、16.6% 对照。
+4. 写出你的判读模板表（下面答案给出参考版）。
 
-**需要观察的现象**：表头列名与打印表达式的一一对应；`BASE` 与 `OURS` 各自等于其分段之和。
+**需要观察的现象 / 预期结果**：
 
-**预期结果**（参考模板）：
+- `relayout% = (0.358 + 0.385) / 1.569 = 47.35% ≈ 47.3%` ✓
+- `raw/CE = 0.859 / 0.680 = 1.263 ≈ 1.26×` ✓
+- `copyout% = 0.143 / 0.860 = 16.6%` ✓（且与 benchmark.md 零拷贝表中 H200 wan-720p 的「copy_out 占计时各段 16.6%」互相印证）
 
-| 列 | 回答的问题 | 怎么读 |
-|---|---|---|
-| `perm_in` / `perm_out` | 基线为进/出集合通信各付一次重排多少 | 本库一侧没有对应列——这就是 `relayout%` 的来源 |
-| `a2a` | 基线的集合通信本体多少 | 与 `transfer` 构成同口径对 |
-| `BASE` | 基线整调用多少 | 三段之和 |
-| `barr_in` / `barr_out` | 两道屏障各多少 | 大部分是 rank 到达偏斜；是 floor 不是待优化项 |
-| `transfer` | 本库 CE 传输（含自份额）多少 | 与 `a2a` 对比；按跨链路字节折算后对照 link 天花板 |
-| `copy_out` | copying 路径的拷出多少 | `out=` 可消除的对象；对照 zerocopy 模式的 `saved` |
-| `OURS` | 本库整调用多少 | 四段之和；`vs BASE` 即加速比 |
-| `raw` | 裸 `all_to_all_single`（同字节、错布局）多少 | 传输地板，不是备选 |
-| `raw/CE` | 地板比本库传输慢几倍 | >1 说明带步长 CE 传输胜过平坦 NCCL 路径 |
-| `relayout%` | 基线时间中重排占几成 | 本库为 0，故这是纯增益来源 |
-| `copyout%` | 本库时间中拷出占几成 | zerocopy 的收益上限 |
-| `submit us` | 主机提交一次调用多少微秒 | 批折叠想压平的量 |
+三列全部对上即证明你对列语义的理解与代码一致。有 GPU 时可运行（待本地验证）：
 
-（写好模板后，若有 ≥2 GPU，可运行 `./tools/exclusive.sh 0,1 -- torchrun --nproc_per_node=2 benchmark/bench_a2a.py --mode stages` 对照真实输出；单卡亦可 `--nproc_per_node=1` 跑通流程。实际数字：待本地验证。）
+```bash
+./tools/exclusive.sh 0,1,2,3,4,5,6,7 -- torchrun --nproc_per_node=8 \
+    benchmark/bench_a2a.py --mode stages
+```
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `raw` 被称为「传输地板」而不是「第三条路径」？如果拿 `raw` 当对比对象会犯什么错？
+**练习 1**：`raw` 列为什么是「传输下界」而不是「替代方案」？
 
-答案：`raw` 是 `all_to_all_single(recv, send)`——同样字节在传输，但结果布局是错的（没有重排），不能作为可用路径。它的作用是给「纯传输最少要多少」立一个下界：本库的 `transfer` 若比 `raw` 还快（`raw/CE > 1`），说明带步长拷贝不仅没比重排+平坦传输贵，反而更便宜。拿它当对比对象会高估本库优势，因为基线必须付重排才能交付正确布局的输出。
+**答案**：`raw` 只跑平坦的 `all_to_all_single`，搬运同样的字节但完全不做重排，结果处于错误布局（L12–L14、L172–L174）。真实调用必须把数据放回正确布局，所以 raw 不是能用的路径；它只回答「光搬这些字节最少要多久」，用来给 transfer 列定标尺。
 
-**练习 2**：`median_of` 为什么对每个下标分别取中位数，而不是先对整条向量取均值再分段？
+**练习 2**：`submit us` 列测的是什么？它想守住哪个设计？
 
-答案：分布的长尾对不同阶段不成比例——屏障阶段偶发的到达偏斜可能把某一次运行的 `barr_in` 拉高一个量级而其他阶段不变。逐下标取中位数让每个阶段各自抵抗自己的尾巴；对整条向量取均值会把一个阶段的尾巴扩散进所有阶段的数字里。
+**答案**：测主机提交一次调用的微秒数（`submit_us` 的 docstring，L126–L127）。CE 传输会把一次交换拆成许多条 `cudaMemcpy2D/3DAsync`，若每条的提交开销在主机侧累积，卡就会饿。批折叠（把 batch 维折叠进 3D 拷贝）要压平的就是这个量——它跟设备侧时间无关。
 
-**练习 3**：sweep 模式里 `crossed` 为什么要乘 `(ws-1)/ws`？
+**练习 3**：为什么 `median_of` 对每个段位独立取中位数，而不是先取每次运行的总和再取中位数？
 
-答案：每 rank 发出的字节中有 `1/ws` 是自己的份额、根本不过链路（自份额走调用者流的同设备拷贝，u5-l1）。用总 MB 折算带宽会低估真实过链路的带宽；`(ws-1)/ws` 恰好扣除自份额，得到的 GB/s 才能与 link 模式的单流天花板同口径对比。
+**答案**：这里的目标是**归因**而非单点估计：每个段位的中位数对邻居干扰等离群值最稳，而各段在同一条流上无交叠、无空隙，段位中位数之和仍是总时间的一个稳健估计。两种算法给出的「总」可能略有差别，但归因结论（哪段占多少）不因这个选择翻转。
 
-### 4.2 overlap 隐藏率：hidden% 的定义与陷阱
+### 4.2 overlap 隐藏率与「of the fabric」：两个归一化指标
 
 #### 4.2.1 概念说明
 
-`hidden%` 回答「异步调用有多少时间消失在并发计算下面」。这是零 SM 设计存在的**目的**：u5-l2 讲过，远端拷贝不占 SM，所以它可以与满载 GEMM 完全重叠；overlap 模式就是把这个性质变成一个可测的量。
+两个归一化指标把「快」翻译成可比较的命题：
 
-定义：
+- **hidden%**：异步调用在并发 GEMM 下消失的份额。定义：
+  \[ \text{hidden\%} = \frac{t_{\text{serial}} - t_{\text{concurrent}}}{t_{\text{a2a,alone}}} \times 100\% \]
+  分子是「先通信后计算」与「通信计算并发」的墙钟差，分母是通信自身单独跑的时间。这是零 SM 设计**存在意义**所系的命题（L18–20）。
+- **of the fabric**：transfer 段实际用掉的 fabric 带宽占上限的百分比。上限由 link 模式独立测得——**绕开本算子**、直接用 torch 对称内存做平坦 64 MiB peer 拷贝，「让天花板独立于被审判的对象建立」（L42–L45）。
 
-\[ \mathrm{hidden\%} = \frac{t_{\mathrm{serial}} - t_{\mathrm{concurrent}}}{t_{\mathrm{a2a,alone}}} \times 100\% \]
-
-其中 `serial` 是「先同步 a2a 再跑 3-GEMM 链」的墙钟，`concurrent` 是「发起 `all_to_all_4d_async`、跑 GEMM 链、再 `wait()`」的墙钟，`a2a_alone` 是异步调用单独跑的时间。GEMM 链故意做成 `to_q/k/v` 的形状（三个同尺寸矩阵乘）。
-
-两个陷阱：其一，这个指标**有真实散布**——docs/benchmark.md 记录同型号两个节点可差 35 个百分点，所以只能读作区间；其二，它**受可用计算量约束**：GEMM 不够长时，就算集合通信完全让路也藏不了多少（并发时间不可能低于 GEMM 自身时间）。
+归一化的意义在于分离混杂因素：hidden% 把「GEMM 本身多慢」从分子分母中约掉；of-the-fabric 把「消息多大」约掉，只剩「调度还有没有空间」——80% 以上就没有什么可调度的了，30% 则有。
 
 #### 4.2.2 核心流程
 
-1. 量 `gemm_alone` 与 `a2a_alone` 作参照。
-2. 定义两种排布：`serial`（先同步调用后 GEMM）与 `concurrent`（异步调用 + GEMM + wait）。
-3. **交替**测量：8 轮，每轮各取 8 次迭代的中位数，最后取 8 轮的中位数。
-4. 打印 hidden% 以及两组 8 样本的最小-最大范围（spread）。
+**overlap 模式**（[benchmark/bench_a2a.py:L217-L259](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L217-L259)）：
+
+1. 用 `SHAPES[0]`（wan-720p），配三个 `a @ w`（k=n=5120）模拟 to_q/k/v 的形状。
+2. 单独测 `t_gemm`、`t_a2a`。
+3. `serial()` = 同步 a2a 然后 GEMM 链；`concurrent()` = `all_to_all_4d_async` + GEMM 链 + `wait()`。
+4. **两种安排交替执行**各 8 轮、每轮内部再取 8 次的中位数，最后取轮间中位数——因为「GEMM 窗口逐轮漂移的幅度和 a2a 本身差不多，交替能抵消漂移」（L244–L245）。
+5. 打印 hidden% 及两边的 min–max 展布。
+
+**link 模式**（[benchmark/bench_a2a.py:L402-L443](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L402-L443)）：
+
+1. 经 `torch.distributed._symmetric_memory` 分配 64 MiB，rendezvous 后取 `(rank+1)%ws` 的窗口。
+2. `one_pair`：只有 rank 0 拷贝 → fabric 上单一流；`all_pairs`：每 rank 都拷贝 → ws 条流。
+3. 打印单流 GB/s 与聚合 GB/s，末尾说明判读方法：stages 的 `transfer` 除以**真正过链路的字节**（总量 × (ws−1)/ws），再除以单流上限，就是「用了 fabric 的百分之多少」。
+
+sweep 模式里的同一归一化：[benchmark/bench_a2a.py:L390-L397](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L390-L397)——`crossed = mb * (ws-1) / ws / 1e3`（本 rank 自份额不过链路），`GB/s = crossed / transfer`。
 
 #### 4.2.3 源码精读
 
-**两种排布的定义**。[benchmark/bench_a2a.py:228-242](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L228-L242)：`gemms()` 是三次 `a @ w`；`serial()` 先 `group.all_to_all_4d(x, mode=0)` 再 `gemms()`；`concurrent()` 发 `all_to_all_4d_async`、跑 GEMM、`h.wait()`。
+交替采样的实现：[benchmark/bench_a2a.py:L246-L259](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L246-L259)——8 轮循环里 `ts.append(median_ms(serial, 8, 1))` 与 `tc.append(median_ms(concurrent, 8, 1))` 相邻执行，排序后取中位数，并打印两边的展布区间。`hidden` 在 L259 打印。
 
-**交替测量及其理由**。[benchmark/bench_a2a.py:244-252](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L244-L252) 的注释是本模式的灵魂：
+link 的两臂与打印：[benchmark/bench_a2a.py:L419-L443](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L419-L443)——`one_pair` 里 `if rank == 0: dst.copy_(src)`（只有 rank 0 写，fabric 只载一条流）；单流与全对的 GB/s 都按搬运字节数除以时间算出；L442–L443 直接把判读方法印在输出里。
 
-```python
-# Alternate the two arrangements and compare medians: the GEMM window drifts run to run by
-# about as much as the a2a itself, and alternating cancels the drift.
-```
+`docs/benchmark.md` 的发表版：[docs/benchmark.md:L93-L109](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L93-L109)——四台机器单流 377–692 GB/s，本库 a2a 达 356–621 GB/s，即**上限的 90–99%**；并观察到「八条流同时跑时每流带宽不降——fabric 不是被竞争的资源」。
 
-GEMM 的时长逐轮漂移的幅度与 a2a 本身相当——如果先测完所有 serial 再测所有 concurrent，两种排布会被安排在漂移曲线的不同位置，系统性偏差直接进 hidden%。交替排布让漂移对两种排布平等，取中位数后抵消。
-
-**打印**。[benchmark/bench_a2a.py:253-259](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L253-L259) 输出参照、两种排布的墙钟与各自的 spread、以及 hidden%。
-
-**已发表的读法**。[docs/benchmark.md:147-165](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L147-L165)：四台机器 hidden 47%–95%，且明说「This metric has real spread… Read it as a range」；末段解释 H200 藏得更多是因为「GEMM 更长、有更多可藏的地方」，指标**受可用计算量约束，而不只取决于集合通信让不让路**。v0.1 在 A100 上甚至测出过 ~105%——读作完全隐藏：串行排布多付了一笔并发排布避免的启动开销（[docs/benchmark.md:306-308](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L306-L308)）。
+hidden% 的发表版与告警：[docs/benchmark.md:L147-L164](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L147-L164)——「这个指标有真实展布」，同型号两节点差最多 35 个百分点，要「当作区间读」；且指标受可用计算量约束（H200 能藏更多是因为 GEMM 更长），不是纯粹的通信性质。
 
 #### 4.2.4 代码实践
 
-**实践目标**：不跑代码，用已发表数字做一次 hidden% 的手工核算与边界推导。
+**实践目标**：用纸笔验证两个归一化指标的全部算术，理解分子分母各自来自哪次测量。
 
 **操作步骤**：
 
-1. 从 [docs/benchmark.md:155-160](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L155-L160) 取 H200 行：gemm_alone = 1.793，a2a_alone = 0.876，serial = 2.971，concurrent = 2.320。
-2. 代入公式核算 hidden%。
-3. 推导理论上界：并发时间最少是多少？由此 hidden% 最多是多少？
-4. 回答：若把 GEMM 链换成 10 倍长，hidden% 会怎么变？为什么文档说这个指标「bounded by how much compute is available」？
+1. 从 [docs/benchmark.md:L155-L160](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L155-L160) 抄出四台机器的 gemm alone / a2a alone / serial / concurrent，按公式复算 hidden%。
+2. 从 [docs/benchmark.md:L100-L105](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L100-L105) 取 H200 行，用 stages 表的 transfer 0.680 ms 与「291 MB/rank、7/8 过链路」复算「of the ceiling」。
 
-**需要观察的现象**：核算值与发表值一致；上界推导与「H200 藏得更多」的解释吻合。
+**需要观察的现象 / 预期结果**：
 
-**预期结果**：(2.971 − 2.320) / 0.876 ≈ 74.3% ≈ 发表的 74%。上界：concurrent ≥ gemm_alone（GEMM 必须跑完），故 hidden ≤ (serial − gemm_alone) / a2a_alone ≈ (a2a + gemm − gemm) / a2a = 100%；但 concurrent 还必须 ≥ 链尾未被覆盖的通信部分，所以实际低于该界。GEMM 变长后，可藏的「坑」更深，hidden% 趋向上界——这正是 H200（a2a/gemm 比为 0.49，低于 B200 的 0.55 与 B300 的 0.62）藏得更多的原因。
+- hidden%：H200 (2.971−2.320)/0.876 = **74.3%**；B200 (1.633−1.312)/0.535 = **60.0%**；B300 (1.469−1.219)/0.533 = **46.9%**；H100 (3.050−2.451)/0.925 = **64.8%**——与表中 74/60/47/65 全部一致。
+- of the ceiling：过链路字节 = 291 × 7/8 = 254.6 MB；254.6 MB / 0.680 ms = **374.4 GB/s**；374.4 / 378.7（单流上限）= **98.9% ≈ 99%**——与表中一致。
+
+无 GPU 也能完成；有 GPU 时用 `--mode overlap` / `--mode link` 重跑并核对量级（待本地验证）。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：为什么不把 `wait()` 放在 GEMM 之前测一个「假并发」做对照？
+**练习 1**：hidden% 为什么可能超过 100%？超过时怎么读？
 
-答案：那等于把异步调用变回同步调用（wait 在 GEMM 前意味着通信必须先完成），测出来就是 serial 排布本身，不提供新信息。真正的对照是 serial 与 concurrent 这一对，它们的差才是被藏掉的时间。
+**答案**：serial 安排要付并发安排避免掉的启动/串行化成本，因此差值可以略大于 a2a 自身时间。`docs/benchmark.md` L306–L308 记录了 v0.1 在 A100 上约 105%：「读作完全隐藏」。
 
-**练习 2**：`median_ms` 在计时前做 `dist.barrier()`（L114），如果去掉它，overlap 模式的哪种排布受害更大？
+**练习 2**：link 模式为什么用 torch 对称内存直接拷贝，而不调用本库算子？
 
-答案：concurrent。各 rank 到达时刻不齐时，先到的 rank 发起异步调用后开始跑 GEMM，后到的 rank 才让传输真正开始——到达偏斜会直接吃掉可重叠的窗口，使 concurrent 系统性变慢、hidden% 被低估。serial 排布里通信本来就独占，偏斜只影响第一轮。stages 模式的 `barr_in` 列同样会吸收这种偏斜，这也是 barrier 是 floor 的原因之一。
+**答案**：天花板必须独立于被审判的对象（L403–L406）。若经过本算子，测得的天花板就混入了本算子的屏障、copy_out 等开销，再拿它给 transfer 定标就成了循环论证。
 
-### 4.3 zerosm A/B：两列联读与校准
+**练习 3**：为什么「of the fabric」的分母用**单流**带宽而不是八流聚合带宽？
+
+**答案**：因为比较对象是单次 a2a 中每条链路上的实际流量：transfer 段里每对 rank 之间就是一条流。拿它对齐「单条流能跑多快」才是在问「这条链路被用满了吗」；聚合带宽回答的是整机吞吐，是另一个问题。
+
+### 4.3 zerosm A/B：一次只差一个变量的实验
 
 #### 4.3.1 概念说明
 
-zerosm 模式在 u5-l2 已经从「结论侧」讲过：零 SM 仅属远端拷贝，同设备拷贝与计算竞争内存系统。本讲从**方法侧**补齐：这个结论是怎么被测出来的。
+zerosm 模式回答：**「一次拷贝到底占不占 SM」**。u5-l2 已建立判读法——GEMM 慢化与成对比（pair ratio）**两列联读**：`1.00× 慢化 + 1.00× 成对比` 才是零 SM；`1.00× 慢化 + 成对比贴满完全竞争参照` 则是拷贝被 GEMM 饿死。本讲从「怎么让这两列可信」的角度精读实验装置本身，它有三个原则：
 
-设计是一个 A/B 实验：**同样的字节、同样的 `dst.copy_(src)` 调用**，唯一变量是目的地在哪——一次写进 peer 的对称内存窗口（跨链路），一次写本 rank 自己的内存（同设备）。每条臂各自配一条与该臂拷贝等长的 GEMM 链在旁边跑，同时各自单独跑。
-
-两条判读指标（数学定义）：
-
-\[ \mathrm{gemm\ slowdown} = \frac{t_{\mathrm{chain,under\ copy}}}{t_{\mathrm{chain,alone}}}, \qquad \mathrm{pair\ ratio} = \frac{t_{\mathrm{pair}}}{\max(t_{\mathrm{copy}}, t_{\mathrm{gemm}})} \]
-
-外加完全竞争参照 \(\ \text{full comp} = (t_{\mathrm{copy}} + t_{\mathrm{gemm}}) / \max(t_{\mathrm{copy}}, t_{\mathrm{gemm}})\ \)，即「一点不重叠」的墙钟比。
-
-两列联读的判据：**1.00× 的 GEMM 慢化 + 1.00× 的成对比 = 那次拷贝没占 SM**；**1.00× 的慢化 + 成对比逼近 full comp = 拷贝被 GEMM 饿死了**（拷贝根本没在链下跑过，链自然没慢）。单看任何一列都无法区分这两种状态——这是整个模式存在的理由。
+1. **两臂只差一个变量**：peer 臂（目的在对端的对称内存窗口，拷贝过链路）vs same 臂（目的是本 rank 自己的内存）——同样的字节、同样的 `dst.copy_(src)` 调用。
+2. **绕开本算子**：算子路径自带两个屏障内核和一个 copy-out，它们**按构造就是 SM 工作**，整调用测出的任何东西都无法归因给传输。
+3. **每臂配自己的 GEMM 链**：同样字节到 peer 和到本地内存耗时不同（差数倍），共享一条链会让较短的那臂（same 臂——正是应该显出慢化的臂）被拉向 1.00×，实验就瞎了。
 
 #### 4.3.2 核心流程
 
-1. 建两条臂：peer（目的地是 rank (r+1)%ws 的窗口）与 same（本 rank 内存）；ws=1 时 peer 臂不存在（打印明示本次运行不检验该主张）。
-2. **字节校准**：在最快的一条臂上量单次拷贝，取 `creps = max(1, round(max(LONG_MS, t_one_gemm)/t))`，把两臂都拉伸到至少 20 ms——20 ms 下几十微秒的启动间隙只是千分之一，这是**选定的地板**而非实测噪声（[benchmark/bench_a2a.py:75-81](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L75-L81)）。rank 0 的答案广播给全组——每个 rank 必须发出相同的功。
-3. **链长校准**：每条臂各自量自己的拷贝时长，`greps = round(拷贝时长 / 单个 GEMM 时长)`——同字节到 peer 与到本地差好几倍，一条链配不上两条臂。
-4. 采样：ROUNDS×INNER（5×5）轮，臂交替、臂内「并发区与两个单独测量」交替；每轮 `dist.barrier()` 保证全组同臂同时。
-5. 打印每臂的 copy / gemm / chain / pair / pair ratio / full comp / gemm slowdown。
+对两个 payload（设计工作点的字节数、64 MiB）× 两种流数（单流：仅 rank 0 动；ws 流：全员各写邻座）：
+
+1. **拷贝次数校准**：对每臂单测一次单拷贝时长，取最快臂为基准，把拷贝重复次数 `creps` 定到「最短臂也至少持续 LONG_MS = 20 ms」；由 rank 0 算出后 `dist.broadcast`——每个 rank 必须发出相同的工作。
+2. **每臂链长校准**：再单测每臂 creps 次拷贝的时长，链上 GEMM 个数 = 该时长 / 单个 GEMM 时长（取整、至少 1），同样广播。
+3. **交替采样**：ROUNDS=5 轮 × 每轮内两臂交替；臂内「并发区」与它作除数的两个 alone 测量也交替。注释说明：若基线只在开头测一次，整轮漂移会全部灌进慢化列。`dist.barrier` 保证各 rank 同处一臂——这是「ws 流行真是 ws 流测量」的前提。
+4. **并发区构造**（`pair()`）：先入队 GEMM 链再入队拷贝——链是几次 launch、拷贝是几百次，后入队的会晚起跑，先入队链把这段暴露压到最小；在链后打一个 mark，把「链自身在并发区内的时长」单独读出。
+5. 每臂输出四列：copy（单独）、gemm（链单独）、pair（并发区墙钟）、gemm slowdown（链在并发区内时长 / 链单独时长），外加 pair ratio 与 full comp 两个派生。
+
+判读用的两个派生量：
+\[ \text{pair ratio} = \frac{t_{\text{pair}}}{\max(t_{\text{copy}},\ t_{\text{gemm}})}, \qquad \text{full comp} = \frac{t_{\text{copy}} + t_{\text{gemm}}}{\max(t_{\text{copy}},\ t_{\text{gemm}})} \]
 
 #### 4.3.3 源码精读
 
-**为什么绕开算子、直连对称内存**。[benchmark/bench_a2a.py:447-463](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L447-L463) 的 docstring 给出两层理由：与 link 相同的理由（天花板/判据须独立于被评判对象），外加一条——算子的路径还含两个屏障内核和一个 copy-out，**它们本来就是 SM 工作**，整调用的测量无法把任何东西归因给传输。两条臂只差一件事：目的地在哪。
+模式的完整自述：[benchmark/bench_a2a.py:L447-L463](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L447-L463)——「两臂只差目的地一件事」「链被饿死的拷贝从没在链下跑过，慢化同样停在 1.00×，所以成对比与完全竞争参照印在旁边」。头注释 L543–L546 更是把结论印在输出里：**NEITHER COLUMN IS THE RESULT ON ITS OWN**。
 
-**pair()：先把链入队**。[benchmark/bench_a2a.py:498-517](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L498-L517) 的并发区在调用者流排 GEMM 链、在 `cps` 流排拷贝，链后打一个戳单独读出链在并发区内的时长。注释（L500-507）解释为什么链先入队：后入队者要晚「提交前者花的主机时间」才开始；链是几次 launch、拷贝是几百次，让链后入队会把更大的裸露段留给链，把慢化拉向 1.00×。
+拷贝次数的校准与广播：[benchmark/bench_a2a.py:L572-L584](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L572-L584)——「按最快臂校准，使最短臂也持续 LONG_MS」；两个 payload 都要拉伸，因为设计 payload 单拷贝比一个 GEMM 还短。广播的原因写明：「每个 rank 必须发出相同的工作」。
 
-**字节校准的注释**。[benchmark/bench_a2a.py:572-584](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L572-L584)：`creps` 按最快臂校准，让最短的那条臂也至少持续 LONG_MS；两个载荷（设计形状与 64 MiB）都被拉伸——设计形状单次拷贝比一个 GEMM 还短，而链不能少于 1 个，不拉伸则两臂都越过自己的拷贝、两种待区分状态都不可读。rank 0 的答案经 `dist.broadcast` 下发。
+每臂链长的校准：[benchmark/bench_a2a.py:L592-L606](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L592-L606)——「一条链每臂一条，配该臂自己的拷贝，这就是 docs/design.md 描述的实验：链『等长于』其下的拷贝」；共享链会最狠地打击 same 臂（较短的那臂）。
 
-**采样循环与漂移防御**。[benchmark/bench_a2a.py:606-620](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L606-L620)：注释明说「循环前一次性测的基线会把整轮运行的漂移全灌进慢化列」；`dist.barrier()` 让同臂的每个 rank 同步进行，这正是让「全流行」那行成为全流测量的机制。
+交替采样循环：[benchmark/bench_a2a.py:L607-L621](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L607-L621)——每个报告的数字都采自这个循环：臂与臂交替、臂内并发区与两个 alone 交替；屏障让所有 rank 同处一臂。
 
-**表头把判读方法印在输出里**。[benchmark/bench_a2a.py:539-548](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L539-L548) 逐行写明两列的定义与「NEITHER COLUMN IS THE RESULT ON ITS OWN」的警告——连「overlapped 是 1.00×+1.00×，starved 是 1.00×+full comp」的区分都印在每次运行的输出里。`full comp` 的计算在 [benchmark/bench_a2a.py:625-635](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L625-L635)。
+并发区与打印：[benchmark/bench_a2a.py:L498-L517](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L498-L517)（`pair()` 先链后拷贝、链后打 mark）与 [benchmark/bench_a2a.py:L624-L637](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L624-L637)（`full = (t_copy + t_gemm) / longer`，打印 pair ratio、full comp、gemm slowdown 三列）。
 
-**ws=1 的诚实声明**。[benchmark/bench_a2a.py:549-556](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L549-L556)：单卡时打印「THE PEER ARM IS NOT MEASURED and this run does not test the claim」——两块 NVLink 互连的 GPU 是这个对比的最低配置。这与 [docs/benchmark.md:324-329](https://github.com/triple-mu/fast-ulysses/blob/ad1a6a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L324-L329) 的「What is not measured」一致：zerosm 是在那轮测量之后写的，故文档中没有它的表。
+发表状态：[docs/benchmark.md:L324-L329](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L324-L329)——zerosm 写于本轮测量**之后**，所以本文档没有任何它的表；`collect.sh` 会跑它，下一轮测量将补上。这是「没有数字就不声称数字」的示范。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用纸面数据演练两列联读，确保你能正确区分「真零 SM」与「拷贝被饿死」。
+**实践目标**：用数值推演把「零 SM」与「被饿死」两种状态的四列各自算出来，证明只有双列联读才分得开它们。
 
 **操作步骤**：
 
-1. 假设四次测量得到：peer 臂 `t_copy=20.1ms, t_gemm=19.8ms`（链单独），并发区墙钟 `t_pair=20.3ms`、链在区内 `t_under=19.9ms`。计算 pair ratio、full comp、gemm slowdown。
-2. 再假设 same 臂：`t_copy=6.0ms, t_gemm=19.8ms, t_pair=25.1ms, t_under=24.9ms`。同样计算三量。
-3. 分别写出结论。
-4. 精读 [benchmark/bench_a2a.py:572-584](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L572-L584)，回答：若 `creps` 改为按**最慢**臂（peer）校准，same 臂会发生什么？
+1. 假设某臂测得：copy 单独 = 20.0 ms，GEMM 链单独 = 20.0 ms（链长校准的目标状态）。
+2. 情形 A（零 SM / 完全重叠）：并发区墙钟 pair = 20.4 ms，链在并发区内时长 = 20.1 ms。
+3. 情形 B（完全竞争 / 拷贝被饿死）：拷贝在链下被拖到约 40 ms，pair = 39.6 ms，链自身时长仍 ≈ 20.1 ms。
+4. 对两情形各算 gemm slowdown、pair ratio、full comp 三列。
+5. 对照 [benchmark/bench_a2a.py:L543-L546](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/bench_a2a.py#L543-L546) 的判读语检查你的结论。
 
-**需要观察的现象**：两组纸面数字在三量上的截然不同形态。
+**需要观察的现象 / 预期结果**：
 
-**预期结果**：peer 臂：slowdown = 19.9/19.8 ≈ 1.01×，pair ratio = 20.3/max(20.1, 19.8) ≈ 1.01×，full comp = 39.9/20.1 ≈ 1.98× —— 1.00× 配 1.00×，零 SM。same 臂：slowdown = 24.9/19.8 ≈ 1.26×（链明显变慢），pair ratio = 25.1/19.8 ≈ 1.27×，接近 full comp = 25.8/19.8 ≈ 1.30× —— 拷贝与链几乎完全竞争，同设备拷贝占用了计算资源。第 4 步：same 臂单拷贝只有 peer 的几分之一长，按 peer 校准的 `creps` 会让 same 臂总时长同样达到 20 ms——这没问题；真正的问题是反过来（按最慢臂会让最快臂过短）不对——正确答案是：按最慢臂校准时 `creps` 偏小，**最快臂（same）被拉伸得不够、可能仍短于 20 ms 地板**，几十微秒的启动间隙在几毫秒的窗口里就不再是千分之一，两列都被稀释。若在有 ≥2 GPU 的机器上实测：待本地验证。
+| 情形 | gemm slowdown | pair ratio | full comp | 判读 |
+|---|---|---|---|---|
+| A 零 SM | 20.1/20.0 = **1.01×** | 20.4/20.0 = **1.02×** | 2.00× | 零 SM ✓ |
+| B 被饿死 | 20.1/20.0 = **1.01×** | 39.6/20.0 = **1.98× ≈ full comp** | 2.00× | 拷贝与 GEMM 完全竞争 |
+
+两行的 **gemm slowdown 完全相同**——单看这一列两种现实不可区分；分开它们的只有 pair ratio。有 ≥2 张 NVLink 互连 GPU 时可实跑 `--mode zerosm` 验证 peer 臂落在 A、same 臂落在 B 附近（待本地验证）。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么每条臂的 GEMM 链要「配自己的拷贝」而不是两臂共用一条链？
+**练习 1**：为什么 `creps` 校准「以最快臂为基准」，而不是让两臂等长？
 
-答案：同字节到 peer 与到本地内存耗时差好几倍（注释原话「several times longer」）。共用一条链时，链要么长于 same 臂的拷贝、要么短于 peer 臂的拷贝；链长于拷贝时，裸露的链尾以单独速度运行，把慢化拉向 1.00×，而 same 臂（等字节下更短的那条）受害最重——恰恰是要测出「变慢」的那条臂被稀释。
+**答案**：同样的字节到 peer 与到本地内存耗时差数倍（L573–575），一个拷贝次数不可能让两臂等长。校准只保证**最短**的臂也持续 LONG_MS=20 ms——在这个地板上，几十微秒的 launch 间隙只占千分之一，两臂的测量才都有意义。
 
-**练习 2**：zerosm 的输出里为什么把 `full comp` 也打印出来？
+**练习 2**：`pair()` 里为什么先入队 GEMM 链、后入队拷贝？
 
-答案：它是「完全不重叠」的理论墙钟比，给 pair ratio 提供一个锚点。没有它，「pair ratio = 1.3×」只是个孤立的数；有了它，「1.3× 对 full comp 1.30×」立刻说明几乎完全竞争，「1.3× 对 full comp 1.98×」则是部分重叠。参照列让判读无需 memorize 任何经验数字。
+**答案**：后入队的工作要等主机提交完先入队的工作才开始跑。链是几次 launch、拷贝是几百次，若拷贝先入队，链会晚起跑「提交拷贝的那段时间」，这段链以单独速度裸奔，把慢化拉向 1.00×。先入队链把这段暴露压到两种顺序中较小的一种（L500–507）。
 
-**练习 3**：文档声明 zerosm「not in this document」（无已发表数字），但 `collect.sh` 会跑它。这体现了什么方法论？
+**练习 3**：world_size=1 时这个模式还能用吗？
 
-答案：方法与数据分离的诚实性：文档只发表它实际测到、且通过独占与双节点一致性检查的数字；一个没有数字的模式仍然进 `collect.sh`，是为了下一轮测量自动补上。反例是把没有校准或没有判据的数字先行发表。
+**答案**：不能作为零 SM 证明。代码在 L549–L555 明说：没有 peer，**peer 臂不被测量**，本次运行不检验该主张；same 臂与 GEMM 基线是真的。比较这一模式存在意义所需的最低配置是两张 NVLink 互连的 GPU。
 
-### 4.4 独占执行纪律：exclusive.sh 与 collect.sh
+### 4.4 独占执行纪律：exclusive.sh 的三段式
 
 #### 4.4.1 概念说明
 
-一切方法论的前提是：**共享 GPU 上得到的数字不是数字**（exclusive.sh 头注释原话「a number from a shared GPU is not a number」）。威胁有两层：
+`bench_a2a.py` 模块 docstring 第一句就是纪律：「**在 tools/exclusive.sh 下运行——来自共享 GPU 的数字不是数字**」（L3–5）。为什么：
 
-1. **看起来像测量、其实是错的**：跑起来时 GPU 空闲，三十秒后邻居作业来了，输出依然像正常数据。
-2. **部分竞争不可见**：4 条 rank 里 2 条被拖慢，集合基准被偏斜的方式在输出里看不出来——因为屏障会把最慢 rank 的延迟均摊给所有人，你无法从结果列里分辨「我的代码慢」还是「邻居抢了我的卡」。
+1. **邻居负载是随机变量**：共享机上任务不请自来，30 秒前空闲的 GPU 现在就可能有人；干扰直接落进计时窗口，结果「看起来像真实测量——只是是错的」。
+2. **部分竞争不可见**：4 个 rank 里 2 个被邻居拖慢，集合通信的耗时由最慢 rank 决定，整个数字被抬高，而输出里**没有任何痕迹**指明原因（exclusive.sh 头注释 L5–8）。
+3. **掉频是第二个混杂**：邻居负载会压低 SM 时钟，所有 SM 工作（GEMM、permute、屏障内核）整体变慢，比例失真——所以采样器还记录最低 SM 时钟。
 
-`tools/exclusive.sh` 因此做三件事：开跑前**等待**GPU 空闲（等不到就拒绝）；运行期间**持续采样**进程数与 SM 时钟；结束后给出**判定**——`EXCLUSIVE`（数字可用）或 `CONTENDED`（明说「Discard these numbers」，退出码 4）。`benchmark/collect.sh` 则在一切数字之前写**环境指纹**：机器、commit、驱动、torch/构建信息、前后 SM 时钟、拓扑、doctor 输出——因为没有归因环境的数字既无法复现也无法撤回。
+因此脚本的工作流是三段式：**等空闲 → 边跑边采样 → 判决**，判决只有两种：EXCLUSIVE（数字可用）或 CONTENDED（**丢弃这些数字**，退出码 4）。
 
 #### 4.4.2 核心流程
 
-exclusive.sh 三段式：
-
-1. **等空闲**：轮询 `nvidia-smi --query-compute-apps`，把请求的 GPU（按 UUID 匹配）上的进程数数到 0 为止；超过 `WAIT_SECS` 则 `REFUSED` 退出（码 3）。
-2. **边跑边采样**：后台子 shell 每 `SAMPLE_SECS`（默认 5 秒）记一行「进程数 + 各卡最低 SM 时钟」；同时把 `CUDA_VISIBLE_DEVICES` 绑定为请求的设备表——巡检的与运行的是同一组卡。
-3. **判定**：采样中出现过的最大进程数若超过「每卡 EXPECT_PER_GPU（默认 1）× 卡数」，判 `CONTENDED`（退出码 4）；否则 `EXCLUSIVE` 并报告采样数与最低 SM 时钟。
-
-collect.sh 流程：写指纹头 → **正确性门**（`pytest test/` 不过就不测任何数）→ 按序跑 `stages zerocopy sweep link zerosm overlap padding`（每个模式都经 exclusive.sh）→ 卡数 ≥4 时加跑 `nproc=4` 的 stages → 结束再记一次时钟，任何模式失败则整场 `INCOMPLETE` 并明说「Publish nothing from this run until they are explained」。
+1. **等空闲**：`foreign_count` 用 `nvidia-smi --query-compute-apps` 按 GPU UUID 数出请求的每张卡上的进程数；非零则每 10 秒重试，超过 `WAIT_SECS`（默认 0）则 `REFUSED` 退出——「不在共享 GPU 上测量」。
+2. **边跑边采样**：后台每 `SAMPLE_SECS`（默认 5 秒）记录一次「进程数 + 请求卡集中的最低 SM 时钟」；采样器监视父进程存活，父亡则止——孤儿采样器会在下一次运行里被当成「外来进程」。`trap cleanup EXIT INT TERM HUP` 保证断连时杀掉采样器并删临时文件。
+3. **绑定设备**：`export CUDA_VISIBLE_DEVICES="${DEVICES}"`——不绑定的话「脚本监视一组设备而运行落在另一组」（torch 默认用 0..N-1），一个 EXCLUSIVE 判决就对数字的出处一言不发。
+4. **判决**：整个运行期间见过的最大进程数 `max_seen` 若超过 `expected = GPU 数 × EXPECT_PER_GPU`（默认 1，即每卡一个进程是我们自己的贡献，多出来的都是邻居）→ `CONTENDED`；否则 `EXCLUSIVE`，附样本数、最大进程数、最低 SM 时钟。
 
 #### 4.4.3 源码精读
 
-**头注释：为什么必须独占**。[tools/exclusive.sh:1-12](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L1-L12) 完整陈述了威胁模型（作业不请自来、部分竞争不可见），并给出用法与 `WAIT_SECS` 环境变量。
+问题陈述：[tools/exclusive.sh:L1-L12](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L1-L12)——头注释完整陈述了「部分竞争（4 卡中 2 卡变慢）以输出中不可见的方式扭曲集合基准」这一动机，以及两种用法（立即测量 / `WAIT_SECS` 等空闲）。
 
-**外部进程计数**。[tools/exclusive.sh:26-39](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L26-L39)：`uuid_of` 把 CUDA 序号换成 UUID，`foreign_count` 数请求的卡上有多少进程——`nvidia-smi --query-compute-apps=gpu_uuid` 只报 UUID，序号对不上，这一步是必须的桥。`EXPECT_PER_GPU=1` 的注释（L21-22）说明语义：「每卡一个进程是我们自己的运行贡献的；超出即邻居」。
+外来进程统计：[tools/exclusive.sh:L29-L39](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L29-L39)——先用 `uuid_of` 把物理卡号换成 UUID，再数 `compute-apps` 里落在这些 UUID 上的进程。用 UUID 而不是卡号，是因为 compute-apps 报告的是 UUID。
 
-**等待与拒绝**。[tools/exclusive.sh:41-54](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L41-L54)：忙则每 10 秒重查，超时打印 `REFUSED: … Not measuring on shared GPUs.` 并退出 3——**拒绝测量**而不是勉强给出一个数字。
+等待、采样与设备绑定：[tools/exclusive.sh:L41-L54](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L41-L54)（空闲循环与 REFUSED）、[tools/exclusive.sh:L60-L88](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L60-L88)（信号 trap、采样循环、`CUDA_VISIBLE_DEVICES` 绑定及其注释）。
 
-**采样器与清理陷阱**。[tools/exclusive.sh:56-94](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L56-L94)：后台子 shell 记录每轮「外部进程数 + 请求卡中的最低 SM 时钟」，且以 `kill -0 parent` 自终止，防止孤儿采样器存活；[tools/exclusive.sh:61-68](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L61-L68) 的 trap 捕获 `EXIT INT TERM HUP`——注释点明缘由：断掉的 ssh 只送这些信号，不清理会留下陈旧采样器，而**陈旧采样器会被下一次运行当成「外部进程」**，把好的运行误判为 CONTENDED。
+判决：[tools/exclusive.sh:L96-L113](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L96-L113)——遍历样本求 `max_seen` 与 `min_clock`；超出 expected 打 `CONTENDED -- Discard these numbers` 退出 4；否则 `EXCLUSIVE (样本数, max procs, min SM clock)` 并透传命令自身退出码。
 
-**绑定设备**。[tools/exclusive.sh:84-88](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L84-L88)：`export CUDA_VISIBLE_DEVICES="${DEVICES}"`。注释讲清了一个微妙 bug：不绑定的话，「脚本巡检一组设备、运行落在另一组」——torch 默认用 0..N-1——一个 EXCLUSIVE 判定对数字的来源**什么都不说明**。
-
-**判定段**。[tools/exclusive.sh:96-113](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L96-L113)：读采样文件，取最大进程数与最低有效时钟；超过期望则 `VERDICT: CONTENDED … Discard these numbers.` 退出 4，否则 `VERDICT: EXCLUSIVE (N samples, max X/Y procs, min SM clock Z MHz)`，退出码透传命令自己的状态。
-
-**collect.sh 的归因哲学**。[benchmark/collect.sh:1-21](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L1-L21) 头注释第一句就是论点：「基准的价值最多等于它归因的价值」——同型号两个节点的分歧可以超过被测量的任何东西，只有每个数字都说清自己来自哪台机器、哪个构建、哪个 commit 才可追赶。[benchmark/collect.sh:35-72](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L35-L72) 写指纹头：日期、主机、卡表、commit（无 .git 时回退 `COMMIT` 文件，两者皆无则打「UNKNOWN -- this run is not attributable, do not publish from it」，[benchmark/collect.sh:43-51](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L43-L51)）、驱动、torch 与 `_C.build_info()`、前后 SM 时钟、`topo -m`、`doctor`。
-
-**正确性门**。[benchmark/collect.sh:102-113](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L102-L113)：注释是一句方法论宣言——「一个通不过自己测试的构建给出的数字比没有数字更糟，因为它长得像数据」。门不过，全场退出，不测任何数。
-
-**模式编排与失败记账**。[benchmark/collect.sh:115-127](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L115-L127) 按序跑七模式（每模式都包 exclusive.sh），≥4 卡加跑 ws=4 的 stages——注释解释为何没有奇数 world_size 档：形状是真实模型的 40/56 头，mode 0 散射头轴，都除不尽 3；为一个凑出来能被 3 整除的头数测性能，数字与表里任何东西都不可比。[benchmark/collect.sh:93-99](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L93-L99) 的 `PIPESTATUS[0]` 细节保证 grep 没选中行不会把成功的模式记成失败；[benchmark/collect.sh:129-139](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L129-L139) 任何模式失败则整场 `INCOMPLETE`。
-
-**已发表的纪律声明**。[docs/benchmark.md:13-28](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L13-L28)：每个数字都在 exclusive.sh 下取得且全部报告 EXCLUSIVE；整机 8 卡独占；**同一个 wheel**（一个二进制，全部机器不重编）；每台测量前先过 `pytest test/`；**每型号两节点**，一致则报一个数并注明 spread，不一致则两个都报、绝不平均（v0.1 曾因第二节点 5× 分歧撤回过已发布的行）。
+`docs/benchmark.md` 的落地：[docs/benchmark.md:L13-L18](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L13-L18)——「每个数字都在 tools/exclusive.sh 下取得……以下每次运行都报告了 EXCLUSIVE」。
 
 #### 4.4.4 代码实践
 
-**实践目标**：亲手对比「独占包裹」与「裸跑」两种条件下同一测量的离散度，体会 CONTENDED 数字为何不可用。
+**实践目标**：不依赖 GPU 完成对脚本的静态验证与判决推演；有 ≥2 GPU 时完成「包裹 vs 裸跑」的离散度对比。
 
 **操作步骤**：
 
-1. 找一台 ≥2 GPU、且你能容忍短暂占用的机器。选定卡表如 `0,1`。
-2. 裸跑三次：
-   `torchrun --nproc_per_node=2 benchmark/bench_a2a.py --mode stages --iters 25`
-   记录每行的 `transfer`、`barr_in`、`barr_out`。
-3. 包裹跑三次：
-   `./tools/exclusive.sh 0,1 -- torchrun --nproc_per_node=2 benchmark/bench_a2a.py --mode stages`
-   （注意 exclusive.sh 已设 `CUDA_VISIBLE_DEVICES`，裸跑时需自设同样的卡表才可比。）
-4. 分别计算两组内 `transfer` 与两道屏障的极差/中位数。若机器上恰有邻居作业，观察包裹组的 VERDICT 行。
-5. 写一段结论：哪一列在两组间离散度差异最大？为什么屏障列对邻居最敏感？
+1. `bash -n tools/exclusive.sh` 做语法检查（无 GPU 也能跑）。
+2. 纸面推演：请求 4 张卡、`EXPECT_PER_GPU=1`，样本序列为 `(4, 1700), (5, 1650), (4, 1710)`——`max_seen`、`expected`、判决各是什么？若样本是 `(4, 900), (4, 850)` 呢？
+3. （≥2 GPU，待本地验证）同一模式跑两次：
+   ```bash
+   ./tools/exclusive.sh 0,1 -- torchrun --nproc_per_node=2 benchmark/bench_a2a.py --mode stages
+   torchrun --nproc_per_node=2 benchmark/bench_a2a.py --mode stages   # 裸跑对照
+   ```
+   各跑 3 遍，记录 transfer/OURS 列的极差（max−min）。
+4. 写下你对「为什么 CONTENDED 数字不可用」的四点论证（答案见下）。
 
-**需要观察的现象**：独占组的 `barr_in/barr_out` 离散度显著小于裸跑组（若裸跑期间真有邻居）；`transfer` 列相对稳定——邻居抢的是 SM 与到达时刻，fabric 本身未必被抢。
+**需要观察的现象 / 预期结果**：
 
-**预期结果**：裸跑组若遭遇邻居，屏障列出现不可解释的尖峰且无任何告警；包裹组同样情况会直接判 `CONTENDED` 并退出 4，数字被显式废弃。若两组都安静，离散度接近——这本身就是独占判定的含义：EXCLUSIVE 证明的是「这组数字里没有邻居的贡献」，而不是「数字更大」。**实际对比数字：待本地验证**（需要 ≥2 GPU 与可控的邻居负载；无多卡环境时，改为纸面推演：对 [tools/exclusive.sh:97-109](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/tools/exclusive.sh#L97-L109) 写出「采样到 3 个进程、期望 2」时的完整判定路径与退出码）。
+- 推演 2：`expected = 4×1 = 4`；样本一 `max_seen=5 > 4` → **CONTENDED，丢弃**；样本二进程数虽合法，但 `min_clock ≈ 850 MHz` 被记录——判决仍是 EXCLUSIVE，但时钟信息暴露了掉频，判读数字时必须带上它。
+- 步骤 3 的预期：包裹组的极差显著小于裸跑组（独占下 H200 两节点间 transfer 段一致到 2% 以内，见 `docs/benchmark.md` L89–L91）；裸跑组若机器正巧空闲也可能一致——这恰是危险所在：**你不能事后分辨一个裸跑数字当时是否被干扰过**，而包裹组每个数字自带判决。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：exclusive.sh 为什么在等待阶段之后还要绑定 `CUDA_VISIBLE_DEVICES`？不绑定会破坏哪个具体保证？
+**练习 1**：`EXPECT_PER_GPU` 为什么默认是 1？什么情况下要改？
 
-答案：等待阶段按物理序号巡检的是 DEVICES 那组卡，而 torchrun/torch 默认落在 0..N-1。不绑定时可能出现「巡检了空闲的 4,5,6,7、实际跑在忙碌的 0..3」——VERDICT: EXCLUSIVE 对数字真正的来源一言未发，判定与数字脱钩。绑定后巡检的与运行的是同一组卡（子进程看到的是重编号后的 0..N-1），判定才覆盖数字的出处。
+**答案**：我们自己的运行对每张卡贡献恰好一个进程（torchrun 每 rank 一卡）；任何多出来的进程都是邻居（L21–L22）。若某个待测命令本身一卡起多进程（如单卡双进程的推理服务），才需要调大它，否则会永远 REFUSED/CONTENDED。
 
-**练习 2**：采样器为什么用 `kill -0 parent` 循环自杀、还要 trap `INT TERM HUP` 而不只是 `EXIT`？
+**练习 2**：采样器为什么要有「父进程死了就退出」和信号 trap 两层防护？
 
-答案：两个都是防「孤儿采样器」。断掉的 ssh 连接送来的是 TERM/HUP 而不一定走 EXIT 路径；不清理的话，(a) `/tmp` 里的采样文件泄漏，(b) 更糟的是陈旧采样器自身成为一个占用 GPU 视角的进程（它持续调用 nvidia-smi），下一次运行会把它数进 `foreign_count`，把本来独占的运行误判为 CONTENDED——测量仪器污染了被测系统。
+**答案**：ssh 断连只送部分信号，一个漏杀的孤儿采样器既留下临时文件、又会作为 compute-apps 之外的一个 `nvidia-smi` 调用者持续存在——更重要的是下一次运行会把它数进 `foreign_count`，让自己的守门脚本被自己人误判（L60–68 的注释）。
 
-**练习 3**：docs/benchmark.md 为什么坚持「每型号两节点，不一致则两个都报、绝不平均」？
+**练习 3**：EXCLUSIVE 判决能否完全保证数字有效？
 
-答案：两个同型号节点分歧 5× 的实测教训（PCIe 机型）说明「节点间一致性」本身是被检验的性质而不是可假设的性质。平均两个分歧的数会制造一个两个节点都没出现过的第三种数字，掩盖问题；两个都报则把分歧本身变成数据——正是靠这个纪律才发现 PCIe 的失步来自交换机布局差异而非带宽。
+**答案**：不能，它只是必要条件。`docs/benchmark.md` 记录了反例：两台同型号 RTX PRO 6000 在**都判 EXCLUSIVE** 的运行里相差 5×（L57、L276–279）——差异来自 PCIe 拓扑而非邻居干扰。独占排除的是「共享干扰」这一种混杂；机器差异、驱动、时钟策略还要靠指纹头与两台机器互证来覆盖。
+
+### 4.5 可归因的数字：collect.sh 与 benchmark.md 的方法纪律
+
+#### 4.5.1 概念说明
+
+一个基准数字的价值等于它的**可归因性**（attribution）：知道它来自哪台机器、哪个 commit、哪个构建、哪套环境，数字才能被复现、被比较、被撤回。`collect.sh` 的头注释说得直接：「同型号 GPU 的两个节点可以相差超过被测的任何东西，而这只有当每个数字都说清自己来自哪台机器、哪个构建、哪个 commit 时才可捕捉」。它把一次完整测量组织成：
+
+1. **指纹头**：任何数字之前先记录环境——日期、主机名、GPU 列表、仓库、commit、驱动、torch/CUDA 版本、GPU 型号与数量、fast_ulysses 版本与构建信息、测量前的 SM 时钟/温度/功率上限、`nvidia-smi topo -m` 拓扑、`doctor` 输出。
+2. **正确性门**：先跑 `pytest test/`，「来自一个连自己的测试都过不了的构建的数字比没有数字更糟，因为它看起来像数据」。失败则整个流程终止，一个测量都不做。
+3. **全部模式依次过 exclusive.sh**：顺序 stages → zerocopy → sweep → link → zerosm → overlap → padding，全部包在 `tools/exclusive.sh` 里；GPU ≥ 4 时追加 `stages` 的 ws=4 一遍（切分形状随 world size 变化）。
+4. **失败清算**：用 `PIPESTATUS[0]` 取运行自身的退出码（而非管道的），失败的模式记名，结尾打印 `INCOMPLETE` 与「在解释清楚之前不要从中发表任何东西」。
+
+`docs/benchmark.md` 再补三条发表纪律：**单一 wheel**（同一 sha256 的二进制装到所有机器，跨代际之间不重编译）、**每型号两台机器**（两台一致才展示一台并注明展布；不一致则两台都列、绝不平均——v0.1 曾因第二台同型号机器差 5× 而撤回已发表的一行）、**未测量就声明未测量**（0.2.1 新增的暂存池与 lend 无数字；zerosm 写于测量之后故无表）。
+
+#### 4.5.2 核心流程
+
+`collect.sh <label> [gpu-list]` 的执行流：
+
+```
+tee 到 ${OUTDIR}/${LABEL}.log
+├── 指纹头（date/host/gpus/repo/commit/driver/torch/GPU/版本）
+├── clocks(before) + topo -m + fast-ulysses doctor
+├── 正确性门：pytest test/ ──失败──→ "GATE FAILED"，exit 1
+├── for mode in stages zerocopy sweep link zerosm overlap padding:
+│      tools/exclusive.sh ${GPUS} -- torchrun ... bench_a2a.py --mode ${mode}
+│      （PIPESTATUS 记失败模式名）
+├── NPROC ≥ 4 时再跑一遍 stages@4
+├── clocks(after)
+└── 有失败 → "INCOMPLETE ... Publish nothing"；否则 "DONE"
+```
+
+几个细节：commit 的获取有三层回退——git、集群 rsync 同步（无 `.git`）时改读 `COMMIT` 文件、都没有则打 `UNKNOWN -- this run is not attributable, do not publish from it`；不做奇数 world size 的性能测量（40/56 头不整除 3，为整除而发明的头数与表中任何数字都不可比，奇数的正确性归 pytest 管）；`ALLOW_NON_NVLINK=1` 用于测量被构造函数拒绝的机器——「拒绝本身就是结果」。
+
+#### 4.5.3 源码精读
+
+归因哲学与用法：[benchmark/collect.sh:L1-L21](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L1-L21)——头注释与 `OUTDIR`/`ITERS`/`SKIP_TESTS`/`ALLOW_NON_NVLINK` 四个环境变量的语义。
+
+指纹头与 commit 回退：[benchmark/collect.sh:L35-L62](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L35-L62)——从 `date -Is` 到 `fast_ulysses._C.build_info()`；L44–L51 的三层 commit 回退，`UNKNOWN` 分支直接说「此运行不可归因，不要从中发表」。
+
+时钟、拓扑与 doctor：[benchmark/collect.sh:L63-L71](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L63-L71)——测量**前**的 clocks 与 topo；结尾 L130–L131 还有测量**后**的 clocks，前后对照能看出热节流。
+
+模式循环与失败记账：[benchmark/collect.sh:L83-L100](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L83-L100)（`run()` 与 PIPESTATUS 注释）、[benchmark/collect.sh:L115-L139](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L115-L139)（七模式循环、`stages@4`、奇数 world size 的不测理由、`INCOMPLETE` 收尾）。
+
+正确性门：[benchmark/collect.sh:L102-L113](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L102-L113)。
+
+发表纪律原文：[docs/benchmark.md:L19-L28](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L19-L28)——整节点独占、单一 wheel、单一镜像、correctness first、每型号两台；以及 [docs/benchmark.md:L324-L335](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/docs/benchmark.md#L324-L335) 的「未测量清单」。
+
+#### 4.5.4 代码实践
+
+**实践目标**：从 `collect.sh` 提取完整的归因字段清单，并找出 `docs/benchmark.md` 中三处「诚实声明」。
+
+**操作步骤**：
+
+1. 通读 [benchmark/collect.sh:L35-L72](https://github.com/triple-mu/fast-ulysses/blob/ad1a4a06a42d8129a278f010b1d67a6e206d38e6/benchmark/collect.sh#L35-L72)，把指纹头打印的每一类信息列成清单，并为每项写一句「没有它会发生什么」。
+2. 在 `docs/benchmark.md` 中找出：(a) 0.2.1 未测量特性的声明；(b) H100 单节点的 caveat；(c) v0.1 撤回又复现的记录。
+3. 回答：为什么 `run()` 里必须用 `PIPESTATUS[0]` 而不是管道退出码？
+
+**需要观察的现象 / 预期结果**：
+
+- 指纹清单至少含：日期、主机名（长/短）、GPU 列表与 nproc、仓库路径、commit（含修改文件数）、驱动版本、torch 与 CUDA 版本、GPU 名称与数量、fast_ulysses 版本与 build_info、before/after 时钟、拓扑、doctor 输出。
+- 三处诚实声明：(a) L7–L11 暂存池与 lend「两者都没有数字」；(b) L4–L5 H100 两样本来自同一节点、15% 展布是运行间方差而非节点间一致性；(c) L294–L298 v0.1 撤回的 119.2 ms 在本轮复现为 122.25 ms——「两种模式都是真的」。
+- `PIPESTATUS` 问题：管道里 `grep -vE` 若一行都没选中会以 1 退出，`pipefail` 下会把成功的模式误记为失败（L93–L95 注释）；而模式真死掉时又容易在长日志里漏看，所以要显式取第一个命令的退出码并记账。
+
+本实践无需 GPU，全部可离线完成。
+
+#### 4.5.5 小练习与答案
+
+**练习 1**：为什么 `collect.sh` 把 `pytest test/` 放在一切测量之前，而且默认无法跳过？
+
+**答案**：性能数字的说服力依赖于「测的是正确的实现」。一个连正确性测试都过不了的构建跑出的数字仍然光滑、可复现，但它测量的是错误行为的性能——比没有数字更糟（L102–104）。`SKIP_TESTS=1` 存在但注释写明「不要用于要发表的数字」。
+
+**练习 2**：两台同型号机器的数字不一致时，`docs/benchmark.md` 的处理办法是什么？为什么不平均？
+
+**答案**：两台都展示、注明展布、绝不平均（L26–28）。平均会制造一个两台机器都没验证过的第三种状态，把「机器间差异」这个事实藏起来；PCIe 一节正是靠**不平均**才暴露出「同一型号相差 5×、差异在拓扑而非 fabric」的结论。
+
+**练习 3**：`collect.sh` 为什么在 ws=4 之外不测奇数 world size（如 3）？
+
+**答案**：L120–L124：形状是真实模型的（40/56 头），mode 0 散射头轴，都不整除 3；为了整除而发明的头数得到的数字与表中任何数字不可比。奇数 world size 的**正确性**由 pytest 覆盖（`test_distributed.py` 每个 worker 都在 3 上跑），性能测量只做可比较的配置。
 
 ## 5. 综合实践
 
-**任务**：给一台假想的 4×H200 测量节点写一份《测量前检查单》，并用它完整走一遍 stages 模式的计划。
+**任务：为一个已发表的声明重建完整的测量与判读链。**
 
-1. **列检查单**（每条注明对应的源码依据）：
-   - 正确性门先行：`pytest test/` 必须绿（collect.sh:102-113 的理由）；
-   - 独占三段式：先等空闲、跑中采样、拿 VERDICT（exclusive.sh 三段）；
-   - 卡表绑定：`CUDA_VISIBLE_DEVICES` 与巡检一致（exclusive.sh:84-88）；
-   - 环境指纹：date/host/commit/driver/torch/build_info/前后时钟/topo/doctor（collect.sh:35-72）；
-   - 中位数纪律：默认 `--iters 25 --warmup 8`，不自行改小；
-   - 归因列齐全：`raw` 地板、`relayout%`、`copyout%`、`submit us` 一起读（bench_a2a.py:197-213）。
-2. **写出将要执行的命令**：collect.sh 的单机等价形式——`./tools/exclusive.sh 0,1,2,3 -- torchrun --nproc_per_node=4 benchmark/bench_a2a.py --mode stages`，以及为什么要补一遍 `--nproc_per_node=8`（ws 改变切分形状，relayout% 才是跨组可比的列，见 docs/benchmark.md:193-214）。
-3. **预填判读模板**：把 4.1.4 的列模板抄在检查单末尾，并为每列写上「若该列异常变大，先查什么」——例如 `barr_in` 变大先查邻居与到达偏斜（floor），`transfer` 变小先查是否忘了独占、fabric 是否被并发流占用。
-4. （有 ≥2 GPU 时）实际执行第 2 步并按第 3 步模板逐列判读；无 GPU 时全案为纸面推演，标注「待本地验证」。
+取 README/benchmark.md 的核心声明：「对 `torch.distributed` 路径快 1.60–2.17×，其中传输单独比裸 `all_to_all_single` 快 1.16–1.36×，且达 fabric 上限的 90–99%」。完成以下四步：
 
-**预期产出**：一页检查单 + 一份逐列判读模板。它应该让你在没有作者的机器上，产出与 docs/benchmark.md 同等可信度的数字。
+1. **拆解声明到列**：写出每个数字区间分别来自 stages 表的哪些列、哪些归一化公式（`vs BASE = BASE/OURS`、`raw/CE = raw/transfer`、`of the ceiling = crossed_bytes/transfer ÷ 单流带宽`）。
+2. **设计运行方案**：写出完整命令——先 `benchmark/collect.sh b200-node1`（含正确性门与指纹头），确认每个模式都经 `tools/exclusive.sh` 包裹；若手动跑，写出 `./tools/exclusive.sh 0,...,7 -- torchrun --nproc_per_node=8 benchmark/bench_a2a.py --mode stages` 并说明你会在输出里找哪一行判决。
+3. **交叉验证**：用第 2 步（或文档表）的一行数字，手工复算 `relayout%`、`copyout%`、`raw/CE`、`of the ceiling` 四个派生量；再用 overlap 表复算一个 `hidden%`。全部对上才算理解了列语义。
+4. **写判读笔记**：回答——两节点展布落在屏障（到达偏斜）而非传输时，说明什么？（答：被搬的东西没变，偏斜只是挪到了两道握手之间，见 `docs/benchmark.md` L89–L91。）CONTENDED 的运行能靠「多跑几遍取中位数」补救吗？（答：不能——干扰是时变且不对称的，中位数只能抵抗离群值，不能移除系统性抬升；且你无法事后分辨哪个数字被污染。）
+
+无 GPU 时第 2 步写为纸面方案并标注「待本地验证」；第 1、3、4 步全部可离线完成（本文 4.1.4、4.2.4 已给出可对答案的样例）。
 
 ## 6. 本讲小结
 
-- **stages 分解的可加性**：CUDA 事件严格排序在同一条流上，分段之和等于整次调用；`a2a` 对 `transfer` 是同口径对，`raw` 是传输地板而非备选，`relayout%` 与 `copyout%` 把加速比归因到「基线有而本库没有的阶段」。
-- **两个归一化指标**：`hidden% = (serial − concurrent) / a2a_alone` 度量异步调用藏进计算的比例，受可用计算量约束、必须读作区间；`of the fabric = transfer 折算带宽 / link 单流天花板` 度量传输对裸 fabric 的利用率，90–99% 即「没什么可再调度的了」。
-- **barrier 是 floor 不是待优化项**：其成本与载荷无关、大头是 rank 到达偏斜——任何同步都要在某处付这笔钱；sweep 模式的 barriers 份额曲线（0.5 MB 时 33–54%、291 MB 时 5–8.4%）说的是「何种尺寸下该换工具」。
-- **zerosm 两列联读**：GEMM 慢化与成对比必须一起读——1.00×+1.00× 是零 SM，1.00×+逼近 full comp 是拷贝被饿死；每臂链长按自己的拷贝校准、字节按最快臂拉伸到 20 ms 地板。
-- **独占是数字有效的前提**：共享 GPU 的数字「看起来像测量、其实是错的」，部分竞争在集合基准的输出里不可见；exclusive.sh 用等空闲、边跑边采样、EXCLUSIVE/CONTENDED 判定三段式守住这一前提，collect.sh 再用环境指纹与正确性门保证数字可归因、可复现、可撤回。
+- **stages 分解**让各段时间相加等于整个调用：BASE 三段、OURS 四段；`a2a` 对 `transfer` 是 like-for-like，`raw` 是传输下界而非替代方案；`relayout%`、`copyout%`、`raw/CE` 三个归一化列把「快」拆成可归因的命题。
+- **两个归一化指标**：`hidden% = (serial − concurrent)/a2a_alone` 度量异步调用藏进计算的份额（有真实展布，当区间读，且受可用计算量约束）；`of the fabric = 过链路字节/transfer ÷ 单流上限` 度量调度剩余空间（90–99% 即无事可调度），上限由绕开本算子的 link 模式独立建立。
+- **zerosm A/B** 的可信度来自装置：两臂只差目的地、绕开算子（屏障与 copy-out 按构造是 SM 工作）、每臂配自己等长的链、拷贝次数按最快臂校准并广播、臂与基线全部交替采样；判读必须**双列联读**——单看 gemm slowdown 无法区分「零 SM」与「被饿死」。
+- **独占执行是前提**：共享 GPU 上的邻居负载是时变、不对称、且在输出中不可见的混杂；`exclusive.sh` 三段式（等空闲 → 边跑边采样进程数与最低 SM 时钟 → EXCLUSIVE/CONTENDED 判决）把「数字是否有效」变成显式输出；CONTENDED 的数字丢弃而非补救。
+- **可归因性**：`collect.sh` 的指纹头（含 commit 的三层回退与 UNKNOWN 即禁发表）、正确性门、PIPESTATUS 失败记账，加上 benchmark.md 的单一 wheel、每型号两台、不一致就都列不平均、未测量就声明未测量——共同保证数字可复现、可比较、可撤回。
+- 基准的每个模式是一个**问题**而不是一个数字：stages 问时间去哪了、overlap 问藏了多少、padding/zerocopy 问两条特性路径的代价、sweep 问何时失效、link 问天花板在哪、zerosm 问占不占 SM。
 
 ## 7. 下一步学习建议
 
-下一讲 u9-l5「设计反思」将把视角从「怎么测」转向「设计押了哪些注」：docs/design.md 中未文档化的 CE 写入可见性假设、为何拒绝 PCIe（本讲 benchmark.md 的 5× 节点分歧正是证据）、被移除的方案清单（其中「closing flag 走 CE 写」一项的弃用判据就来自本讲 overlap 模式量出的 +34% → −28%）。建议继续精读 `docs/design.md` 全文与 `docs/migration.md`，并把本讲的判读模板带到 u9-l5 的设计评审练习里——每一个「被删掉的方案」背后都应有一个像本讲这样的测量。
+- 下一讲 **u9-l5（设计反思）**：把本讲的实测证据接到 `docs/design.md` 的假设复盘上——CE 写入可见性假设、为何拒绝 PCIe（本讲 PCIe 一节的两台 5× 分歧正是论据）、被移除的方案表。
+- 继续阅读源码：`benchmark/bench_a2a.py` 的 `run_padding`（L262–L306）与 `_baseline_unpadded`（L309–L324）——「对照必须测同一件事」的又一范例（不能拿两个不同的基线互比）；以及 `docs/benchmark.md` 的 "Alternatives tried and not adopted" 一表，每行都是一个被测量否决的设计。
+- 若有条件，读 `tools/preflight_gpu.sh` 与 `.github/workflows/ci.yml`（结合 u9-l1），理解「CI 证明编译与布局、preflight 证明多卡行为」的证明边界如何与本讲的独占纪律衔接。

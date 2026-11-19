@@ -1,0 +1,932 @@
+{
+  "head": "f7cfe4c22098b154c76b6ec950d1c0a464eecf8d",
+  "project": "olmocr",
+  "rationale": "olmOCR 是一个基于视觉语言模型（Qwen2.5-VL 7B）的 PDF/图片文档转纯文本工具箱，代码规模较大且模块边界清晰，因此设计为 7 个单元、32 篇讲义的路线：第 1 单元让读者从零完成安装、首次运行并建立仓库全景；第 2 单元沿「渲染页面 → 构造提示词 → 调用推理服务 → 解析 front matter → 重试与旋转纠错 → 汇总输出」这条 pipeline.py 真实调用链逐站精读，这是整个项目的心脏；第 3 单元讲 work_queue 的本地/S3 双后端、vLLM 服务管理、Beaker 与 Docker 部署，解释它如何扩展到百万级 PDF；第 4 单元补充 anchor 文本、过滤、S3 工具与运行时监控等支撑模块；第 5、6 单元为专家层，先讲 olmOCR-Bench 的「单元测试式」评测体系（因为 GRPO 训练把它直接当作奖励函数，先懂评测再懂训练更顺），再讲 SFT 数据加载、微调训练、GRPO 强化学习与配置/Muon 优化器；最后第 7 单元覆盖 GPT-4o silver 数据构建、Claude 驱动的 HTML 模板合成数据挖掘和 Dolma 结果查看器。讲义之间通过 depends_on 显式声明依赖，实践任务全部可在真实源码和小型脚本上完成，GPU 相关任务给出可选路径。",
+  "units": [
+    {
+      "id": "u1",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u1-l1-project-overview.md",
+          "id": "u1-l1",
+          "learning_goals": [
+            "说出 olmOCR 的核心功能与基于 7B VLM 的技术定位",
+            "理解 Dolma/Markdown 两种输出形态和 olmOCR-Bench 的作用",
+            "从 README 的 News 与 Benchmark 表了解项目演进脉络"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "README 阅读与功能定位",
+            "benchmark 结果表解读",
+            "版本演进史（CHANGELOG/News）"
+          ],
+          "order": 1,
+          "practice_task": "阅读 README.md 的特性和 Benchmark 部分，写一段 200 字以内的总结说明 olmOCR 相比 Mistral OCR API、Marker 等方案的优势场景，并从 benchmark 表中找出 olmOCR 最弱与最强的一个子项，思考其原因。",
+          "source_files": [
+            "README.md",
+            "CHANGELOG.md"
+          ],
+          "title": "项目总览：olmOCR 是什么，解决什么问题",
+          "topic": "介绍 olmOCR 的定位：用开源视觉语言模型把 PDF、PNG、JPEG 文档转成干净 Markdown/纯文本的工具箱。梳理它的功能特性、benchmark 表现和版本演进。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l2-installation-and-environment.md",
+          "id": "u1-l2",
+          "learning_goals": [
+            "区分 olmocr / olmocr[gpu] / olmocr[beaker] / olmocr[bench] 各 extra 的用途",
+            "理解 check.py 中 poppler 与 GPU 检查的作用",
+            "独立完成可运行的轻量安装"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "pyproject.toml 依赖与 extras",
+            "check.py 环境自检",
+            "conda 干净环境实践"
+          ],
+          "order": 2,
+          "practice_task": "创建一个干净的 python 3.11 conda 环境，安装系统依赖 poppler-utils 与字体，再 pip install olmocr（轻量模式），然后运行 python -m olmocr.check 验证 pdftoppm 可用，并对照 pyproject.toml 说明这次安装没有装哪些重型依赖。",
+          "source_files": [
+            "pyproject.toml",
+            "olmocr/check.py",
+            "README.md"
+          ],
+          "title": "环境搭建：系统依赖、Python 安装与自检",
+          "topic": "讲解 olmOCR 的多层安装选项：轻量远程推理、本地 GPU、Beaker 集群与 benchmark 套件，以及 poppler 等系统依赖的作用和 check.py 的自检逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u1-l3-first-run-pdf-to-markdown.md",
+          "id": "u1-l3",
+          "learning_goals": [
+            "使用 olmocr CLI 把 PDF 转成 Markdown",
+            "识别 workspace 中 results/、markdown/、work_index_list.csv.zstd 等产物",
+            "把 olmocr 命令映射到 pipeline.py 的 cli_main 入口"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "olmocr 命令行初体验",
+            "workspace 目录结构观察",
+            "pyproject 入口脚本映射"
+          ],
+          "order": 3,
+          "practice_task": "下载 README 中的示例 PDF（或直接使用 tests/gnarly_pdfs/ 下的一个 PDF），运行 olmocr ./localworkspace --markdown --pdfs <你的pdf>，然后列出 ./localworkspace 下生成的目录和文件，打开 markdown/ 下的输出查看转换结果。",
+          "source_files": [
+            "README.md",
+            "olmocr/pipeline.py",
+            "pyproject.toml"
+          ],
+          "title": "第一次运行：把一个 PDF 转成 Markdown",
+          "topic": "跟着 README 跑通第一条命令：olmocr ./localworkspace --markdown --pdfs sample.pdf，观察 workspace 中生成的结果文件，理解 CLI 入口 olmocr = olmocr.pipeline:cli_main。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l1"
+          ],
+          "filename": "u1-l4-repo-structure-and-modules.md",
+          "id": "u1-l4",
+          "learning_goals": [
+            "说出 olmocr 包下各子模块/子包各自的职责",
+            "理解 pipeline、work_queue、train、bench 之间的依赖方向",
+            "建立阅读后续讲义的代码地图"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "顶层模块清单梳理",
+            "子包职责速查表",
+            "模块间依赖草图"
+          ],
+          "order": 4,
+          "practice_task": "浏览 olmocr/ 下所有子目录与顶层 py 文件，为每个子包（prompts/filter/data/train/bench/synth/viewer）和顶层文件（pipeline.py、work_queue.py、metrics.py 等）写一句话职责说明，并在 Python 中 import olmocr.work_queue、olmocr.prompts 验证轻量安装可用。",
+          "source_files": [
+            "pyproject.toml",
+            "olmocr/pipeline.py",
+            "olmocr/work_queue.py",
+            "olmocr/prompts/prompts.py"
+          ],
+          "title": "仓库结构与模块地图",
+          "topic": "逐个介绍 olmocr 包的子模块：pipeline、work_queue、prompts、filter、data、train、bench、synth、viewer 及顶层工具文件，建立全局代码地图。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3"
+          ],
+          "filename": "u1-l5-cli-arguments.md",
+          "id": "u1-l5",
+          "learning_goals": [
+            "把 --help 输出与 argparse 定义一一对应",
+            "区分 workspace、server、vllm、beaker 四组参数的作用",
+            "判断哪些参数影响吞吐与成本"
+          ],
+          "level": "beginner",
+          "minimal_modules": [
+            "argparse 参数组结构",
+            "关键默认值解读",
+            "argparse.SUPPRESS 与条件默认值技巧"
+          ],
+          "order": 5,
+          "practice_task": "运行 olmocr --help，对照 pipeline.py 中 main() 的 argparse 代码制作一张参数表（参数名、默认值、作用），并特别解释 pages_per_group 为何用 argparse.SUPPRESS 以及在 api_key 存在时默认值如何变化。",
+          "source_files": [
+            "olmocr/pipeline.py",
+            "README.md"
+          ],
+          "title": "CLI 参数全解析：从 --help 回到 argparse 源码",
+          "topic": "精读 pipeline.py main() 中的 argparse 定义，把几十个命令行参数按 workspace、server、vllm、beaker 分组理解，并弄清 parse_known_args 把未知参数转发给 vLLM 的机制。"
+        }
+      ],
+      "level": "beginner",
+      "order": 1,
+      "title": "单元 1：入门——认识 olmOCR 并跑起来"
+    },
+    {
+      "id": "u2",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l3",
+            "u1-l5"
+          ],
+          "filename": "u2-l1-pipeline-main-flow.md",
+          "id": "u2-l1",
+          "learning_goals": [
+            "描述 main() 从解析参数到 gather workers 的完整时序",
+            "理解 use_internal_server 分支对流程的影响",
+            "理清 pipeline.py 中各协程任务的分工"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "main() 主流程",
+            "asyncio 任务编排",
+            "检查点式流程梳理"
+          ],
+          "order": 1,
+          "practice_task": "通读 main()（olmocr/pipeline.py 约 1199 行起），画出一张流程图，节点包括：work_queue 创建、--pdfs 收集、beaker/stats 短路分支、模型下载、vllm 启动、workers 启动、最终 metrics 汇总，并标注每个节点对应的函数名。",
+          "source_files": [
+            "olmocr/pipeline.py"
+          ],
+          "title": "pipeline 主流程：从 main() 到 worker 协程",
+          "topic": "沿 main() 的执行顺序讲解整个批处理流水线：创建 WorkQueue、收集 PDF、下载模型、启动 vLLM、拉起 workers、输出最终指标，理解 asyncio 任务编排。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l2-input-collection-and-image-conversion.md",
+          "id": "u2-l2",
+          "learning_goals": [
+            "描述 --pdfs 参数支持的五种输入形态及处理分支",
+            "理解 PNG/JPEG 魔数检测与 img2pdf 转换",
+            "掌握 PDF 采样估算 items_per_group 的逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "输入分类分支",
+            "图片格式探测",
+            "pages_per_group 分组估算"
+          ],
+          "order": 2,
+          "practice_task": "写一个小脚本：用 image_utils.is_png/is_jpeg 判断一张 PNG 图片，再调用 convert_image_to_pdf_bytes 把它转成 PDF 字节并保存为 .pdf 文件，用 PdfReader 验证生成的 PDF 只有 1 页。",
+          "source_files": [
+            "olmocr/pipeline.py",
+            "olmocr/image_utils.py"
+          ],
+          "title": "输入收集：本地路径、S3 glob、tarball 与图片转 PDF",
+          "topic": "讲解 main() 中 --pdfs 的输入收集逻辑：本地 PDF/图片/txt 列表、S3 glob 展开、tarball 识别，以及用 pypdf 采样估算平均页数来计算 items_per_group 的技巧。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l3-pdf-rendering.md",
+          "id": "u2-l3",
+          "learning_goals": [
+            "解释 pdfinfo MediaBox 与 pdftoppm 分辨率换算公式",
+            "理解 72 像素/点的 PDF 坐标约定",
+            "独立完成页面渲染实验并观察默认 1288 维度"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "get_pdf_media_box_width_height",
+            "render_pdf_to_base64png",
+            "get_png_dimensions_from_base64"
+          ],
+          "order": 3,
+          "practice_task": "写脚本调用 render_pdf_to_base64png 渲染 tests/gnarly_pdfs/ 中某 PDF 的第 1 页（target_longest_image_dim 分别取 644 和 1288），保存为 PNG 文件并用 get_png_dimensions_from_base64 或 PIL 打印两次的宽高，验证最长边等于设定值。",
+          "source_files": [
+            "olmocr/data/renderpdf.py"
+          ],
+          "title": "PDF 渲染：从页面坐标到 base64 PNG",
+          "topic": "精读 renderpdf.py：用 pdfinfo 读取 MediaBox 计算分辨率，用 pdftoppm 把单页渲染为 PNG 并 base64 编码，以及不解码整图直接读 PNG 尺寸的技巧。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u2-l4-prompts-and-page-response.md",
+          "id": "u2-l4",
+          "learning_goals": [
+            "解释 PageResponse 六个字段在流水线中的用途",
+            "区分 silver 数据提示词与推理提示词的设计差异",
+            "理解 rotation_correction 约束的校验逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build_no_anchoring_v4_yaml_prompt",
+            "PageResponse 数据类",
+            "openai_response_format_schema"
+          ],
+          "order": 4,
+          "practice_task": "在 Python 中调用 build_no_anchoring_v4_yaml_prompt() 打印完整提示词并逐句注释其意图；然后构造一个合法 PageResponse，再故意传 rotation_correction=45，观察 __post_init__ 抛出的 ValueError。",
+          "source_files": [
+            "olmocr/prompts/prompts.py",
+            "olmocr/prompts/__init__.py"
+          ],
+          "title": "提示词体系与 PageResponse 数据模型",
+          "topic": "讲解 prompts.py 中面向不同用途的提示词：GPT-4o silver 数据提示词的多个版本、微调提示词、以及当前推理使用的 build_no_anchoring_v4_yaml_prompt，和结构化输出契约 PageResponse。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u2-l5-front-matter-parsing.md",
+          "id": "u2-l5",
+          "learning_goals": [
+            "手写提取 YAML front matter 的字符串处理逻辑",
+            "把 front matter 字典转换成 PageResponse 实例",
+            "理解该模块被 pipeline 和训练 dataloader 复用的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "FrontMatterParser",
+            "_extract_front_matter_and_text",
+            "_parse_front_matter 类型转换"
+          ],
+          "order": 5,
+          "practice_task": "写一段模拟模型输出的 markdown（front matter 含 primary_language/is_rotation_valid 等字段 + 正文文本），用 FrontMatterParser(front_matter_class=PageResponse) 解析它，打印得到的 PageResponse，并测试正文为空时 natural_text 返回 None 的分支。",
+          "source_files": [
+            "olmocr/train/front_matter.py",
+            "olmocr/prompts/prompts.py"
+          ],
+          "title": "front matter 解析：把模型输出变成结构化数据",
+          "topic": "精读 front_matter.py 的 FrontMatterParser：如何从模型输出的 markdown 顶部提取 YAML front matter，做类型转换与校验，组装成 PageResponse，并理解它被设计成可复用 pipeline step 的原因。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u2-l4"
+          ],
+          "filename": "u2-l6-page-retry-and-rotation.md",
+          "id": "u2-l6",
+          "learning_goals": [
+            "解释 is_valid 的两个判定条件（token 超限与 finish_reason）",
+            "描述旋转错误路径的串行反馈重试与非旋转错误的队列空并行重试",
+            "理解连接错误指数退避与 pdftotext fallback 的兜底逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "try_single_page",
+            "process_page 重试编排",
+            "make_fallback_result"
+          ],
+          "order": 6,
+          "practice_task": "梳理 process_page 的两条重试路径，制作一张表格：列出头次失败原因（旋转错误 vs 其他错误）、重试方式（串行/并行）、温度如何随 attempt 变化、最终兜底行为；再用一个小脚本打印 TEMPERATURE_BY_ATTEMPT 列表并解释该曲线的设计意图。",
+          "source_files": [
+            "olmocr/pipeline.py"
+          ],
+          "title": "单页处理：重试、温度阶梯与旋转纠错",
+          "topic": "精读 pipeline.py 的 try_single_page 与 process_page：TEMPERATURE_BY_ATTEMPT 温度阶梯、旋转错误走串行反馈重试、其他错误在队列清空时并行发射剩余重试、以及最终 pdftotext 兜底 fallback。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l6"
+          ],
+          "filename": "u2-l7-async-http-client.md",
+          "id": "u2-l7",
+          "learning_goals": [
+            "用 asyncio 原语实现一个极简 HTTP/1.1 POST",
+            "解释 content-length 与 chunked 两种响应体读取方式",
+            "理解连接错误向上抛出以触发退避的设计"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "apost 手写 HTTP",
+            "BoundedSemaphore 并发限制",
+            "指数退避包装"
+          ],
+          "order": 7,
+          "practice_task": "启动任意本地 HTTP 服务（如一个简易 echo 服务），写 asyncio 脚本调用 apost 发送一个 JSON POST，打印返回的状态码与响应体；再对照 try_single_page_with_backoff 说明什么异常会触发指数退避以及最多退避多少次。",
+          "source_files": [
+            "olmocr/pipeline.py"
+          ],
+          "title": "手写异步 HTTP 客户端 apost",
+          "topic": "讲解 pipeline.py 中为何不用 httpx/aiohttp 而手写 apost：用 asyncio.open_connection 直接写 HTTP/1.1 报文，处理 status line、headers、content-length/chunked 三种响应体读取，以及为百万级请求稳定性做出的取舍。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l5",
+            "u2-l6"
+          ],
+          "filename": "u2-l8-dolma-and-markdown-output.md",
+          "id": "u2-l8",
+          "learning_goals": [
+            "描述 Dolma 文档 JSON 的 id/text/metadata/attributes 结构",
+            "解释 pdf_page_spans 字符偏移与页码的映射",
+            "理解 max_page_error_rate 对整篇文档的淘汰逻辑"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "build_dolma_document",
+            "get_markdown_path",
+            "worker 结果落盘"
+          ],
+          "order": 8,
+          "practice_task": "手动构造两个 PageResult（参考 make_fallback_result 的字段），调用 build_dolma_document 生成 Dolma 文档，检查 id 是否等于文本的 sha1、pdf_page_spans 是否正确记录每页起止位置；再为 s3://bucket/a/b.pdf 和 tarball::inner.pdf 两种路径调用 get_markdown_path 验证路径清洗规则。",
+          "source_files": [
+            "olmocr/pipeline.py",
+            "olmocr/datatypes.py"
+          ],
+          "title": "输出侧：Dolma 文档与 Markdown 落盘",
+          "topic": "讲解流水线的输出侧：build_dolma_document 如何把各页 PageResult 拼成带 pdf_page_spans 与属性向量的 Dolma JSON，worker 如何写 output_*.jsonl 与 --markdown 目录，以及 get_markdown_path 的路径清洗。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 2,
+      "title": "单元 2：核心流水线精读（pipeline.py 调用链）"
+    },
+    {
+      "id": "u3",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l1-workqueue-abstraction.md",
+          "id": "u3-l1",
+          "learning_goals": [
+            "解释 Backend 抽象类各方法承担的职责",
+            "描述 populate_queue 的去重与分组哈希逻辑",
+            "理解 initialize_queue 洗牌与 get_work 的跳过策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "WorkItem/Backend/WorkQueue",
+            "populate_queue 分组",
+            "get_work 跳过与加锁"
+          ],
+          "order": 1,
+          "practice_task": "写脚本用 LocalBackend 建一个临时 workspace，调用 populate_queue 加入 5 个假 PDF 路径（items_per_group=2），解压查看 work_index_list.csv.zstd 内容并用 _compute_workgroup_hash 核对 group hash；再调用 initialize_queue 观察随机化后的队列大小。",
+          "source_files": [
+            "olmocr/work_queue.py"
+          ],
+          "title": "WorkQueue 抽象：Backend 接口与队列语义",
+          "topic": "讲解 work_queue.py 的核心抽象：WorkItem、Backend 接口（index 读写、完成标记、worker 锁）与 WorkQueue 的 populate/initialize/get_work/mark_done 生命周期，包括 sha1 分组哈希与 CSV 编码。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l2-local-and-s3-backends.md",
+          "id": "u3-l2",
+          "learning_goals": [
+            "对比本地文件与 S3 对象在锁与标记实现上的映射",
+            "解释 worker lock 超时判定的防死锁设计",
+            "理解 best-effort 锁操作允许重复计算的理由"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "LocalBackend",
+            "S3Backend",
+            "锁超时与 best-effort 策略"
+          ],
+          "order": 2,
+          "practice_task": "制作一张 LocalBackend 与 S3Backend 的方法对照表（每个 Backend 方法在两种后端分别用什么文件/对象和系统调用实现）；然后在本地 workspace 中手动创建 done_xxx.flag 和 worker_xxx.lock，调用 is_completed/is_worker_lock_taken 验证状态判定与超时行为。",
+          "source_files": [
+            "olmocr/work_queue.py",
+            "olmocr/s3_utils.py"
+          ],
+          "title": "LocalBackend 与 S3Backend：同一队列的两种落地",
+          "topic": "对比 Backend 的两个实现：LocalBackend 用本地文件 + asyncio.to_thread + 超时包装，S3Backend 用 head_object/put_object 实现锁与 done flag，理解 stale lock 超时判定和 best-effort 语义。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l1"
+          ],
+          "filename": "u3-l3-vllm-server-management.md",
+          "id": "u3-l3",
+          "learning_goals": [
+            "解释 vllm serve 命令各参数对资源占用的影响",
+            "理解从服务器日志解析队列深度的正则",
+            "描述 server 就绪探测与崩溃重启策略"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "vllm_server_task",
+            "vllm_server_host 重试",
+            "vllm_server_ready 探活"
+          ],
+          "order": 3,
+          "practice_task": "列出 vllm_server_task 构造的完整 vllm serve 命令并逐个参数注释（尤其 --limit-mm-per-prompt 为何关闭 video）；然后解释 process_line 中两个 re.search 正则分别捕获什么，以及全局变量 vllm_queued_requests 如何影响 process_page 的并行重试决策。",
+          "source_files": [
+            "olmocr/pipeline.py"
+          ],
+          "title": "vLLM 服务器生命周期管理",
+          "topic": "讲解 pipeline.py 的 vllm_server_task/host/ready 三件套：如何拼装 vllm serve 命令行、解析服务器 stdout 中的 Running/Waiting 队列指标、处理启动就绪探测、崩溃自动重启与最多 5 次的限制。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l1"
+          ],
+          "filename": "u3-l4-beaker-cluster-execution.md",
+          "id": "u3-l4",
+          "learning_goals": [
+            "描述 --beaker 提交时命令行参数如何被改写",
+            "理解 secrets 自动写入与缺失时的人机交互",
+            "解释多 replica 错峰下载模型的机制"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "submit_beaker_job",
+            "Beaker 任务规格",
+            "BEAKER 环境变量适配"
+          ],
+          "order": 4,
+          "practice_task": "阅读 submit_beaker_job，回答：它从 sys.argv 中删除了哪些参数、为什么；BeakerExperimentSpec 中 replicas、gpu_count、preemptible 分别由什么控制；main() 中 BEAKER_REPLICA_RANK 错峰 sleep 的计算公式是什么。把答案整理成笔记。",
+          "source_files": [
+            "olmocr/pipeline.py"
+          ],
+          "title": "Beaker 集群执行：从一条命令到 N 个 GPU 副本",
+          "topic": "讲解 submit_beaker_job：如何剥离 --beaker/--pdfs 参数、管理 Weka/S3/GCS secrets、组装 BeakerExperimentSpec 并创建实验，以及 worker 端 BEAKER_JOB_NAME 环境变量分支的凭证与错峰下载逻辑。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u1-l2"
+          ],
+          "filename": "u3-l5-docker-deployment.md",
+          "id": "u3-l5",
+          "learning_goals": [
+            "解释基础镜像如何解决字体渲染依赖",
+            "对比带模型镜像的取舍（体积 vs 下载）",
+            "独立写出 docker run 处理本地 PDF 的命令"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "Dockerfile 基础镜像",
+            "Dockerfile.with-model",
+            "docker run 用法"
+          ],
+          "order": 5,
+          "practice_task": "对比两个 Dockerfile 的差异，写一段说明 latest 与 latest-with-model 各适合什么场景；然后参照 README 写出用 latest-with-model 镜像把自己机器上一个 PDF 转成 Markdown 的完整 docker run 命令（含 --gpus 与卷挂载）。",
+          "source_files": [
+            "Dockerfile",
+            "Dockerfile.with-model",
+            "README.md"
+          ],
+          "title": "Docker 部署：镜像构建与容器化批处理",
+          "topic": "讲解官方 Docker 镜像的构建与使用：基础镜像基于 vllm/vllm-openai 并处理字体依赖，with-model 变体预打包约 30GB 模型权重，以及如何用 docker run 挂载目录批处理 PDF。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 3,
+      "title": "单元 3：工作队列与可扩展部署"
+    },
+    {
+      "id": "u4",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u4-l1-anchor-text-extraction.md",
+          "id": "u4-l1",
+          "learning_goals": [
+            "对比 pdftotext/pdfium/pypdf 三种文本提取的输出差异",
+            "理解 topcoherency 模式按连贯性评分择优的思想",
+            "知道 anchor 文本在新版模型中已不再注入提示词"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "get_anchor_text 分发",
+            "各引擎私有函数",
+            "coherency 评分选择"
+          ],
+          "order": 1,
+          "practice_task": "写脚本对 tests/gnarly_pdfs/ 中同一个 PDF 的同一页分别用 pdftotext、pdfium、pypdf 三种引擎调用 get_anchor_text，把三段输出保存对比，总结哪种引擎在哪类 PDF（扫描件/数字原生）上表现更好。",
+          "source_files": [
+            "olmocr/prompts/anchor.py",
+            "olmocr/filter/coherency.py"
+          ],
+          "title": "anchor 文本提取：多种 PDF 文本引擎",
+          "topic": "讲解 anchor.py 的 get_anchor_text 如何在 pdftotext、pdfium、pypdf、topcoherency 等引擎间切换，为 VLM 提供「锚文本」辅助上下文，以及它今天在 pipeline 中的新角色（pdftotext 兜底 fallback）。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l2"
+          ],
+          "filename": "u4-l2-pdf-filtering.md",
+          "id": "u4-l2",
+          "learning_goals": [
+            "理解 lingua 语言检测与 English+None 保留集合",
+            "解释 SEO 垃圾词频阈值 0.004 的含义",
+            "掌握 --apply_filter 在 pipeline 中的接入点"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "PdfFilter",
+            "_is_download_spam",
+            "语言检测过滤"
+          ],
+          "order": 2,
+          "practice_task": "构造一段包含大量 download/pdf/free/ebook 等词的假文本，直接调用 PdfFilter 的 _is_download_spam 验证其返回 True；再对 tests/ 下的样例 PDF 调用 PdfFilter(languages_to_keep={Language.ENGLISH, None}).filter_out_pdf，记录哪些 PDF 被过滤及原因日志。",
+          "source_files": [
+            "olmocr/filter/filter.py",
+            "olmocr/pipeline.py"
+          ],
+          "title": "PDF 过滤器：语言、表单与 SEO 垃圾检测",
+          "topic": "讲解 filter.py 的 PdfFilter：表单检测（get_form_text_fields）、前 5 页 pdftotext 语言识别、SEO/download spam 词频打分，以及 pipeline 中 get_pdf_filter 惰性缓存的使用方式。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u3-l2"
+          ],
+          "filename": "u4-l3-s3-utils.md",
+          "id": "u4-l3",
+          "learning_goals": [
+            "理解 parse_s3_path 与 expand_s3_glob 的实现",
+            "解释 zstd 压缩 CSV 索引的读写格式",
+            "描述 get_s3_bytes_with_backoff 的重试曲线"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "s3 路径解析与 glob",
+            "zstd CSV 读写",
+            "带退避的下载"
+          ],
+          "order": 3,
+          "practice_task": "写脚本：构造 s3://bucket/prefix/file.pdf 字符串调用 parse_s3_path 验证拆分结果；再用 zstandard 库手工压缩一个 CSV 再解压，模拟 work_index_list.csv.zstd 的格式，并阅读 download_zstd_csv/upload_zstd_csv 核对实现。",
+          "source_files": [
+            "olmocr/s3_utils.py",
+            "olmocr/work_queue.py"
+          ],
+          "title": "S3 工具函数：路径、glob 与 zstd 索引",
+          "topic": "过一遍 s3_utils.py 的实用函数：parse_s3_path、expand_s3_glob、get_s3_bytes（含分段读取）、带退避的下载、zstd CSV 上传下载，以及跨 S3/GCS/WEKA 的模型目录下载。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "filename": "u4-l4-metrics-and-monitoring.md",
+          "id": "u4-l4",
+          "learning_goals": [
+            "解释滑动窗口 deque 的增量维护方式",
+            "读懂 WorkerTracker 的 work 状态上报",
+            "理解 print_stats 的产出外推算法"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "MetricsKeeper",
+            "WorkerTracker",
+            "metrics_reporter"
+          ],
+          "order": 4,
+          "practice_task": "写脚本创建 MetricsKeeper(window=60)，循环 100 次 add_metrics(pages=1)，每次 sleep 0.05 秒，最后打印 str(metrics)，观察 Lifetime 与 Recently 两列速率的差异；再解释 pipeline 结束时 finished_on_attempt_N 统计如何反映重试策略的有效性。",
+          "source_files": [
+            "olmocr/metrics.py",
+            "olmocr/pipeline.py"
+          ],
+          "title": "运行时指标与监控：MetricsKeeper 和 WorkerTracker",
+          "topic": "讲解 metrics.py 的 MetricsKeeper（累计指标 + 5 分钟滑动窗口速率）与 WorkerTracker（每个 worker 当前处理项状态表），以及 pipeline 中 metrics_reporter 周期打印和 print_stats 的 S3 产出统计。"
+        }
+      ],
+      "level": "intermediate",
+      "order": 4,
+      "title": "单元 4：数据处理与支撑工具"
+    },
+    {
+      "id": "u5",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [],
+          "filename": "u5-l1-bench-test-types.md",
+          "id": "u5-l1",
+          "learning_goals": [
+            "列举八种测试类型及各自校验的内容",
+            "理解 normalize_text 的多级规范化流水线",
+            "会加载并单跑一个 jsonl 中的规则"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "TestType 枚举",
+            "normalize_text",
+            "load_tests/load_single_test"
+          ],
+          "order": 1,
+          "practice_task": "用 normalize_text 处理一段包含花引号、粗体标记、<br>、全角下划线的 markdown，打印每一步正则的效果；然后查看 olmocr/bench/sample_data/dataset.jsonl 的一行，用 load_single_test 加载它并描述这个测试会怎么判定通过。",
+          "source_files": [
+            "olmocr/bench/tests.py",
+            "olmocr/bench/sample_data/dataset.jsonl",
+            "olmocr/bench/README.md"
+          ],
+          "title": "olmOCR-Bench（一）：像单元测试一样评测 OCR",
+          "topic": "讲解 olmOCR-Bench 的设计哲学与 tests.py 中的八种测试类型（baseline/present/absent/order/table/math/format/footnote），以及 normalize_text 如何把各种花哨字符和格式归一化后再做机器可校验的断言。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l2-bench-runner-and-scoring.md",
+          "id": "u5-l2",
+          "learning_goals": [
+            "理解 _pg{page}_repeat{repeat}.md 命名约定与重复采样",
+            "描述 per-JSONL 平均再到总平均的两级评分",
+            "会用 bootstrap 置信区间解读分数差异"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "evaluate_candidate",
+            "评分聚合",
+            "report 报告生成"
+          ],
+          "order": 2,
+          "practice_task": "对照 olmocr/bench/README.md 的用法说明，用 sample_data 目录（内含 pdfs/ 与 olmocr_pipeline 输出）跑一次 benchmark.py（python -m olmocr.bench.benchmark <目录>），记录总分与按测试类型的分解，并解释每个 jsonl 文件的得分是如何聚合成总分的。",
+          "source_files": [
+            "olmocr/bench/benchmark.py",
+            "olmocr/bench/report.py",
+            "olmocr/bench/utils.py",
+            "olmocr/bench/README.md"
+          ],
+          "title": "olmOCR-Bench（二）：benchmark 评分流程与统计报告",
+          "topic": "精读 benchmark.py 的 evaluate_candidate：如何匹配 pdf 与 _pg{page}_repeat{repeat}.md 文件、并发跑规则、按 jsonl 文件聚合得分，以及 bootstrap 置信区间和 HTML 报告生成。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u5-l3-bench-math-and-tables.md",
+          "id": "u5-l3",
+          "learning_goals": [
+            "理解 KaTeX 渲染对比优于字符串编辑距离的原因",
+            "会调用 compare_rendered_equations 判断公式等价",
+            "会用 parse_html_tables 做表格结构断言"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "render_equation/compare_rendered_equations",
+            "parse_html_tables",
+            "parse_markdown_tables"
+          ],
+          "order": 3,
+          "practice_task": "写脚本调用 compare_rendered_equations 比较 a/b 的分数写法与 dfrac 写法、以及两个语义不同的公式，观察分值的差别；再用 parse_html_tables 解析一个含 rowspan 的简单 HTML 表格，打印其行列结构。",
+          "source_files": [
+            "olmocr/bench/katex/render.py",
+            "olmocr/bench/table_parsing.py"
+          ],
+          "title": "olmOCR-Bench（三）：数学公式渲染对比与表格解析",
+          "topic": "讲解 bench 中两个最硬核的校验器：katex/render.py 把 LaTeX 渲染成图像后做像素相似度比较来判断公式等价，table_parsing.py 把 HTML/Markdown 表格解析成结构再做行列断言。"
+        }
+      ],
+      "level": "advanced",
+      "order": 5,
+      "title": "单元 5：olmOCR-Bench 评测体系"
+    },
+    {
+      "id": "u6",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l3",
+            "u2-l5"
+          ],
+          "filename": "u6-l1-training-dataloader.md",
+          "id": "u6-l1",
+          "learning_goals": [
+            "描述 md/pdf 配对校验与多进程扫描流程",
+            "理解 pipeline steps（渲染、提示词、输出格式）的组装顺序",
+            "解释样本中 input_ids/labels 与图像 token 的对齐方式"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "BaseMarkdownPDFDataset",
+            "pipeline steps 组合",
+            "processor tokenization"
+          ],
+          "order": 1,
+          "practice_task": "先查看 tests/sample_dataset/simple_document 的 md/pdf 布局，再写脚本实例化 BaseMarkdownPDFDataset 指向该目录，取第一个样本，打印其字段和 input_ids 长度，并对照代码说明 FrontMatterParser 在哪个 step 被调用。",
+          "source_files": [
+            "olmocr/train/dataloader.py",
+            "olmocr/train/front_matter.py",
+            "tests/test_dataloader.py"
+          ],
+          "title": "训练数据加载：BaseMarkdownPDFDataset 与 pipeline steps",
+          "topic": "精读 dataloader.py：如何扫描 markdown+PDF 配对数据集、用可组合的 pipeline steps（FrontMatterParser、PDFRenderer、各种 Prompt/OutputFormat）把每页变成模型训练样本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l1"
+          ],
+          "filename": "u6-l2-sft-training.md",
+          "id": "u6-l2",
+          "learning_goals": [
+            "理解 QwenDataCollator 对变长样本的批处理",
+            "描述 prepare_lora_model 的适配器注入方式",
+            "理清 autocast、梯度累积与 wandb 日志的组织"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "train.py 主循环",
+            "QwenDataCollator",
+            "prepare_lora_model"
+          ],
+          "order": 2,
+          "practice_task": "阅读 train.py 的 main 训练循环，画出每个训练 step 的数据流图（batch → collator → forward → loss → backward → optimizer.step）；然后写伪代码描述 QwenDataCollator 如何处理 None 样本和 max_token_len 截断。若无可用 GPU，说明 LoRA 与全参微调在代码路径上的分叉点即可。",
+          "source_files": [
+            "olmocr/train/train.py",
+            "olmocr/train/dataloader.py"
+          ],
+          "title": "SFT 监督微调：train.py 主循环与 LoRA",
+          "topic": "讲解 train.py：Qwen2.5-VL/Qwen3-VL 模型加载、QwenDataCollator、AdamW/Muon 优化器选择、学习率调度、LoRA 适配器包装、混合精度与检查点保存。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2",
+            "u5-l1"
+          ],
+          "filename": "u6-l3-grpo-reward-training.md",
+          "id": "u6-l3",
+          "learning_goals": [
+            "解释把单元测试通过率作为 reward 的动机（可验证奖励）",
+            "描述按测试类型分解的 reward 日志体系",
+            "理解 GRPOTrainer 与自定义 Dataset/Callback 的协作"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "GRPO 奖励函数",
+            "单测加载与判定",
+            "训练循环集成"
+          ],
+          "order": 3,
+          "practice_task": "定位 grpo_train.py 中计算 reward 的函数（搜索 overall_reward 与 load_single_test），画出一次 completion 从渲染到打分的流程图；然后解释 bench 类型过滤全局变量的作用，以及 DetailedRewardLogger 把哪些指标写入 wandb。",
+          "source_files": [
+            "olmocr/train/grpo_train.py",
+            "olmocr/bench/tests.py"
+          ],
+          "title": "GRPO 强化学习：单元测试通过率作为奖励",
+          "topic": "精读 grpo_train.py：olmOCR-2 的核心创新——把 olmOCR-Bench 的单元测试直接搬进 RL 奖励函数，每个 completion 渲染页面生成 markdown 后跑测试算通过率作为 reward。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u6-l2"
+          ],
+          "filename": "u6-l4-training-config-and-muon.md",
+          "id": "u6-l4",
+          "learning_goals": [
+            "描述 config.py 中 dataclass 配置树与 YAML 的互转",
+            "理解优化器在 AdamW 与 Muon 之间的切换条件",
+            "解释 Newton-Schulz 五次迭代近似谱归一化的原理"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "Config/OmegaConf 装载",
+            "pipeline step 配置类",
+            "SingleDeviceMuonWithAuxAdam"
+          ],
+          "order": 4,
+          "practice_task": "写一个最小 YAML（对照 config.py 的字段），用 OmegaConf/Config 装载它并打印解析后的配置对象；再阅读 muon.py 的 zeropower_via_newtonschulz5，用自己的话解释为什么对梯度做正交化能加速训练（三到五句）。",
+          "source_files": [
+            "olmocr/train/config.py",
+            "olmocr/train/muon.py"
+          ],
+          "title": "训练配置系统与 Muon 优化器",
+          "topic": "讲解 config.py 用嵌套 dataclass + OmegaConf 描述整套训练配置（模型、数据 pipeline steps、优化器），以及 muon.py 中 KellerJordan Muon 优化器的 Newton-Schulz 正交化实现。"
+        }
+      ],
+      "level": "advanced",
+      "order": 6,
+      "title": "单元 6：模型训练（SFT 与 GRPO）"
+    },
+    {
+      "id": "u7",
+      "lectures": [
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l4"
+          ],
+          "filename": "u7-l1-silver-data-generation.md",
+          "id": "u7-l1",
+          "learning_goals": [
+            "解释提示词中位置坐标与保留跨页句子约束的作用",
+            "理解 OpenAI batch API 的提交/回取两段式流程",
+            "描述 silver 数据在 SFT 中的角色"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "buildsilver 主流程",
+            "silver 提示词",
+            "OpenAI batch 任务编排"
+          ],
+          "order": 1,
+          "practice_task": "阅读 buildsilver.py 与 build_openai_silver_data_prompt，写出 silver 提示词里五条最重要指令的清单（数学、表格、页眉页脚、手写、幻觉），并用 get_anchor_text 为任一 PDF 页生成 base_text，拼出一条完整的 silver 数据请求体（打印即可，不必真的调用 API）。",
+          "source_files": [
+            "olmocr/data/buildsilver.py",
+            "olmocr/prompts/prompts.py",
+            "olmocr/data/runopenaibatch.py"
+          ],
+          "title": "用 GPT-4o 构建 silver 训练数据",
+          "topic": "讲解 buildsilver.py 如何用「页面图片 + pdftotext 位置文本」提示 GPT-4o 产出高质量自然文本（silver data），以及配套的 OpenAI batch API 提交与结果回收脚本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u5-l1"
+          ],
+          "filename": "u7-l2-html-template-mining.md",
+          "id": "u7-l2",
+          "learning_goals": [
+            "描述从 HTML 模板到合成 PDF 再到单元测试的数据闭环",
+            "理解 Claude 在流程中承担的内容生成角色",
+            "解释 cutoff 检测如何保证训练文本完整"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "HTML 模板挖掘",
+            "Claude 客户端",
+            "augmentations 与 cutoff 检测"
+          ],
+          "order": 2,
+          "practice_task": "浏览 mine_html_templates.py 的主流程与 tests/test_mine_html_templates_*.py 中任一测试，写半页总结：合成数据 pipeline 的输入是什么、Claude 负责什么、生成结果如何被 bench 式单元测试自动质检。",
+          "source_files": [
+            "olmocr/synth/mine_html_templates.py",
+            "olmocr/synth/claude_client.py",
+            "olmocr/synth/cutoff_detection.py",
+            "olmocr/synth/augmentations.py"
+          ],
+          "title": "合成数据生成：HTML 模板挖掘与增强",
+          "topic": "讲解 olmOCR-2 合成数据引擎 mine_html_templates.py：从真实网页挖掘版式模板、用 Claude 填充内容、应用旋转/噪声等增强、渲染成 PDF，并用与 bench 相同的单元测试规则自动验证质量。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u2-l8"
+          ],
+          "filename": "u7-l3-dolma-viewer.md",
+          "id": "u7-l3",
+          "learning_goals": [
+            "理解 Dolma JSON 各字段在查看器中的呈现方式",
+            "解释 pdf_page_spans 如何驱动页级渲染",
+            "会用 viewer 检查一次真实转换的输出"
+          ],
+          "level": "advanced",
+          "minimal_modules": [
+            "dolmaviewer CLI",
+            "Jinja2 HTML 模板",
+            "tarball 双冒号路径解析"
+          ],
+          "order": 3,
+          "practice_task": "用第 1 单元生成的 localworkspace/results/*.jsonl（或任意 dolma jsonl），运行 python -m olmocr.viewer.dolmaviewer 生成本地 HTML（对照文件内 argparse 参数），在浏览器中核对 pdf_page_spans 标出的每页文本与源 PDF 是否对应。",
+          "source_files": [
+            "olmocr/viewer/dolmaviewer.py"
+          ],
+          "title": "Dolma 结果查看器与质量抽查",
+          "topic": "讲解 viewer/dolmaviewer.py：如何把 Dolma JSONL、S3/tarball 中的原始 PDF 和 webp 渲染页拼成一个可翻页比对的 HTML 报告，用于人工抽查 OCR 质量。"
+        }
+      ],
+      "level": "advanced",
+      "order": 7,
+      "title": "单元 7：合成数据与工具生态"
+    }
+  ]
+}
