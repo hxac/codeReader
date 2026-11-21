@@ -1,7 +1,7 @@
 {
-  "head": "2063f854b37cd380e55f5509df7ea50b6d8a1033",
+  "head": "a4cd966a9e202843baba653115045e6fd6f473db",
   "project": "open-instruct",
-  "rationale": "本轮增量（2f7889da9→2063f854b）共两个提交，全部仍在 MILES。其一，#2289 把维护示例的 checkpoint 策略固化为「有界恢复保存」：Tiny node/three-node 与 Small four/eight-node 统一改为每 10 更新保存、保留最近 2 份、外加 50（Tiny node 与 Small）或 100（three-node）更新永久里程碑与最终存档，Small four/eight-node 从 save_checkpoints=false、auto_resume=false 翻转为启用保存与自动恢复，examples README 新增「Recovery checkpoints and preserved milestones」策略节（按 1-2 小时实测节奏选间隔、首个完整恢复保存须落在受保护最短运行时内、恢复验证清单），development-defaults 的 Native checkpoints 条目与 olmo35-small.md 新增「Checkpoint settings in the current starters」一节同步改写——示例基线直接落进已落盘但待更新的 u8-l2（update 扩充目标与实践），Small 配方侧内容并入尚未落盘的 u8-l15（new，修正其「four/eight-node 无 checkpoint」的旧表述并补依赖 u8-l3）。其二，#2293 把 rollout 边界的后台评估导出改为「先落 native checkpoint 再导 HF」：evaluation.py 新增 mid_rollout_snapshot/updates_per_rollout（边界返回 None、边界归 driver 所有），driver.train 在边界发现快照缺失时经 learner.export_hf 补导、对残留的不完整快照告警 BACKGROUND EVALUATION GAP，workflow.recovery_configuration_matches 允许已认证 resume 调整 launch.coordination.heartbeat_timeout（startup_timeout 与训练设定仍严格拒绝），Small 三份配方心跳超时 120→480，MILES runtime pin 升至 9eff46a4（writer-only HF 导出存储与启动权重检查修复）——这些落在 u8-l3（update 扩充，补 test_miles_workflow_recovery.py）与讲评估快照的 u8-l9（update 扩充，补 test_miles_evaluation.py 与 driver.py）。其余 MILES 讲义（u8-l1/u8-l5/u8-l6/u8-l8/u8-l11 的既有 update、u8-l12～l14 的 new、u8-l4/u8-l7/u8-l10 的 keep）与 SFT/DPO/RM/GRPO/OLMo-core、工程化各单元本轮代码变化不涉及，全部保持原动作。",
+  "rationale": "本轮增量（2063f854b→a4cd966a9）共六个提交，分四条线。其一，MoE v2 SFT 基建（#2298+#2296）：Dockerfile 新增 cuda13-moe 变体（transformer-engine 2.16.1、DS_SKIP_CUDA_CHECK=1、torch 自带 cuBLAS 指向系统副本并做 cublasLt 符号检查），build_image_and_launch.sh 新增 --moe（限 CUDA 13），run_gpu_pytest.sh 把 -cuda13-moe 镜像路由到 holmes，CLAUDE.md 启动简写同步；配合 scripts/train/sft.py 新增固定 A4B 镜像的 a4b 配方（2×8 B300 holmes、节点内 EP8、fused_linear CE、flash_2、整块 recompute）与全新测试 tests/test_sft_recipes.py——镜像/启动器/GPU 测试侧分别落进 u1-l2、u1-l4、u9-l3 的 update，而「SFT 配方固定镜像运行」这一主题此前无讲义覆盖，新增 u7-l5 专讲配方注册表、a4b 工程设置与 MoE 镜像变体。其二，数据渲染（#2300）：dataset_transformation 在 SFT/DPO 的 tulu 分词路径新增 _normalize_tool_call_arguments 解码 JSON 字符串的工具调用参数并把 DATASET_CACHE_VERSION 升到 v10，落进 u3-l2（update，补 test_dataset_transformation.py）。其三，MILES 编译默认（#2297）：CoreConfig.refresh_request_timeout 默认 1800→3600 秒并写明规则注释，作为编译默认补进 u8-l2（update，附 test_miles_throughput.py 的新断言）。其四，Small 配方实测更新（#2290+#2309）：four-node hero 升至 R=224 准入（联动参数组、mem fraction 0.92、省略 sglang_max_total_tokens 时的 RunSpec KV 封顶）并配 3600 秒请求/排空超时（batch 1024 下 212 s/update，-13% vs R=160、约 -31% vs R=96；R=256 填满 KV 池失败），eight-node 保持 R=96，olmo35-small.md 新增「Request timeout at high admission」一节与 ppo_kl 恒零/rollpotb-abs-diff 非零的指标注记，三份示例开启 fp32_lm_head——全部并入尚未落盘的 u8-l15（仍为 new，重写其准入参数组与吞吐内容），并在 u8-l14 加一条 FP32 头交叉引用。其余讲义本轮代码变化不涉及：上轮遗留的 update（u8-l1/l3/l5/l6/l8/l9）与 new（u8-l12/l13/l14）继续有效，SFT 主链路、DPO、RM、GRPO、OLMo-core 既有各篇与去污染/Tülu3 串讲保持原动作。",
   "units": [
     {
       "id": "u1",
@@ -32,7 +32,7 @@
           "topic": "介绍 open-instruct 的定位：一个开放的大模型后训练代码库，覆盖 SFT、DPO、RLVR 全链路，产出 Tülu 与 OLMo 系列模型。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u1-l1"
           ],
@@ -41,16 +41,18 @@
           "learning_goals": [
             "用 uv 完成本地开发环境安装",
             "理解 cuda12/cuda13 依赖组与平台差异",
-            "掌握 make style、make quality 与 pytest 的用法"
+            "掌握 make style、make quality 与 pytest 的用法",
+            "识别 Dockerfile 的 cuda12/cuda13/cuda13-moe 三个基础阶段与 IMAGE_VARIANT 构建参数：-moe 变体专供 MoE v2（OLMoDDPModel）模型，默认镜像不变"
           ],
           "level": "beginner",
           "minimal_modules": [
             "pyproject 依赖与 uv 分组",
             "Makefile 风格检查目标",
-            "Dockerfile 构建入口"
+            "Dockerfile 构建入口",
+            "CUDA 13 MoE 镜像变体"
           ],
           "order": 2,
-          "practice_task": "执行 `uv sync` 完成安装，运行 `uv run pytest open_instruct/test_math_utils.py`，记录用例结果，再用 `make style && make quality` 验证代码风格工具链可用。",
+          "practice_task": "执行 `uv sync` 完成安装，运行 `uv run pytest open_instruct/test_math_utils.py`，记录用例结果，再用 `make style && make quality` 验证代码风格工具链可用；最后对照 Dockerfile 的 cuda13-moe 阶段与默认 cuda12/cuda13 阶段，列出 -moe 变体额外引入的组件（nvidia/cuda:13.3.1-cudnn 基座、transformer-engine、DS_SKIP_CUDA_CHECK=1、cuBLAS 指向系统副本与构建期符号检查）以及两个默认镜像为何完全不受影响。",
           "source_files": [
             "docs/get_started/installation.md",
             "pyproject.toml",
@@ -58,7 +60,7 @@
             "Makefile"
           ],
           "title": "环境搭建：uv、Docker 与开发工具链",
-          "topic": "讲解如何安装 open-instruct：uv sync、Docker 镜像、Python/CUDA 版本约束，以及 ruff/pytest/mkdocs 等日常开发命令。"
+          "topic": "讲解如何安装 open-instruct：uv sync、Docker 镜像、Python/CUDA 版本约束，以及 ruff/pytest/mkdocs 等日常开发命令。更新点（#2298）：Dockerfile 新增 IMAGE_VARIANT 构建参数与 cuda13-moe 基础阶段——在 CUDA 13.3.1 cuDNN 基座上安装 transformer-engine 2.16.1（绑定按 venv 的 torch 编译），设置 DS_SKIP_CUDA_CHECK=1 让 DeepSpeed 用 CUDA 13.3 工具链 JIT 构建算子，并把 torch 自带 cuBLAS 指向系统副本、在构建期检查 cublasLtGroupedMatrixLayoutInit_internal 符号。"
         },
         {
           "action": "keep",
@@ -89,7 +91,7 @@
           "topic": "带读者走一遍仓库目录：open_instruct 源码、scripts 训练/数据/评测脚本、configs 配置、docs 文档与 tests 测试的组织方式。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u1-l2",
             "u1-l3"
@@ -99,16 +101,18 @@
           "learning_goals": [
             "读懂 build_image_and_launch.sh 的构建与提交流程",
             "理解 debug 冒烟脚本与正式训练脚本的关系",
-            "能改小参数跑通一次 SFT"
+            "能改小参数跑通一次 SFT",
+            "理解 #2298 新增的 --moe 变体（必须搭配 --cuda-version 13）：MoE v2（OLMoDDPModel，如 Olmo 3.5 Small）的 token permutation 依赖 transformer-engine，只有该变体镜像安装，镜像名会追加 -moe 后缀"
           ],
           "level": "beginner",
           "minimal_modules": [
             "镜像构建脚本",
             "debug 冒烟脚本",
-            "GPU 测试约定"
+            "GPU 测试约定",
+            "--moe 镜像变体"
           ],
           "order": 4,
-          "practice_task": "阅读 scripts/train/debug/finetune.sh 与 sft_integration_test.sh，把模型换成一个 0.5-1B 的小模型、调小 max_seq_length 与训练步数，在单卡或 Beaker 上跑通一次冒烟测试并记录日志中的 loss 曲线。",
+          "practice_task": "阅读 scripts/train/debug/finetune.sh 与 sft_integration_test.sh，把模型换成一个 0.5-1B 的小模型、调小 max_seq_length 与训练步数，在单卡或 Beaker 上跑通一次冒烟测试并记录日志中的 loss 曲线；再阅读 build_image_and_launch.sh 的 --moe 分支与 CLAUDE.md 的启动约定，回答：为什么 --moe 必须搭配 --cuda-version 13、在默认镜像上启动 MoE v2 模型会发生什么（对照 olmo_core_utils.require_transformer_engine 的报错指引）。",
           "source_files": [
             "scripts/train/build_image_and_launch.sh",
             "scripts/train/debug/finetune.sh",
@@ -116,7 +120,7 @@
             "CLAUDE.md"
           ],
           "title": "跑通第一个训练：debug 冒烟脚本与镜像启动",
-          "topic": "通过 scripts/train/debug 冒烟脚本与 build_image_and_launch.sh，理解一次训练任务从构建镜像到提交 Beaker 运行的完整路径。"
+          "topic": "通过 scripts/train/debug 冒烟脚本与 build_image_and_launch.sh，理解一次训练任务从构建镜像到提交 Beaker 运行的完整路径。更新点（#2298）：启动脚本新增 --moe（仅 CUDA 13 可用，否则报错退出），为 MoE v2 SFT 构建 transformer-engine 镜像变体并把 IMAGE_VARIANT 传给 Docker build；CLAUDE.md 的启动简写同步更新为 [--cuda-version 12|13 [--moe]]。"
         }
       ],
       "level": "beginner",
@@ -152,7 +156,7 @@
             "docs/algorithms/finetune.md"
           ],
           "title": "finetune.py：SFT 入口与参数全景",
-          "topic": "精读 SFT 主入口 finetune.py：命令行参数体系、模型与 tokenizer 加载、Trainer 的组装与训练启动。"
+          "topic": "精读 SFT 主入口 finetune.py：命令行参数体系、模型与 tokenizer 加载、Trainer 的组装与训练启动。（配方启动器 scripts/train/sft.py 与 sft_running_guide 的配方一节见 u7-l5。）"
         },
         {
           "action": "keep",
@@ -334,7 +338,7 @@
           "topic": "讲解仓库的统一消息格式与承载它的数据类型（data_types.py），以及自定义数据如何转换成可被训练脚本消费的格式。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u3-l1"
           ],
@@ -343,25 +347,29 @@
           "learning_goals": [
             "会统计并解读 token 长度分布",
             "掌握数据集变换脚本的用法",
-            "理解 numpy 缓存的生成与复用条件"
+            "理解 numpy 缓存的生成与复用条件",
+            "理解 #2300 新增的 _normalize_tool_call_arguments：SFT/DPO 的 tulu 分词路径先把 JSON 字符串形式的 tool_calls[].function.arguments 解码成映射（null 读作 {}；解码结果不是对象或无法回写为 UTF-8 JSON 的字符串原样保留），added-token 过滤也改读解码后的文本",
+            "理解 DATASET_CACHE_VERSION 从 v9 升到 v10 的原因：缓存哈希感知不到代码行为变化，旧缓存会保留按字符串字面渲染的结果"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "token 统计",
             "数据集变换",
-            "numpy 预编码缓存"
+            "numpy 预编码缓存",
+            "工具调用参数解码与缓存 v10"
           ],
           "order": 2,
-          "practice_task": "对一个小型 SFT 数据集运行 token 统计，画出长度分布；然后用 numpy 转换流程生成缓存目录，对比直接加载与缓存加载的启动耗时。",
+          "practice_task": "对一个小型 SFT 数据集运行 token 统计，画出长度分布；然后用 numpy 转换流程生成缓存目录，对比直接加载与缓存加载的启动耗时；再构造一条 assistant 消息带 tool_calls（arguments 分别为 JSON 字符串与 null）的样本，走 dataset_transformation 的 SFT 行路径（或对照 test_dataset_transformation.py 的新用例），验证模板拿到的 arguments 已是映射、无法解码的字符串未被改写，并解释缓存版本号为何要随之升级。",
           "source_files": [
             "open_instruct/dataset_statistics.py",
             "open_instruct/numpy_dataset_conversion.py",
             "open_instruct/dataset_transformation.py",
             "scripts/data/get_statistics.py",
-            "open_instruct/test_dataset_statistics.py"
+            "open_instruct/test_dataset_statistics.py",
+            "open_instruct/test_dataset_transformation.py"
           ],
           "title": "数据统计、变换与 numpy 缓存",
-          "topic": "讲解 dataset_statistics.py、dataset_transformation.py 与 numpy_dataset_conversion.py：统计 token 分布、变换数据集，以及用 numpy 预编码缓存加速启动。"
+          "topic": "讲解 dataset_statistics.py、dataset_transformation.py 与 numpy_dataset_conversion.py：统计 token 分布、变换数据集，以及用 numpy 预编码缓存加速启动。更新点（#2300）：Arrow 存不下字段类型跨行变化的 struct，故 SFT 数据集把 tool_calls[].function.arguments 存为 JSON 字符串，而 Olmo 3.5 模板的 `| items` 需要映射——dataset_transformation 在 _tokenize_row_or_mask_out（SFT 与 DPO 的 tulu 分词器）渲染前解码这些字符串（null→{}，非对象/含孤立代理字符/超递归深度的原样保留以免破坏原本能渲染的行），added-token 过滤（_non_content_texts）同步读解码后的文本；旧的 sft_tokenize_v1/preference_tokenize_v1/rlvr_tokenize_* 路径仍按存储原样渲染；DATASET_CACHE_VERSION 升至 v10 强制旧缓存失效。"
         },
         {
           "action": "keep",
@@ -916,7 +924,7 @@
             "open_instruct/test_olmo_core_finetune.py"
           ],
           "title": "olmo_core_finetune.py：OLMo-core SFT 入口",
-          "topic": "精读 OLMo-core SFT 入口：numpy 预编码缓存、setup_model、HSDP/FSDP 数据并行配置、打包式数据加载与 TrainerConfig 训练。"
+          "topic": "精读 OLMo-core SFT 入口：numpy 预编码缓存、setup_model、HSDP/FSDP 数据并行配置、打包式数据加载与 TrainerConfig 训练。（基于固定镜像的配方启动器见 u7-l5。）"
         },
         {
           "action": "keep",
@@ -1003,6 +1011,42 @@
           ],
           "title": "MoE checkpoint 导出：OLMoE3/KDA 转 HF 与 chat EOS 列表",
           "topic": "讲解新增的 scripts/train/debug/convert_moe_checkpoint_to_hf.py：把 olmo-core MoE v2（KDA/OLMoE3，A4B）checkpoint 转成 HuggingFace 格式的完整链路——OLMoDDP 融合优化器 .main 权重布局的收集、generation_config.json 默认写入 chat EOS 列表 [100265, 100257]（vLLM OpenAI server 依赖它停止回合）、--eos-token-ids 覆盖、默认 CUDA 校验设备的选择理由，以及 KDA 严格 logit 校验失效、仅本地/WEKA 路径、GDN 混合模型边界等使用告诫。与 u8-l7 的 checkpoint 导出话题互补，但本工具独立于 MILES、属于 scripts/train/debug 下的通用导出脚本。"
+        },
+        {
+          "action": "new",
+          "depends_on": [
+            "u7-l1",
+            "u1-l4"
+          ],
+          "filename": "u7-l5-sft-recipe-launcher.md",
+          "id": "u7-l5",
+          "learning_goals": [
+            "理解配方的运行模型：每个配方固定其运行所用的 Beaker 镜像，训练代码来自镜像而非当前 checkout（无需先构建或提交），重复执行同名 run 会从输出目录最新 checkpoint 无时间戳断点续跑",
+            "会用 `uv run python scripts/train/sft.py --recipe a4b`（与 --dry_run 打印 mason 命令），并说出 c12r 与 a4b 的差异：同一数据缓存/种子/18,410 步，换到 Olmo 3.5 Small hero（A4B MoE）的 4T decay 端点 checkpoint，峰值 LR 7.3e-5 = c12r 的 2e-4 × 两基座预训练 LR 之比（4.04e-4 / 1.1e-3）",
+            "理解 A4B MoE 训练为何必须换镜像：MoE v2（OLMoDDPModel）的 token permutation 依赖 transformer-engine，main 的镜像未安装；--cuda-version 13 --moe 变体在 CUDA 13.3.1 cuDNN 基座上装 transformer-engine 2.16.1，并因 TE 预编译库需要 torch 自带 cuBLAS 缺失的符号而指向系统 cuBLAS、在构建期检查",
+            "掌握 a4b 防OOM 的工程设置：--loss_implementation fused_linear（默认 CE 物化 24.5 GiB logits）、flash_2 注意力（镜像的 FA4 拒绝 SM100 上 head_dim 256）、整块 recompute 且关闭嵌套 attention/MoE checkpoint（#2291：-16% s/step，关整块则 OOM）、关闭 torch.compile、PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True、节点内 --expert_parallel_degree 8、max_seq_length 65536",
+            "会读配方元数据与告诫：cluster=ai2/holmes、nodes=2、timeout 72h、min_runtime 2h15m（首个临时 checkpoint 约 2 小时）、约 7.4 s/step 与 38 小时均为 #2291 300 步外推的估计值、固定镜像仅通过 40 步冒烟（8.20 s/step）、尚无完整训练运行",
+            "理解 tests/test_sft_recipes.py 如何用 --dry_run 断言每个配方的 mason 展开不变量（--image/--num_nodes/--cluster/--max_train_steps/--data_loader_seed/EXPECTED_NUMPY_CACHE/recipe env 逐项 --env 注入、训练命令以 torchrun --nnodes 开头）"
+          ],
+          "level": "intermediate",
+          "minimal_modules": [
+            "配方注册表与 mason 命令拼装",
+            "a4b 配方的数据/优化器/显存设置",
+            "CUDA 13 MoE 镜像变体与 transformer-engine",
+            "配方不变量测试"
+          ],
+          "order": 5,
+          "practice_task": "阅读 scripts/train/sft.py 的 RECIPES 字典与 main 的 mason 参数拼装，画出「本地命令 → 配方展开 → mason 标志（--image/--cluster/--num_nodes/--env/--min_runtime/--timeout 与 -- 后的 torchrun 命令）→ Beaker 任务」流程图；用 --dry_run 打印 a4b 的完整命令（或运行 tests/test_sft_recipes.py），标注哪些参数来自 recipe[\"env\"]、哪些来自 recipe[\"train_args\"]，并解释 EXPECTED_NUMPY_CACHE 与 --extra_numpy_dirs 如何复用 c12r 的冻结缓存；再对照 Dockerfile 的 cuda13-moe 阶段与 olmo_core_utils.require_transformer_engine 的报错文本，回答为什么在默认镜像上启动 a4b 会失败、正确命令是什么；最后列出 a4b 相对 c12r 的五个关键差异并各用一句话说明动机。",
+          "source_files": [
+            "scripts/train/sft.py",
+            "docs/algorithms/sft_running_guide.md",
+            "tests/test_sft_recipes.py",
+            "Dockerfile",
+            "scripts/train/build_image_and_launch.sh",
+            "open_instruct/olmo_core_utils.py"
+          ],
+          "title": "SFT 配方启动器：scripts/train/sft.py、A4B 配方与 CUDA 13 MoE 镜像",
+          "topic": "讲解 #2296/#2298 打通的 MoE v2 SFT 路线：scripts/train/sft.py 的配方系统（c12r 与新增 a4b）——配方固定其运行所用的 Beaker 镜像、断点续跑无时间戳、--dry_run 展开 mason 命令；a4b（OLMo 3.5 Small/A4B MoE）配方的关键设置（2×8 B300 holmes、节点内 EP8、fused_linear CE、flash_2、整块 recompute、expandable_segments、LR 7.3e-5 推导、冒烟状态与速度为估计值的告诫）；以及配套的 CUDA 13 MoE 镜像变体（Dockerfile IMAGE_VARIANT + transformer-engine 2.16.1 + DS_SKIP_CUDA_CHECK + cuBLAS 符号检查、build_image_and_launch.sh --cuda-version 13 --moe、olmo_core_utils.require_transformer_engine 的报错指引、run_gpu_pytest.sh 把 -cuda13-moe 路由到 holmes）与 tests/test_sft_recipes.py 的配方不变量测试。"
         }
       ],
       "level": "intermediate",
@@ -1058,8 +1102,9 @@
             "会用 --set 覆盖与 validate 命令排查配置错误",
             "掌握 prompt_provider=priority 约束（priority 设置要求 provider=priority 且需 rollout_global_dataset）、data.over_length 取值校验，以及 num_epoch/num_rollout 互斥与 save_final_checkpoint 默认策略",
             "掌握此前新增的编译期字段与默认值：core.reward_final_answer_only / reward_reasoning_mode、score-centering 系列参数（loss_type=score_centering、score_centering_is 及 fp32_lm_head 要求）、评估采样默认（temperature 1.0、top_p 0.95、max_response_len 上限 32768）",
-            "掌握本轮维护示例基线的翻转：所有示例改用 token-mean loss（miles.calculate_per_token_loss=true，省略该设置时库默认仍为 response-mean 以兼容既有 run），Tiny 学习示例统一为 256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup，small/dev.toml 占位被实测 B300 配方取代（见 u8-l15）",
-            "掌握本轮 #2289 固化的学习示例 checkpoint 基线：save_interval=10、checkpoint_keep_last=2、checkpoint_keep_every（Tiny node 与 Small 为 50、three-node 为 100）、save_final_checkpoint=true，Small four/eight-node 从禁用保存翻转为启用保存与 auto_resume=true"
+            "掌握维护示例基线的翻转：所有示例改用 token-mean loss（miles.calculate_per_token_loss=true，省略该设置时库默认仍为 response-mean 以兼容既有 run），Tiny 学习示例统一为 256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup，small/dev.toml 占位被实测 B300 配方取代（见 u8-l15）",
+            "掌握 #2289 固化的学习示例 checkpoint 基线：save_interval=10、checkpoint_keep_last=2、checkpoint_keep_every（Tiny node 与 Small 为 50、three-node 为 100）、save_final_checkpoint=true，Small four/eight-node 从禁用保存翻转为启用保存与 auto_resume=true",
+            "掌握本轮 #2297 的编译默认调整：CoreConfig.refresh_request_timeout 从 1800 秒升至 3600 秒——它是整个 refresh 请求（SGLang 排队、解码与刷新暂停）的死线，也是挂起引擎被察觉的时间上限，默认 router 超时 14400 秒高于它"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1069,10 +1114,11 @@
             "priority/over_length/epoch 预算新字段",
             "判分与 score-centering 编译选项",
             "示例基线（token-mean loss 与 Tiny batch/LR）",
-            "示例 checkpoint 基线（有界恢复保存与里程碑）"
+            "示例 checkpoint 基线（有界恢复保存与里程碑）",
+            "refresh_request_timeout 默认值"
           ],
           "order": 2,
-          "practice_task": "复制 configs/miles/examples/tiny/dev.toml（注意其中的 [data] over_length = \"exclude\"、[core] 的 reward_final_answer_only/reward_reasoning_mode，以及本轮改为 true 的 [miles] calculate_per_token_loss），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；同时设置 training.num_epoch 与 num_rollouts 观察互斥报错；再对照 configs/miles/examples/small/two-node-mech.toml 与 docs/miles/development-defaults.md 的「Tiny learning batch and LR」「Loss weighting」条目，观察示例家族划分与 token-mean / batch 2048 / LR 6e-6 新基线，并在 plan 产物中找出评估采样默认值；最后对照 configs/miles/examples/tiny/node.toml、configs/miles/examples/small/four-node.toml 与 configs/miles/examples/README.md 的「Recovery checkpoints and preserved milestones」一节，记录学习示例统一的 checkpoint 基线（save_interval=10、checkpoint_keep_last=2、checkpoint_keep_every 为 50 或 100、save_final_checkpoint=true、Small 的 auto_resume=true），解释 30 更新预算下 10/20/30 保存点与 50 里程碑的关系，以及为何首个完整恢复保存必须落在受保护最短运行时之内。",
+          "practice_task": "复制 configs/miles/examples/tiny/dev.toml（注意其中的 [data] over_length = \"exclude\"、[core] 的 reward_final_answer_only/reward_reasoning_mode，以及本轮改为 true 的 [miles] calculate_per_token_loss），修改模型与数据源字段，运行 validate 与 plan 各一次，故意写错一个字段名观察校验报错信息；再分别做两个实验——把 core.prompt_provider 设为 \"priority\" 但不提供 prompt_priority_field、把 data.over_length 设为非法值——记录 constraints 报错；同时设置 training.num_epoch 与 num_rollouts 观察互斥报错；再对照 configs/miles/examples/small/two-node-mech.toml 与 docs/miles/development-defaults.md 的「Tiny learning batch and LR」「Loss weighting」条目，观察示例家族划分与 token-mean / batch 2048 / LR 6e-6 新基线，并在 plan 产物中找出评估采样默认值；再对照 configs/miles/examples/tiny/node.toml、configs/miles/examples/small/four-node.toml 与 configs/miles/examples/README.md 的「Recovery checkpoints and preserved milestones」一节，记录学习示例统一的 checkpoint 基线（save_interval=10、checkpoint_keep_last=2、checkpoint_keep_every 为 50 或 100、save_final_checkpoint=true、Small 的 auto_resume=true），解释 30 更新预算下 10/20/30 保存点与 50 里程碑的关系，以及为何首个完整恢复保存必须落在受保护最短运行时之内；最后在 open_instruct/miles/configuration/config.py 中找到 refresh_request_timeout 的新默认值与规则注释，运行/阅读 open_instruct/test_miles_throughput.py 的 test_refresh_request_deadline_default，说明高引擎并发下 32K 响应实测可到约 2000 秒、为何默认必须给到 3600 秒。",
           "source_files": [
             "open_instruct/miles/configuration/run_spec.py",
             "open_instruct/miles/configuration/config.py",
@@ -1080,10 +1126,11 @@
             "open_instruct/miles/configuration/score_centering.py",
             "docs/miles/configuration-intro.md",
             "docs/miles/development-defaults.md",
-            "configs/miles/examples/README.md"
+            "configs/miles/examples/README.md",
+            "open_instruct/test_miles_throughput.py"
           ],
           "title": "配置系统：TOML → RunSpec → RunConfig",
-          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；此前更新：priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认，reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束；run_spec.launch_warnings 的 SciCode 参考路径警告分支（详见 u8-l9）。本轮更新一（#2271）：维护示例基线从 per-response 翻转为 token-mean loss（examples README、grpo.md、run-controls、development-defaults 同步），Tiny 学习示例改为 256 prompts × 8 / batch 2048 / 恒定 LR 6e-6，small/dev.toml 占位删除。本轮更新二（#2289）：学习示例统一改为每 10 更新的有界恢复保存（保留最近 2 份 + 50/100 更新永久里程碑 + 最终存档），Small four/eight-node 启用 auto_resume，development-defaults 的 Native checkpoints 条目改写。"
+          "topic": "精读 configuration 包：RunSpec 的加载与编译、CoreConfig/RunConfig 如何编译出参数列表并挂接奖励/数据钩子，constraints 驱动的校验；此前更新：priority 采样相关字段、data.over_length 取值校验、num_epoch 预算与 save_final_checkpoint/wandb_group 编译默认，reward_final_answer_only/reward_reasoning_mode 两个 core 字段、score-centering 参数族（见 u8-l14）、评估采样默认对齐（temperature 1.0 / top_p 0.95 / 32768 上限）以及池优先级与 replay 互斥约束；run_spec.launch_warnings 的 SciCode 参考路径警告分支（详见 u8-l9）。更新一（#2271）：维护示例基线从 per-response 翻转为 token-mean loss（examples README、grpo.md、run-controls、development-defaults 同步），Tiny 学习示例改为 256 prompts × 8 / batch 2048 / 恒定 LR 6e-6，small/dev.toml 占位删除。更新二（#2289）：学习示例统一改为每 10 更新的有界恢复保存（保留最近 2 份 + 50/100 更新永久里程碑 + 最终存档），Small four/eight-node 启用 auto_resume，development-defaults 的 Native checkpoints 条目改写。更新三（#2297）：core.refresh_request_timeout 编译默认 1800→3600 秒（高并发下 32K 响应实测最长约 2000 秒；一次超时会丢弃整组样本），config.py 附规则注释、test_miles_throughput.py 新增默认值断言。"
         },
         {
           "action": "update",
@@ -1100,8 +1147,8 @@
             "理解 driver.train 在分配 worker 之前调用 rewards.validate_registry 的启动期奖励注册表校验",
             "理解 workflow.execute 在模型准备前对 SciCode 参考资产的预校验：占位路径在分配任何 GPU 任务之前被拒绝（详见 u8-l9）",
             "理解终端刷新清理的变化（#2280）：最后一次 refresh 的 core_publication_boundary 无条件 abort，取消未完成的推理收尾工作，避免所有训练更新完成后排空剩余长响应导致超时",
-            "理解本轮 #2293 的边界评估导出顺序：evaluation.mid_rollout_snapshot 在 rollout 边界返回 None（只有优化器循环能捕获中间权重），driver 拥有边界——native checkpoint 到期时已先提交，缺失的边界快照由 driver 经 learner.export_hf 补导，残留的不完整快照以 BACKGROUND EVALUATION GAP 告警",
-            "理解本轮 #2293 新增的恢复宽容键：recovery_configuration_matches 允许已认证 resume 调整 launch.coordination.heartbeat_timeout（运维参数），startup_timeout 与训练设定变更仍被拒绝"
+            "理解 #2293 的边界评估导出顺序：evaluation.mid_rollout_snapshot 在 rollout 边界返回 None（只有优化器循环能捕获中间权重），driver 拥有边界——native checkpoint 到期时已先提交，缺失的边界快照由 driver 经 learner.export_hf 补导，残留的不完整快照以 BACKGROUND EVALUATION GAP 告警",
+            "理解 #2293 新增的恢复宽容键：recovery_configuration_matches 允许已认证 resume 调整 launch.coordination.heartbeat_timeout（运维参数），startup_timeout 与训练设定变更仍被拒绝"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1123,7 +1170,7 @@
             "open_instruct/test_miles_workflow_recovery.py"
           ],
           "title": "工作流与执行：driver、workflow 与集群启动",
-          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；此前更新：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存，driver 新增 rewards.validate_registry 启动校验，workflow.execute 在 run_directory 与模型准备之前新增 evaluation.validate_scicode_reference_path 预检（SciCode 秘密链路详见 u8-l9）；小更新（#2280）：driver 的终端刷新清理改为无条件 abort。本轮更新（#2293）：train_config 的 core_evaluation_snapshot 换为 mid_rollout_snapshot（边界返回 None、由 driver 拥有），driver.train 在 rollout 边界发现快照缺失时经 learner.export_hf 补导、对残留不完整快照告警 BACKGROUND EVALUATION GAP 并重算 collection_snapshots，recovery_configuration_matches 允许 resume 调整心跳耐心值。"
+          "topic": "精读 execution 包：workflow 的准备/训练/导出三阶段与指纹恢复、driver 协调 rollout 与优化器更新、cluster.Supervisor 的受监管启动；此前更新：run 完成判定改用 driver 结果中的 num_rollout，epoch 预算 run 通过 save_final_checkpoint 在最终更新时保存，driver 新增 rewards.validate_registry 启动校验，workflow.execute 在 run_directory 与模型准备之前新增 evaluation.validate_scicode_reference_path 预检（SciCode 秘密链路详见 u8-l9）；小更新（#2280）：driver 的终端刷新清理改为无条件 abort（评估与最终 HF 导出仍保留生成排空边界——这也是 Small 示例把 engine_drain_timeout 放大到 3600 秒的原因，见 u8-l15）。#2293：train_config 的 core_evaluation_snapshot 换为 mid_rollout_snapshot（边界返回 None、由 driver 拥有），driver.train 在 rollout 边界发现快照缺失时经 learner.export_hf 补导、对残留不完整快照告警 BACKGROUND EVALUATION GAP 并重算 collection_snapshots，recovery_configuration_matches 允许 resume 调整心跳耐心值。"
         },
         {
           "action": "keep",
@@ -1363,7 +1410,7 @@
             "tests/miles/test_score_centering.py"
           ],
           "title": "Score centering 训练目标与 Core refresh 集成",
-          "topic": "讲解 MILES 新集成的原生 score-centering 目标：loss_type=\"score_centering\" 经 score_centering.py 的 CPU 预检（FP32 head、GRPO 优势估计、与旧开关互斥、TIS/MIS 参数），run_spec 编译把 off_policy_correction=\"tis\" 映射到原生 TIS 并放宽 refresh 与异步训练的锚定约束，candidate 概率收集要求 rollout_top_logprobs_num >= rollout_top_k；docs/miles/core.md 记录了临时 FP32 资格政策与上游实现链接。"
+          "topic": "讲解 MILES 新集成的原生 score-centering 目标：loss_type=\"score_centering\" 经 score_centering.py 的 CPU 预检（FP32 head、GRPO 优势估计、与旧开关互斥、TIS/MIS 参数），run_spec 编译把 off_policy_correction=\"tis\" 映射到原生 TIS 并放宽 refresh 与异步训练的锚定约束，candidate 概率收集要求 rollout_top_logprobs_num >= rollout_top_k；docs/miles/core.md 记录了临时 FP32 资格政策与上游实现链接。补充（#2309）：三份 Small 维护示例已在 trainer 与 SGLang 两侧默认开启 fp32_lm_head（FP32 词汇头输出，见 docs/miles/core.md 与 u8-l15）——示例侧的开启独立于 score-centering 的 FP32 资格策略，历史计时使用默认头精度。"
         },
         {
           "action": "update",
@@ -1379,7 +1426,7 @@
             "理解推理记录与选择表的 grading 契约隔离：组行携带 grading_policy、input_key 被扩展、选择表 schema 2 与 --grading-policy、跨契约证据被拒绝",
             "理解评估采样对齐：in-loop 评估默认 temperature 1.0 / top-p 0.95 / 响应上限 32768，可用 miles.eval_* 覆盖",
             "理解 SciCode 参考数据的默认秘密链路：SCICODE_H5PY_HOST_PATH 自动注入 evaluation.secrets、占位路径在三个启动边界被拒绝、评估器内解析并校验文件存在、显式路径优先于秘密、失败回执保留可行动诊断",
-            "理解本轮 #2293 的快照职责重划：mid_rollout_snapshot 只在非边界的中段更新返回训练快照（边界返回 None），边界快照由 driver 在 native checkpoint 提交后经 learner.export_hf 导出（evaluation_snapshot_export stage），残留不完整快照告警 BACKGROUND EVALUATION GAP 而非静默丢弃"
+            "理解 #2293 的快照职责重划：mid_rollout_snapshot 只在非边界的中段更新返回训练快照（边界返回 None），边界快照由 driver 在 native checkpoint 提交后经 learner.export_hf 导出（evaluation_snapshot_export stage），残留不完整快照告警 BACKGROUND EVALUATION GAP 而非静默丢弃"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -1405,7 +1452,7 @@
             "configs/miles/examples/tiny/three-node.toml"
           ],
           "title": "后台评估与推理记录",
-          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点一：GradingRecorder 把 grading 契约写入组行并扩展 input_key，record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝，评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限）。更新点二：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密——evaluation.parse 在 scicode 任务未显式给 h5py_host_path 时自动注入默认秘密，validate_scicode_reference_path 以 launch_warnings 计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝占位符路径，evaluation_runner.resolve_scicode_reference 在评估器内部解析秘密并校验文件存在，submit 失败回执保留 InputError 的可行动诊断。更新点三（本轮 #2293）：core_evaluation_snapshot 切换为 mid_rollout_snapshot，中段快照由优化器钩子产生、rollout 边界快照由 driver 拥有并在 native checkpoint 提交后经 learner.export_hf 补导，残留不完整快照以 BACKGROUND EVALUATION GAP 告警。"
+          "topic": "讲解 evaluation 包的 Coordinator 里程碑式 best-effort 评估提交，以及推理记录（每个评分组的逐 prompt 结果）与 record_selection 的筛选分析；更新点一：GradingRecorder 把 grading 契约写入组行并扩展 input_key，record_selection 表升级 schema 2 并新增 --grading-policy，跨契约/legacy 证据被拒绝，评估采样与维护示例对齐（temperature 1.0、top-p 0.95、32768 响应上限）。更新点二：SciCode 参考数据默认使用 SCICODE_H5PY_HOST_PATH Beaker 秘密——evaluation.parse 在 scicode 任务未显式给 h5py_host_path 时自动注入默认秘密，validate_scicode_reference_path 以 launch_warnings 计划警告加 launch.specification / workflow.execute / evaluation.specification 三个启动边界拒绝占位符路径，evaluation_runner.resolve_scicode_reference 在评估器内部解析秘密并校验文件存在，submit 失败回执保留 InputError 的可行动诊断。更新点三（#2293）：core_evaluation_snapshot 切换为 mid_rollout_snapshot，中段快照由优化器钩子产生、rollout 边界快照由 driver 拥有并在 native checkpoint 提交后经 learner.export_hf 补导，残留不完整快照以 BACKGROUND EVALUATION GAP 告警。"
         },
         {
           "action": "update",
@@ -1522,11 +1569,14 @@
           "id": "u8-l15",
           "learning_goals": [
             "会按规模选择 Small 配方：two-node-mech 做 4 更新力学检查（含每更新的 serving 权重比对、保持无 checkpoint），four/eight-node 做 30 更新起步预算布局（自 #2289 起已启用有界恢复保存与自动恢复，可按实测扩展预算），并解释为何 Small 没有单 GPU 训练配方、两节点是其最小已测配置",
-            "理解配方中的关键实测设置：sglang_attention_backend=\"trtllm_mha\"（fa4 在 head_dim=256 上崩溃）、OLMO_SGLANG_CORE_COMPAT=\"rounding\" 的 HF/SGLang 一致性、R=96 准入参数组（sglang_max_running_requests/sglang_max_mamba_cache_size/sglang_server_concurrency/sglang_cuda_graph_max_bs_decode/async_max_concurrent_samples=96×引擎数）的联动",
+            "理解配方中的关键实测设置：sglang_attention_backend=\"trtllm_mha\"（fa4 在 head_dim=256 上崩溃）、OLMO_SGLANG_CORE_COMPAT=\"rounding\" 的 HF/SGLang 一致性，以及 #2290 后 four-node hero 的 R=224 准入参数组联动（sglang_max_running_requests=224、sglang_max_mamba_cache_size=256、sglang_server_concurrency=448、sglang_cuda_graph_max_bs_decode=224、async_max_concurrent_samples=224×23=5152、mem_fraction_static=0.92）与省略 sglang_max_total_tokens 时的定容规则（RunSpec 上限 R×max_context_length=7,798,784 高于显存可容纳的 3,919,232 token，故按显存定容、KV 峰值 71%）；eight-node 保持 R=96（R>96 在 8 节点未测）",
             "掌握 fused-MoE tile 调优的分发机制：configs/miles 随镜像拷贝到 /opt/core-rl/configs/miles、SGLANG_MOE_CONFIG_DIR 指向 moe_configs、目录名必须匹配镜像的 Triton 版本（triton_3_7_1）、_down 文件缺失时复用 tile 的行为，以及实测收益（kernel -9% @batch 96、decode +1.6% @R=96）",
-            "会读 olmo35-small.md 的显存账目（trainer EP8 峰值 220.5 GiB、2×EP8 169.7 GiB；engine 权重 135 GB + KDA 状态 17.9 GB + KV 63.8 GB 的分解）与吞吐审计表（cycle 从 generation_wait.started_unix 到 publication 结束、每列独立中位数），并理解历史计时用 batch 1024/LR 1e-6/response-mean 且未启用 code grading 的告诫",
+            "会读 olmo35-small.md 的显存账目（trainer EP8 峰值 220.5 GiB、2×EP8 169.7 GiB；engine 权重 135 GB + KDA 状态 + KV 池的分解，含 R=160 与 R=224 两档引擎明细）与吞吐审计表（cycle 从 generation_wait.started_unix 到 publication 结束、每列独立中位数、均值与中位数分列），并理解历史计时用 batch 1024/LR 1e-6/response-mean、未启用 code grading 且使用默认头精度的告诫",
             "理解全部维护示例共享的 Tiny 学习基线（256 prompts × 8、batch 2048、恒定 LR 6e-6 无 warmup、token-mean loss）：LR/batch 探索用的是 response-mean，保留 token-mean 是工程选择而非联合最优",
             "掌握 #2289/#2293 固化的恢复与心跳设置：four/eight-node 为 save_interval=10、checkpoint_keep_last=2、checkpoint_keep_every=50、save_final_checkpoint=true 且 auto_resume=true（30 更新预算在 10/20/30 保存、50 里程碑为扩展预留），two-node-mech 保持无 checkpoint，三份配方 heartbeat_timeout 120→480",
+            "掌握 #2290/#2297 的超时对齐：four/eight-node 的 core.refresh_request_timeout 与 engine_drain_timeout 均设 3600 秒（库默认 refresh_request_timeout 也已升至 3600，见 u8-l2）——高准入下单请求解码变慢（R=160/224/256 约 21.9/18.7/17.5 tok/s），32K 响应需约 1750-1870 秒，默认 1800 秒会整组（8 样本）超时丢弃；终端刷新清理会取消未用生成，但评估与最终 HF 导出仍走生成排空边界，故 engine_drain_timeout 同步放大",
+            "会读高准入吞吐结论与风险注记：r224-t3600 在 batch 1024 下 212 s/update 均值（R=160 为 243，-13%；R=96 中位 302，约 -31%；R=224 配默认 1800 秒超时为 401 秒均值、883 次整组超时），R=256 填满 KV 池（100%、51 次 retraction）并中止；最长（≥30K token）样本在 policy lag 8-10（中位 9）完成、逼近 max_policy_lag=12，batch 2048 需重测；train/ppo_kl 恒为 0 是 use_rollout_logprobs=false + refresh 每 collection 一步优化器的预期，train_rollout_logprob_abs_diff 非零（约 0.008-0.010）不能替代同权重一致性检查；r224-t3600 为单次无种子重复的运行，且在 pre-#2280 镜像上最终排空仍以退出码 1 结束",
+            "理解 #2309 的 FP32 词汇头：三份示例在 trainer 与 SGLang 两侧均开启 fp32_lm_head=true，历史计时与 H253 LR 对比使用默认头精度（见 u8-l14）",
             "会用 examples README 的「Recovery checkpoints and preserved milestones」策略做启动预算：按实测每更新墙钟时间选间隔（目标约 1-2 小时，Tiny seed17 约 5-7 分钟/更新）、确认首个完整恢复保存落在受保护最短运行时内、恢复后核对完成清单/最新指针/数据游标哈希与优化器计数"
           ],
           "level": "advanced",
@@ -1535,10 +1585,12 @@
             "显存账目与关键引擎设置",
             "fused-MoE tile 调优与镜像分发",
             "吞吐审计与配方对齐告诫",
-            "有界恢复保存、里程碑与心跳超时"
+            "高准入超时与吞吐结论（R=224 hero）",
+            "有界恢复保存、里程碑与心跳超时",
+            "FP32 词汇头"
           ],
           "order": 15,
-          "practice_task": "对照 docs/miles/olmo35-small.md 的 Layout and memory 表，为三档 Small 配方各写一份 GPU 分配摘要（trainer EP 划分、引擎数、裁判模型、每配方请求的受保护时长）；再对 configs/miles/examples/small/two-node-mech.toml 运行或阅读 plan 输出，找出 R=96 准入联动的五个参数并解释它们为何要成组设置；然后追踪 SGLANG_MOE_CONFIG_DIR 从 configs/miles/moe_configs/README.md 到镜像内 /opt/core-rl/configs/miles 的拷贝链路，回答「pinned Triton 升级后 tile 文件为何可能失效」与「_down 文件缺失时 SGLang 如何退化」；再对照 configs/miles/examples/README.md 的 Recipe alignment 说明，解释当前配方（batch 2048/LR 6e-6/token-mean）与历史计时（batch 1024/LR 1e-6/response-mean、未启用 code grading）的差异为何要求重测吞吐而不是直接沿用旧数字；最后对照 olmo35-small.md 新增的「Checkpoint settings in the current starters」一节与 README 的恢复策略表，写出自 #2289 起 four/eight-node 的保存点序列（30 更新预算下的 10/20/30）与 50 里程碑的意义，解释 heartbeat_timeout=480 与 auto_resume=true 组合下断点续跑的预期行为，以及为何历史计时数字不含保存开销、不能直接用作当前配方的 checkpoint 预测。",
+          "practice_task": "对照 docs/miles/olmo35-small.md 的 Layout and memory 表，为三档 Small 配方各写一份 GPU 分配摘要（trainer EP 划分、引擎数、裁判模型、每配方请求的受保护时长）；再对 configs/miles/examples/small/four-node.toml 运行或阅读 plan 输出，找出 R=224 准入联动的参数组（sglang_max_running_requests/sglang_max_mamba_cache_size/sglang_server_concurrency/sglang_cuda_graph_max_bs_decode/async_max_concurrent_samples/sglang_mem_fraction_static）并解释它们为何要成组设置、为何可以省略 sglang_max_total_tokens（对照 RunSpec 的 R×context 封顶规则与显存定容）；对照 eight-node.toml 说明它为何停在 R=96 却同样设置 3600 秒超时；然后对照 docs/miles/olmo35-small.md 的「Request timeout at high admission」一节与吞吐审计表，解释 R=224 在默认 1800 秒超时下为何反而更慢（401 s/update 均值、883 次整组超时、R=256 填满 KV 池）、3600 秒修复后 212 s/update 的代价与剩余风险（policy lag 8-10 vs max 12、单次运行、最终排空退出码 1），以及 ppo_kl 恒零与 train_rollout_logprob_abs_diff 非零各自说明什么；再追踪 SGLANG_MOE_CONFIG_DIR 从 configs/miles/moe_configs/README.md 到镜像内 /opt/core-rl/configs/miles 的拷贝链路，回答「pinned Triton 升级后 tile 文件为何可能失效」与「_down 文件缺失时 SGLang 如何退化」；再对照 configs/miles/examples/README.md 的 Recipe alignment 说明，解释当前配方（batch 2048/LR 6e-6/token-mean）与历史计时（batch 1024/LR 1e-6/response-mean、未启用 code grading、默认头精度）的差异为何要求重测吞吐而不是直接沿用旧数字；最后对照 olmo35-small.md 的「Checkpoint settings in the current starters」一节与 README 的恢复策略表，写出自 #2289 起 four/eight-node 的保存点序列（30 更新预算下的 10/20/30）与 50 里程碑的意义，解释 heartbeat_timeout=480、refresh_request_timeout=3600、engine_drain_timeout=3600 与 auto_resume=true 组合下断点续跑的预期行为，以及为何历史计时数字不含保存开销、不能直接用作当前配方的 checkpoint 预测。",
           "source_files": [
             "docs/miles/olmo35-small.md",
             "configs/miles/examples/README.md",
@@ -1549,7 +1601,7 @@
             "docs/miles/models-and-checkpoints.md"
           ],
           "title": "B300 实测配方：OLMo 3.5 Small 布局、MoE tile 调优与吞吐审计",
-          "topic": "讲解 #2280/#2271 新增的实测配方体系：configs/miles/examples/small/ 的 two-node-mech/four-node/eight-node 三个 OLMo 3.5 Small（A4B，KDA+256 专家 MoE）B300 布局（8/8/16 训练 GPU、7/23/47 推理引擎、1 个 Qwen3-32B 裁判）、docs/miles/olmo35-small.md 的显存账目与从 Beaker 工件独立重算的吞吐审计、configs/miles/moe_configs/ 的 SGLang fused-MoE tile 调优（E=256,N=3072，SGLang tuner 生成、随镜像分发、目录名匹配 Triton 版本），以及所有维护示例统一采用的 Tiny 学习基线（batch 2048、恒定 LR 6e-6、token-mean loss）；同时记录 CODE_EXECUTION_TOKEN 占位秘密与 fa4 崩溃等失败/告诫条目。本轮补充（#2289/#2293）：four/eight-node 启用每 10 更新的有界恢复保存（保留 2 份 + 50 更新里程碑 + 最终存档 + auto_resume，olmo35-small.md 新增「Checkpoint settings in the current starters」一节），examples README 新增共享恢复策略「Recovery checkpoints and preserved milestones」，三份配方心跳超时升至 480 秒，历史计时不含保存开销的告诫同步更新。"
+          "topic": "讲解 #2280/#2271 新增的实测配方体系：configs/miles/examples/small/ 的 two-node-mech/four-node/eight-node 三个 OLMo 3.5 Small（A4B，KDA+256 专家 MoE）B300 布局（8/8/16 训练 GPU、7/23/47 推理引擎、1 个 Qwen3-32B 裁判）、docs/miles/olmo35-small.md 的显存账目与从 Beaker 工件独立重算的吞吐审计、configs/miles/moe_configs/ 的 SGLang fused-MoE tile 调优（E=256,N=3072，SGLang tuner 生成、随镜像分发、目录名匹配 Triton 版本），以及所有维护示例统一采用的 Tiny 学习基线（batch 2048、恒定 LR 6e-6、token-mean loss）；同时记录 CODE_EXECUTION_TOKEN 占位秘密与 fa4 崩溃等失败/告诫条目。#2289/#2293：four/eight-node 启用每 10 更新的有界恢复保存（保留 2 份 + 50 更新里程碑 + 最终存档 + auto_resume，olmo35-small.md 新增「Checkpoint settings in the current starters」一节），examples README 新增共享恢复策略「Recovery checkpoints and preserved milestones」，三份配方心跳超时升至 480 秒。本轮再补充（#2290/#2297/#2309）：four-node hero 升至 R=224 准入 + 3600 秒请求与排空超时（batch 1024 下 212 s/update，-13% vs R=160、约 -31% vs R=96；R=224 配默认 1800 秒超时 401 s/update、R=256 填满 KV 池失败），olmo35-small.md 新增「Request timeout at high admission」一节（高准入下每请求解码变慢、一次超时丢弃整组 8 样本）与 ppo_kl 恒零/abs-diff 非零的指标注记，eight-node 保持 R=96 但同样设置 3600 秒超时，三份示例在 trainer 与 SGLang 两侧开启 fp32_lm_head（FP32 词汇头输出）。"
         }
       ],
       "level": "advanced",
@@ -1586,7 +1638,7 @@
             "docs/get_started/ai2_internal_setup.md"
           ],
           "title": "mason.py 与 Beaker 任务启动",
-          "topic": "精读 mason.py：命令解析（-- 分隔）、make_internal_command 的环境与数据集注入、make_task_spec 的任务规格组装与重试退避提交。"
+          "topic": "精读 mason.py：命令解析（-- 分隔）、make_internal_command 的环境与数据集注入、make_task_spec 的任务规格组装与重试退避提交。（基于 mason 的 SFT 配方启动器见 u7-l5。）"
         },
         {
           "action": "keep",
@@ -1619,7 +1671,7 @@
           "topic": "讲解三套配置如何配合：ds_configs 的 ZeRO 分级与 offload、train_configs 的超参数预设、beaker_configs 的集群与节点设置。"
         },
         {
-          "action": "keep",
+          "action": "update",
           "depends_on": [
             "u1-l2"
           ],
@@ -1628,24 +1680,27 @@
           "learning_goals": [
             "掌握单测优先的开发与验证循环",
             "理解 GPU 测试的触发条件与记录方式",
-            "能按贡献规范提交一个合规 PR"
+            "能按贡献规范提交一个合规 PR",
+            "理解 GPU 测试镜像路由的扩展：run_gpu_pytest.sh 把 *-cuda13 与 *-cuda13-moe 镜像都路由到 ai2/holmes（CUDA 13 集群），以及 CLAUDE.md 中 MoE v2（OLMoDDPModel）模型需 --cuda-version 13 --moe 镜像的启动约定"
           ],
           "level": "advanced",
           "minimal_modules": [
             "测试布局",
             "风格与类型检查",
-            "贡献约定"
+            "贡献约定",
+            "GPU 测试镜像路由"
           ],
           "order": 3,
-          "practice_task": "为你新增的验证器/回调补一个单测（模仿相邻 test 文件的结构），运行 `uv run pytest <该文件>` 与 `make quality` 直到全部通过。",
+          "practice_task": "为你新增的验证器/回调补一个单测（模仿相邻 test 文件的结构），运行 `uv run pytest <该文件>` 与 `make quality` 直到全部通过；再阅读 scripts/test/run_gpu_pytest.sh 的镜像名分支与 CLAUDE.md 的启动条目，说明一个 -cuda13-moe 镜像的 GPU 测试会落在哪个集群、为什么旧的 *-cuda13 匹配会把它误路由到 CUDA 12 集群。",
           "source_files": [
             "Makefile",
             "CONTRIBUTING.md",
             "CLAUDE.md",
-            "pyproject.toml"
+            "pyproject.toml",
+            "scripts/test/run_gpu_pytest.sh"
           ],
           "title": "测试体系与贡献流程",
-          "topic": "讲解仓库的测试组织（与代码同目录的 test_* 与 tests/、GPU 测试脚本）、ruff/ty 风格检查、pre-commit 与 CHANGELOG/PR 约定。"
+          "topic": "讲解仓库的测试组织（与代码同目录的 test_* 与 tests/、GPU 测试脚本）、ruff/ty 风格检查、pre-commit 与 CHANGELOG/PR 约定。更新点（#2298）：CLAUDE.md 启动简写加入 --moe 变体（MoE v2 模型如 Olmo 3.5 Small 需要 --cuda-version 13 --moe 的 transformer-engine 镜像）；run_gpu_pytest.sh 的镜像名匹配从 *-cuda13 扩展到 *-cuda13|*-cuda13-moe，使 MoE 镜像的 GPU 测试落在 CUDA 13 集群 holmes。"
         },
         {
           "action": "keep",

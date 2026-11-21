@@ -4,562 +4,514 @@
 
 学完本讲，你应该能够：
 
-1. 说出 DDP、FSDP、HSDP 三种数据并行在「参数放哪里、优化器状态放哪里、梯度用什么集合通信聚合」上的本质差异，并会算三种方案的显存与通信账。
-2. 读懂 `DataParallelConfig` / `TransformerDataParallelConfig` 的每个字段，特别是 HSDP 的 `num_replicas`（副本数）与 `shard_degree`（分片度）如何从 world size 推导（默认每节点一副本）。
-3. 跟踪 `build_world_mesh()` 如何把总 world size 逐级切分出 DP 维，HSDP 又如何把 DP 拆成 `dp_replicate × dp_shard` 两个 mesh 维度；并区分 `get_dp_model_mesh()`（给 DDP/FSDP 包装用）与 `get_dp_mesh()`（给数据加载用）。
-4. 精读 `parallelize_model()` 中 FSDP/DDP 的应用代码，理解 FSDP 的包裹策略（wrapping strategy，等价于 FSDP1 时代的 wrap policy）与 `fully_shard` 的落点。
-5. 理解「梯度只在最后一个 micro-batch 同步」这一跨模块约定在 FSDP（`set_is_last_backward` / `set_requires_all_reduce`）与 DDP（`no_sync()`）两侧分别如何实现。
-6. 了解 `OLMoDDPTrainModule`（融合 MoE-v2 路线）对 `dp_config` 的特殊约束，以及 `use_reduce_scatter` 如何把普通参数梯度直接归约进分布式优化器分片。
-
-本讲承接 u6-l2：那里我们知道了并行配置全部挂在 `TransformerTrainModuleConfig` 上、`parallelize_model()` 以固定顺序改造模型（PP→FP8→CP→TP→EP→激活检查点→compile→**DP**→初始化权重）；本讲就打开其中的「DP」这一步。
+1. 说出 DDP、FSDP、HSDP 三种数据并行方式在「参数放在哪里、梯度怎么同步」上的本质差异。
+2. 看懂 `DataParallelConfig` / `TransformerDataParallelConfig` 的每个字段，并知道改一个 `name` 枚举值会如何改变整条并行化链路。
+3. 理解 `build_world_mesh` 如何把世界进程组组织成 `DeviceMesh`，HSDP 为什么会产生 `dp_replicate × dp_shard` 两个维度。
+4. 跟踪 `parallelize_model` → `Transformer.apply_fsdp` / `apply_ddp` 这条把并行策略「贴」到模型上的调用链。
+5. 解释梯度累积时梯度同步的时机控制：`no_sync()`、`set_is_last_backward()`、`set_requires_all_reduce()`。
+6. 在 CPU 上用 gloo 后端实际跑一个双进程网格实验，验证你对 mesh 结构的预测。
 
 ## 2. 前置知识
 
-- **rank 与 world size**：`torchrun` 拉起的每个进程是一个 rank，进程总数是 world size。rank 之间通过进程组（process group）通信，底层后端常用 NCCL（GPU）或 gloo（CPU）。
-- **DeviceMesh（设备网格）**：PyTorch 提供的多维 rank 网格。例如 8 个 rank 可以摆成 `(2, 4)` 的二维网格，每个维度各自对应一个进程组。OLMo-core 用 mesh 维度名字（`dp`、`tp`、`pp`……）标记每一维的含义。
-- **数据并行的直觉**：每个 rank 拿到**不同的** batch，各自前向反向算出本地梯度；因为要更新的是「同一个」模型，各 rank 的梯度必须聚合成一致的平均梯度。聚合用的集合通信原语主要是：
-  - **all-reduce**：所有 rank 各出一个梯度张量，结束后所有 rank 都拿到逐元素和（或平均）——DDP 的做法；
-  - **reduce-scatter**：聚合之后不在每个 rank 上放完整结果，而是把结果**切成 D 份、每个 rank 只拿自己那份**——FSDP 的做法；
-  - **all-gather**：每个 rank 各持一片，拼出完整张量发给所有人——FSDP 前向时临时物化整层参数用的就是它。
-- **梯度累积（micro-batch）**：承接 u6-l2——一个 batch 按 `rank_microbatch_size` 切成多个 micro-batch 逐个前向反向，梯度在本地累加，最后一步才同步。
-- **混合精度的两个 dtype**：`param_dtype` 是前向/反向时参数的 dtype（如 bf16），`reduce_dtype` 是梯度归约时的 dtype（通常 fp32，避免低精度累加误差）。
-- **ZeRO 直觉**：优化器状态（AdamW 的一阶/二阶动量）通常是参数量的 2 倍，把它们也切到各 rank（每 rank 只为 1/D 的参数维护动量）就是 ZeRO 思想；FSDP 天然做到这一点。
+### 2.1 数据并行的直觉
+
+最朴素的加速思路：把同一个模型复制 N 份，每份喂不同的数据，各自算梯度，再把梯度「平均」之后各自更新。这就是 **DDP（Distributed Data Parallel）**。它的问题是：每个进程都持有一份**完整的参数和优化器状态**。模型一大，单卡就装不下了。
+
+**FSDP（Fully Sharded Data Parallel）** 的思路是：参数、梯度、优化器状态都按进程**切片（shard）**保存，每个进程只存 1/N；前向时用 all-gather 临时拼出完整参数，用完立刻丢回分片状态；反向时再 all-gather 一次，算完梯度后用 reduce-scatter 把梯度归约并直接切成每进程一份。显存省了，代价是通信量变大、流水线更复杂。
+
+**HSDP（Hybrid Sharded Data Parallel）** 是两者的折中：把 N 个进程划分成 R 个「副本组」，每组内 S 个进程做分片（R × S = N）。参数只在组内切片，组间保持完整副本。分片带来的显存收益只除以 S 而不是 N，但通信被拆成两个更小的子组集合通信。
+
+### 2.2 三种集合通信原语
+
+| 原语 | 作用 | 在数据并行中的角色 |
+|---|---|---|
+| all-reduce | 所有进程得到同一份求和结果 | DDP 归约梯度；HSDP 副本维归约 |
+| reduce-scatter | 求和后按进程切分，每进程只拿自己那片 | FSDP 把归约和分片一步完成 |
+| all-gather | 每个进程拼出完整张量 | FSDP 前向/反向临时物化参数 |
+
+### 2.3 DeviceMesh 与进程组
+
+PyTorch 的 `DeviceMesh` 是一个带名字的多维进程网格，例如形状 `(dp=2, tp=4)` 的 mesh 表示 8 个进程被组织成 2×4 的矩阵。mesh 的每个维度背后都对应一个**进程组（process group）**，集合通信就在这个子进程组内进行。本讲会看到 OLMo-core 如何用一个 mesh 维度布局表达 FSDP/HSDP。
+
+### 2.4 与前一讲的衔接
+
+u6-l2 已经讲过：`TransformerTrainModuleConfig` 上挂着 DP/TP/CP/EP/PP 六套并行配置，且并行化必须发生在**模型 build 之后、优化器 build 之前**——因为优化器要看到「已经被分片/复制」的参数，才能产生对应形态的优化器状态。本讲就打开 DP 这一路的完整实现。
 
 ## 3. 本讲源码地图
 
 | 文件 | 作用 |
-| --- | --- |
-| [src/olmo_core/distributed/parallel/data_parallel.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L1-L81) | `DataParallelType` 枚举（fsdp/hsdp/ddp）与 `DataParallelConfig` 配置类，HSDP 的副本/分片度推导 |
-| [src/olmo_core/distributed/parallel/__init__.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L1-L615) | `build_world_mesh()` 世界网格构建、`get_dp_model_mesh()` / `get_dp_mesh()` / `get_dp_process_group()` 子网格提取 |
-| [src/olmo_core/train/train_module/transformer/config.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L227-L268) | `TransformerDataParallelConfig`（FSDP 包裹策略、fp32 梯度归约等 transformer 专属字段）与 `TransformerTrainModuleConfig.dp_config` 字段 |
-| [src/olmo_core/train/train_module/transformer/common.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L34-L158) | `parallelize_model()`：按 dp_config 选择 `apply_fsdp()` 或 `apply_ddp()` 包裹模型 |
-| [src/olmo_core/nn/transformer/model.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1174-L1283) | `Transformer.apply_fsdp()`（fully_shard 落点）与 `Transformer.apply_ddp()`（replicate 落点） |
-| [src/olmo_core/nn/transformer/block.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/block.py#L221-L236) | `TransformerBlock.apply_fsdp()`：fine_grained 包裹策略在 block 内部的落点 |
-| [src/olmo_core/nn/transformer/config.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L42-L60) | `TransformerDataParallelWrappingStrategy` 枚举（full / blocks / fine_grained） |
-| [src/olmo_core/train/train_module/transformer/train_module.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L98-L729) | `TransformerTrainModule`：mesh 构建、micro-batch 梯度同步时机（`no_sync` 等）、FSDP 感知的梯度裁剪 |
-| [src/olmo_core/train/train_module/transformer/ddp_train_module.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L146-L409) | `OLMoDDPTrainModule`：融合 MoE-v2 模型的 DDP 训练模块（分布式优化器路线） |
-| [src/test/distributed/parallel/parallel_test.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L30-L160) | mesh 构建的参数化测试（CPU + gloo 可跑），本讲实践的主要依据 |
-| [src/olmo_core/testing/distributed.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/testing/distributed.py#L111-L147) | `run_distributed_test()`：单机多进程模拟分布式环境的测试工具 |
+|---|---|
+| `src/olmo_core/distributed/parallel/data_parallel.py` | `DataParallelType` 枚举、`DataParallelConfig` 基类、HSDP 的副本/分片度分解 |
+| `src/olmo_core/distributed/parallel/__init__.py` | `build_world_mesh`（把世界进程组组织成多维 mesh）与 `get_dp_model_mesh` / `get_dp_mesh` 等子网格取用函数 |
+| `src/olmo_core/train/train_module/transformer/config.py` | `TransformerDataParallelConfig`（DP 配置的 transformer 特化）与 `TransformerTrainModuleConfig.dp_config` 字段 |
+| `src/olmo_core/train/train_module/transformer/common.py` | `parallelize_model()`：按固定顺序应用各种并行策略，DP 分支在这里分发到 FSDP 或 DDP |
+| `src/olmo_core/nn/transformer/model.py` | `Transformer.apply_fsdp()` / `apply_ddp()`：把分片/复制真正贴到模型上 |
+| `src/olmo_core/nn/transformer/block.py` | `TransformerBlock.apply_fsdp()`：FSDP 的逐层 wrap 策略 |
+| `src/olmo_core/nn/transformer/config.py` | `TransformerDataParallelWrappingStrategy` 枚举（full / blocks / fine_grained） |
+| `src/olmo_core/train/train_module/transformer/train_module.py` | 训练模块里 DP 的两个关键点：mesh 构建、梯度同步时机（`_train_microbatch_context`） |
+| `src/olmo_core/train/train_module/transformer/ddp_train_module.py` | `OLMoDDPTrainModule`：MoE-v2 融合优化器路径的专用 train module，强制要求 `name="ddp"` |
+| `src/test/distributed/parallel/parallel_test.py` | CPU（gloo）可跑的 mesh 结构测试，本讲实践的依据 |
+| `src/olmo_core/testing/distributed.py` | `run_distributed_test`：多进程模拟分布式环境的测试工具 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 DataParallelConfig：三种数据并行的统一入口
+### 4.1 DataParallelConfig：一个枚举决定参数怎么放
 
 #### 4.1.1 概念说明
 
-「数据并行」这个词只约定了一件事：**各 rank 吃不同的数据，模型按同一种方式组织**。至于参数、梯度和优化器状态摆在哪里、梯度用什么集合通信聚合，有三种经典答案，OLMo-core 用一个三值枚举 `DataParallelType` 表达：
+`DataParallelConfig` 是所有数据并行策略的统一入口。它只回答两个问题：
 
-| 类型 | 参数存放 | 梯度聚合 | 优化器状态 | 每卡显存（相对量） |
-| --- | --- | --- | --- | --- |
-| `ddp` | 每卡完整复制 | 反向 all-reduce | 每卡完整 | \( 4P \) |
-| `fsdp` | 全部 rank 切成 D 片 | reduce-scatter 直接入分片 | 切片（1/D） | \( 4P/D \) |
-| `hsdp` | R 个副本组、每组内 S 片 | 组内 reduce-scatter + 组间 all-reduce | 组内切片（1/S） | \( 4P/S \) |
+1. **用哪种策略**（`name`: `fsdp` / `hsdp` / `ddp`）；
+2. **HSDP 怎么分组**（`num_replicas` 与 `shard_degree`，二者共同决定 R × S 的划分）。
 
-其中 \( P \) 是参数元素总量（按 fp32 计），\( 4P = P_{\text{参数}} + P_{\text{梯度}} + 2P_{\text{AdamW动量}} \)，\( D \) 是数据并行 world size，HSDP 满足 \( D = R \times S \)（R 份副本、每份 S 卡分片）。
-
-为什么需要 FSDP/HSDP？DDP 每卡都放全量参数 + 全量 AdamW 动量，模型一大（如 32B）单卡根本放不下。FSDP 把参数、梯度、动量全部切片，代价是前向/反向要 all-gather 临时拼出整层参数。HSDP（Hybrid Sharded Data Parallel，混合分片）是两者的折中：**只在组内（通常是一个节点内）分片，组间保持复制**——all-gather/reduce-scatter 只在节点内高速互连（NVLink）上做，跨节点只做副本间的 all-reduce。
+外加两个精度旋钮：`param_dtype`（参数物化时的 dtype，例如 bf16）与 `reduce_dtype`（梯度归约时的 dtype，默认 fp32 保证数值稳定）。
 
 #### 4.1.2 核心流程
 
-`DataParallelConfig` 的消费流程：
-
-1. 用户在 `TransformerTrainModuleConfig.dp_config` 上填一个 `TransformerDataParallelConfig(name=...)`（继承自 `DataParallelConfig`）。
-2. `build_world_mesh(dp=dp_config, ...)` 据此决定 mesh 中 DP 维的形状（HSDP 拆两维，见 4.2）。
-3. `parallelize_model()` 据此选择 `apply_fsdp()`（fsdp/hsdp 共用）或 `apply_ddp()`（见 4.3/4.4）。
-
-HSDP 度数推导规则（`get_replicate_and_shard_degree`）：
-
 ```text
-输入: dp_world_size (D)
-若 num_replicas 和 shard_degree 都没给:
-    num_replicas  = 节点数          # 默认每节点一副本
-    shard_degree  = D // 节点数     # 每节点内的 GPU 数
-若都给了:  校验 D 能被两者整除后直接使用
-若只给 num_replicas: shard_degree = D // num_replicas
-若只给 shard_degree: num_replicas = D // shard_degree
-约束: num_replicas × shard_degree == D
+DataParallelConfig(name=..., num_replicas=R?, shard_degree=S?)
+        │
+        ├── name == "fsdp" / "ddp"：整条 DP 维是一个一维网格，无需分解
+        └── name == "hsdp"：调用 get_replicate_and_shard_degree(dp_world_size)
+                ├── 两者都为 None → 默认：每个节点一个副本
+                │       num_replicas = 节点数, shard_degree = 每节点 GPU 数
+                ├── 只给 num_replicas → shard_degree = dp_world_size // num_replicas
+                ├── 只给 shard_degree → num_replicas = dp_world_size // shard_degree
+                └── 都给 → 校验 dp_world_size 必须能被两者整除
 ```
+
+注意默认规则的设计意图：**HSDP 默认把「分片」限制在单节点内部**（节点内 NVLink 带宽高，适合频繁的 all-gather/reduce-scatter），「副本」按节点复制（节点间走较慢的网络，只做一次 all-reduce）。
 
 #### 4.1.3 源码精读
 
-三种类型定义在一个三值 StrEnum 里（承接 u2-l1：StrEnum 可被 Config 系统直接序列化）：
+先看枚举与网格维度名（HSDP 会用到的两个维度名就定义在这里）：
 
-[data_parallel.py:L27-L30](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L27-L30) —— 定义 `fsdp` / `hsdp` / `ddp` 三个取值。
+[data_parallel.py:L12-L30](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L12-L30)
+上面定义了 `DPMeshDimName`（`dp_replicate` = 模型被复制的维度，`dp_shard` = 模型被切片的维度）和 `DataParallelType`（`fsdp` / `hsdp` / `ddp` 三个取值）。
 
-[data_parallel.py:L33-L39](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L33-L39) —— `DataParallelConfig` 的五个字段：`name`（必填，选类型）、`param_dtype`（前向/反向参数精度，None 表示沿用模型当前 dtype）、`reduce_dtype`（梯度归约精度，默认 fp32）、`num_replicas` 与 `shard_degree`（仅 HSDP 使用，见下）。
+[data_parallel.py:L33-L39](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L33-L39)
+`DataParallelConfig` 的五个字段：`name` 必填；`param_dtype` 默认 `None`（沿用模型当前 dtype）；`reduce_dtype` 默认 `float32`；`num_replicas` / `shard_degree` 默认都为 `None`（交给自动分解）。
 
-[data_parallel.py:L41-L63](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L41-L63) —— `get_replicate_and_shard_degree()`：HSDP 度数推导的全部逻辑。注意注释写明的默认值：**一个节点一份副本，shard degree 等于每节点 GPU 数**。这个默认值隐含了「节点内 NVLink 快、节点间网络慢」的拓扑假设。
+[data_parallel.py:L41-L63](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L41-L63)
+`get_replicate_and_shard_degree()` 按上面流程图的四种组合计算 (num_replicas, shard_degree)。都为 None 时依赖 `get_num_nodes()`。
 
-节点数怎么来？[distributed/utils.py:L338-L353](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/utils.py#L338-L353) —— `get_num_nodes()` 优先读 `NUM_NODES` 环境变量，否则用 world size 除以 local world size；**未初始化分布式时恒返回 1**（所以单机测试里 HSDP 默认退化为「1 副本 × D 分片」，即纯 FSDP 形状）。
+[distributed/utils.py:L338-L353](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/utils.py#L338-L353)
+`get_num_nodes()`：优先读 `NUM_NODES` 环境变量，否则用 `world_size // local_world_size` 推断；**未初始化分布式时恒返回 1**——这就是后面实践中「单进程下默认分解为 (1, N)」的原因。
 
-[data_parallel.py:L66-L81](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L66-L81) —— 两个私有校验函数：`dp_world_size` 必须能被 `num_replicas` / `shard_degree` 整除，否则抛 `OLMoConfigurationError`。例如 8 卡设 `num_replicas=3` 会直接报错，而不是静默给出错误布局。
+[data_parallel.py:L66-L81](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L66-L81)
+两个校验函数：`dp_world_size` 必须能被 `num_replicas` / `shard_degree` 整除，否则抛 `OLMoConfigurationError`。配置错误在构建 mesh 之前就被拦下，这是 OLMo-core「尽早失败」风格的一例。
 
-[data_parallel.py:L12-L24](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L12-L24) —— `DPMeshDimName`：预先登记 HSDP 在 mesh 中要用的两个维度名 `dp_replicate`（复制维）与 `dp_shard`（分片维），供 `build_world_mesh()` 引用。
+Transformer 侧的特化配置继承自它：
 
-#### 4.1.4 代码实践
+[train_module/transformer/config.py:L227-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L227-L268)
+`TransformerDataParallelConfig` 在基类之上加了：`wrapping_strategy`（FSDP 逐层 wrap 粒度，见 4.3）、`prefetch_factor`（FSDP 预取强度）、`only_allreduce_last_microbatch`（只在梯度累积的最后一个 micro-batch 同步梯度，默认 True）、`reduce_grads_in_fp32` / `accumulate_grads_in_fp32`（给 `MultiGroupDistributedDataParallel` 用的精度开关）、`bucket_cap_mb`（梯度桶大小）、`use_reduce_scatter`（把普通参数梯度直接 reduce-scatter 进分布式优化器分片，MoE-v2 路径专用）。
 
-**实践目标**：在不启动任何分布式环境的情况下，验证 HSDP 度数推导规则与整除校验。
+[train_module/transformer/config.py:L386-L415](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L386-L415)
+`TransformerTrainModuleConfig` 中的 `dp_config: Optional[TransformerDataParallelConfig] = None`（第 411 行）——这就是你在配置层面切换 DDP/FSDP/HSDP 的唯一入口。
 
-1. 打开 Python 交互环境（已 `pip install -e '.[all]'`），执行（示例代码）：
+真实用法示例（第 1 单元跑过的训练例子里就是这么写的）：
+
+[examples/llm/train.py:L186-L190](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/examples/llm/train.py#L186-L190)
+示例脚本用 `dp_config=TransformerDataParallelConfig(name=DataParallelType.fsdp, param_dtype=DType.bfloat16, reduce_dtype=DType.float32)`：FSDP 分片、参数以 bf16 物化、梯度归约保持 fp32。
+
+#### 4.1.4 代码实践：预测并验证 HSDP 的分组
+
+**实践目标**：不启动任何分布式进程，验证你对 `get_replicate_and_shard_degree` 四种分支的理解。
+
+**操作步骤**：在装好 olmo-core 的环境里进入 Python 交互式解释器，执行（示例代码）：
 
 ```python
-from olmo_core.distributed.parallel.data_parallel import DataParallelConfig
-from olmo_core.exceptions import OLMoConfigurationError
+from olmo_core.distributed.parallel.data_parallel import (
+    DataParallelConfig, DataParallelType,
+)
 
-cfg = DataParallelConfig(name="hsdp")           # 什么都不指定
-print(cfg.get_replicate_and_shard_degree(8))    # 单机未初始化分布式 → (1, 8)
+# 分支 1：都不给（未初始化分布式时 get_num_nodes()==1）
+print(DataParallelConfig(name=DataParallelType.hsdp).get_replicate_and_shard_degree(16))
 
-print(DataParallelConfig(name="hsdp", num_replicas=2)
-      .get_replicate_and_shard_degree(8))       # 只给副本数 → (2, 4)
-print(DataParallelConfig(name="hsdp", shard_degree=2)
-      .get_replicate_and_shard_degree(8))       # 只给分片度 → (4, 2)
+# 分支 2：只给 num_replicas
+print(DataParallelConfig(
+    name=DataParallelType.hsdp, num_replicas=2
+).get_replicate_and_shard_degree(16))
 
+# 分支 3：只给 shard_degree
+print(DataParallelConfig(
+    name=DataParallelType.hsdp, shard_degree=8
+).get_replicate_and_shard_degree(16))
+
+# 分支 4：给了不整除的组合
 try:
-    DataParallelConfig(name="hsdp", num_replicas=3).get_replicate_and_shard_degree(8)
-except OLMoConfigurationError as e:
-    print("报错:", e)                            # 8 不能被 3 整除
+    DataParallelConfig(
+        name=DataParallelType.hsdp, num_replicas=5
+    ).get_replicate_and_shard_degree(16)
+except Exception as e:
+    print(type(e).__name__, e)
 ```
 
-2. 需要观察的现象：第一条输出是 `(1, 8)`——因为交互环境没初始化分布式，`get_num_nodes()` 返回 1。
-3. 预期结果：四条输出分别是 `(1, 8)`、`(2, 4)`、`(4, 2)`、一条整除性报错。若与预期不符，回读 [data_parallel.py:L41-L63](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L41-L63) 找原因。
+**需要观察的现象**：四条输出分别是 `(1, 16)`、`(2, 8)`、`(2, 8)`、以及一个 `OLMoConfigurationError`。
+
+**预期结果**：与源码逐分支对照——分支 1 中 `get_num_nodes()` 在未初始化分布式时返回 1，所以退化成「1 个副本、16 路分片」（等价于纯 FSDP）；分支 4 中 16 % 5 != 0，被 `_check_num_replicas` 拦截。以上结论直接来自源码逻辑；交互式解释器的具体打印格式待本地验证。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：32B 参数模型（约 \( 3.2\times10^{10} \) 参数）用 AdamW 训练，fp32 记账。单卡 80GB 显存放不下 \( 4P \)（约 480GB 权重态），最少需要多少卡的全分片 FSDP 才能仅让「权重态」放进显存（忽略激活）？
+**练习 1**：8 卡单机想用 HSDP 且每组 4 卡分片，`num_replicas` / `shard_degree` 该怎么填？不填会怎样？
 
-**答案**：\( 4P \approx 4 \times 3.2\times10^{10} \times 4\text{B} = 512\text{GB} \)（参数 + 梯度 + 双动量）。\( 512/80 = 6.4 \)，向上取整至少 **7 卡**；实际还要留激活与通信缓冲，通常远多于 7 卡。
+答案：填 `num_replicas=2, shard_degree=4`。不填的话走默认分支：单机 `get_num_nodes()==1`，得到 (1, 8)，实际是纯 FSDP 而非 HSDP——**单机上 HSDP 的默认值不产生副本维**，这是一个容易踩的坑。
 
-**练习 2**：8 卡单机改用 HSDP、`shard_degree=4`，每卡权重态显存是多少？和 FSDP、DDP 比？
+**练习 2**：`reduce_dtype` 默认为什么是 fp32 而不是跟 `param_dtype` 一样用 bf16？
 
-**答案**：\( R = 8/4 = 2 \)，\( M_{\text{HSDP}} = 4P/4 = P \)。FSDP 是 \( 4P/8 = P/2 \)（更省），DDP 是 \( 4P \)（最费）。HSDP 介于两者之间，换来的是 all-gather 只在 4 卡小组内进行。
+答案：梯度归约是对 N 份梯度求和，求和的数值误差会随卡数放大；用 fp32 归约再落到低精度参数，可以避免归约本身引入的精度损失。这是混合精度训练的常见惯例（参数低精度、归约高精度）。
 
-**练习 3**：为什么 `reduce_dtype` 默认 fp32 而不是跟随 `param_dtype`（如 bf16）？
+**练习 3**：`DataParallelConfig` 里没有 `dp_world_size` 字段，分解函数为什么需要把它作为参数传入？
 
-**答案**：梯度归约是跨 rank 的逐元素求和，bf16 的尾数只有 8 位，跨几十个 rank 累加会引入明显舍入误差；fp32 归约保证聚合精度，参数本体仍可用低精度存放。这正是 `MixedPrecisionPolicy(param_dtype, reduce_dtype)` 把两个 dtype 分开的原因（见 4.3.3）。
+答案：DP 世界大小在 mesh 构建时才确定——它等于总 world size 除去 PP/TP/CP 等其他并行维度占用的进程数（见 4.2）。所以 `get_replicate_and_shard_degree` 只能作为方法在拿到 `dp_world_size` 之后调用，而不能在配置对象里静态写死。
 
-### 4.2 world mesh：DP 维的切分与 HSDP 的二维结构
+### 4.2 从 world mesh 到 DP 子网格
 
 #### 4.2.1 概念说明
 
-`build_world_mesh()` 是所有并行策略共享的地基：它把总 world size 组织成一个带名字的多维 `DeviceMesh`。本讲只关注 DP 相关的部分：
+并行策略不是孤立生效的：同一组进程既要按 DP 切数据、又可能按 TP 切权重。OLMo-core 用一个全局 `DeviceMesh` 表达这一切——**mesh 的每个命名维度对应一种并行维度**。DP 策略的差异直接体现在 mesh 维度布局上：
 
-- 非 HSDP：DP 是**一个**维度 `dp`，大小等于从 world size 里扣掉 PP/CP/TP/EP 之后的余量。
-- HSDP：DP 拆成**两个**维度 `dp_replicate × dp_shard`（模型复制维在前、分片维在后）。
+- `fsdp` / `ddp`：一个一维 `dp` 维度；
+- `hsdp`：`dp_replicate` 和 `dp_shard` 两个维度（FSDP2 拿到二维 mesh 就自动获得 HSDP 语义）。
 
-还有一个容易踩的坑：**「给模型包装用的 DP mesh」和「给数据加载用的 DP mesh」不是同一个函数**。`get_dp_model_mesh()` 服务于 FSDP/DDP 包装；`get_dp_mesh()` 服务于数据加载器分配 batch。两者的差异在组合其他并行时显现——尤其上下文并行（CP）：CP 组内的各 rank 持有完整参数副本，梯度必须跨「DP × CP」一起归约，所以模型 mesh 会把 CP 折叠进 DP；但 CP 组内各 rank 处理的是**同一份**数据的不同序列段，所以数据 mesh 不包含 CP。专家并行（EP）则在两种 mesh 里都折叠进 DP（EP 组内各 rank 要吃不同数据）。
+此外，模型用的 DP mesh 和数据加载器用的 DP mesh **不总是同一个**（`get_dp_model_mesh` vs `get_dp_mesh`），这是本模块最容易混淆、也最能体现设计功力的地方。
 
 #### 4.2.2 核心流程
 
-`build_world_mesh()` 的 DP 相关决策流程：
+`build_world_mesh` 的维度搭建顺序：
 
 ```text
-dp_world_size = world_size
-if pp: 校验整除, dp_world_size //= pp.degree
-if cp: 校验整除, dp_world_size //= cp.degree
-if tp: 校验整除, dp_world_size //= tp.degree
-if ep: EP 目前只允许与 HSDP 搭配（EP 复用 dp_shard 维切专家）
-
-mesh 维度列表 =
-    [pp?]                       # 流水线最外层
-    + (hsdp ? [dp_replicate, dp_shard] : [dp])   # ← 本讲核心
-    + [cp?] + [tp?]
-
-init_device_mesh(...)            # 创建 mesh，并为每个维度建进程组
-get_dp_process_group(mesh)       # 确保 DP 进程组已建立
-存入全局 _WORLD_MESH（只能建一次）
+names/dims = []
+1. pp  存在 → 追加 ("pp", pp.degree)，dp_world_size //= pp.degree
+2. cp  存在 → 校验并 dp_world_size //= cp.degree
+3. tp  存在 → 校验并 dp_world_size //= tp.degree
+4. ep  存在 → 只允许配合 HSDP，且 ep.degree 必须等于 shard_degree
+5. dp 维度：
+   ├── hsdp → ("dp_replicate", R), ("dp_shard", S)   ← 两个维度
+   └── 其他 → ("dp", dp_world_size)                    ← 一个维度；EP 时再追加 ("ep", ep.degree)
+6. cp 存在 → 追加 ("cp", cp.degree)
+7. tp 存在 → 追加 ("tp", tp.degree)
+最后 init_device_mesh(...) 并确保 DP 进程组被创建
 ```
+
+之后不同消费者取自己关心的子网格：
+
+- `get_dp_model_mesh`（给 FSDP/DDP 包装用）：取出所有以 `dp` 开头的维度。HSDP 下得到二维 `(dp_replicate, dp_shard)`；CP 维度会被**折进** DP 维（因为每个 CP 进程都持有完整参数，梯度必须跨 DP×CP 归约）；EP 维度也会被折平。
+- `get_dp_mesh`（给数据加载器分配 rank 用）：同样取 `dp` 开头的维度，但 EP 维度折平进来（EP 组内各 rank 应拿到**不同**数据）、CP 维度**不**折进来（CP 组内各 rank 应拿到**相同**数据）。
+- `get_dp_process_group`：在 `get_dp_mesh` 结果上取（多维则先 flatten）进程组。
 
 #### 4.2.3 源码精读
 
-[parallel/__init__.py:L116-L124](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L116-L124) —— `build_world_mesh()` 签名：接收五种并行配置，返回 `DeviceMesh`。docstring 明确标注「若使用任何其他并行配置，则必须提供 DP 配置」——DP 是其余并行的基础维度。
+[parallel/__init__.py:L116-L169](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L116-L169)
+`build_world_mesh` 的签名与两条前置规则：五套配置全为空时返回纯 1D `dp` mesh；只要用了任何一种其他并行（TP/CP/PP/EP），就必须同时给 DP 配置。同时注意第 157-158 行：mesh 是进程级单例，重复构建会直接 `RuntimeError`。
 
-[parallel/__init__.py:L166-L169](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L166-L169) —— 五个配置全空时退化为单维 `dp` mesh；否则 dp 缺失直接抛错：其他并行必须有 DP 伴随。
+[parallel/__init__.py:L190-L206](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L190-L206)
+EP 的限制：非 HSDP 时先除以 `ep.degree`，然后无条件抛错——**专家并行目前只支持与 HSDP 搭配**（代码里留了 TODO，将来 DTensor 支持跨 mesh 操作后放开）。
 
-[parallel/__init__.py:L171-L189](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L171-L189) —— PP→CP→TP 逐级整除校验并从 `dp_world_size` 里扣除。这解释了一个常见疑问：**DP 的 world size 是「剩下的」**，不是配置出来的。
+[parallel/__init__.py:L218-L239](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L218-L239)
+本讲最关键的一段：`name == hsdp` 时调用 `get_replicate_and_shard_degree` 得到 (R, S)，向 mesh 追加 `dp_replicate`、`dp_shard` 两个维度；EP 存在时要求 `ep.degree == shard_degree`（专家直接复用分片维度）；否则只追加一个 `dp` 维度。
 
-[parallel/__init__.py:L190-L206](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L190-L206) —— EP 的限制：目前「EP 只能搭配 HSDP」（HSDP 直接复用 `dp_shard` 维切专家，见 L199 注释与 L204-L206 的报错）。这是 u3-l5 讲过的 MoE 专家切分在 mesh 层的落点。
+[parallel/__init__.py:L241-L259](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L241-L259)
+维度收集完成后 `init_device_mesh` 一次性创建 mesh（每个维度自动建好进程组），再显式调用 `get_dp_process_group` 确保 DP 组就绪，最后把 mesh 存进模块级单例 `_WORLD_MESH`。
 
-[parallel/__init__.py:L218-L234](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L218-L234) —— **本讲最关键的一段**：`dp.name == hsdp` 时调用 4.1 讲的 `get_replicate_and_shard_degree()`，把 DP 拆成 `dp_replicate`（大小 num_replicas）与 `dp_shard`（大小 shard_degree）两个 mesh 维度；否则追加单一 `dp` 维。若同时启用 EP，还要求 EP degree 与 shard_degree 相等（同一段 L226-L231）。
+[parallel/__init__.py:L311-L348](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L311-L348)
+`_get_model_mesh`：模型视角的维度折叠——EP 维折进 DP；CP 维折进紧邻的 DP 维，注释写得很清楚：「对参数同步而言，一个 CP 组就像一组额外的 DP 副本，梯度要跨 DP ∪ CP 归约」。
 
-[parallel/__init__.py:L251-L259](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L251-L259) —— `init_device_mesh()` 创建网格（每个维度自动获得进程组），随后显式调用 `get_dp_process_group()` 确保 DP 组存在，最后把 mesh 存入模块级 `_WORLD_MESH`——全局只允许构建一次，重复调用抛 `RuntimeError`（L157-L158）。
+[parallel/__init__.py:L351-L365](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L351-L365)
+`get_dp_model_mesh`：取所有 `dp` 开头的维度组成子网格，交给 FSDP/DDP。HSDP 下它天然是二维的。
 
-[parallel/__init__.py:L351-L365](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L351-L365) —— `get_dp_model_mesh()`：取出所有以 `dp` 开头的维度组成子 mesh，交给 FSDP/DDP 包装。它先经 [_get_model_mesh()（L311-L348）](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L311-L348) 做维度折叠：EP 维折进 DP；CP 维折叠进相邻 DP 维——L333-L336 的注释解释了原因（CP rank 各持完整参数、梯度需跨 DP×CP 归约）。
+[parallel/__init__.py:L368-L406](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L368-L406)
+`get_dp_mesh`：数据加载视角。EP 维同样折平（EP 组内 rank 拿不同数据），但若发现已折平的 `dp_cp` 维度直接报错——数据侧 mesh 必须从**原始** world mesh 上取，保证 CP 组内 rank 拿到同一份数据。
 
-[parallel/__init__.py:L368-L406](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L368-L406) —— `get_dp_mesh()`：给数据加载用的 DP mesh。同样折叠 EP 维，但**拒绝**已折叠 CP 的 mesh（L400-L403），即数据视角的 DP 永远不含 CP 维。
+训练模块在哪里触发这一切：
 
-[parallel/__init__.py:L409-L423](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L409-L423) —— `get_dp_process_group()`：数据加载所用的 DP 进程组（多维时先展平）。u6-l1 讲过的「数据按 DP rank 不重不漏切分」用的就是它。
+[train_module/transformer/train_module.py:L171-L187](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L171-L187)
+`TransformerTrainModule.__init__` 中：只要处于分布式环境就用 `dp_config` 等构建 world mesh；反之若给了任何并行配置却不是分布式运行，直接抛配置错误。
 
-测试对照：[parallel_test.py:L92-L123](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L92-L123) 断言 HSDP 时 `dims_map["dp_replicate"] * dims_map["dp_shard"] == dp_world_size`、其余类型 `dims_map["dp"] == dp_world_size`，并逐一验证 `get_dp_mesh()` / `get_dp_model_mesh()` 的形状（含 CP/EP 折叠后的期望大小）。参数化矩阵见 [parallel_test.py:L136-L146](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L136-L146)。
+[train_module/transformer/train_module.py:L244-L246](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L244-L246)
+`dp_process_group` 属性：从 world mesh 取 DP 进程组，供数据加载器等组件使用。
 
-#### 4.2.4 代码实践
+#### 4.2.4 代码实践：跑通 CPU 上的 mesh 测试
 
-**实践目标**：在 CPU 上用 gloo 后端双进程直观看到三种类型的 mesh 差异。
+**实践目标**：用仓库自带的测试在 CPU（gloo 后端）上验证 fsdp / hsdp 两种配置生成的 mesh 结构。
 
-1. 运行仓库自带的 mesh 测试（CPU 可跑、无需 GPU）：
+**操作步骤**：
 
 ```bash
-pytest -v src/test/distributed/parallel/parallel_test.py -k cpu
+# 只跑 dp 维度的两组用例（2 进程 gloo，无需 GPU）
+pytest -v "src/test/distributed/parallel/parallel_test.py::test_build_world_mesh_cpu" -k "dp_only"
 ```
 
-2. 再自己写一个最小脚本（示例代码，保存为任意 `.py` 文件运行）：
+对照测试断言阅读 [parallel_test.py:L80-L123](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L80-L123)：第 94-98 行断言 HSDP 下 `dims_map["dp_replicate"] * dims_map["dp_shard"] == expected_dp_world_size`；第 112-123 行断言 `get_dp_mesh` / `get_dp_model_mesh` 取出的子网格形状正确。
 
-```python
-import torch
-from olmo_core.distributed.parallel import (
-    build_world_mesh, get_dp_mesh, get_dp_model_mesh,
-)
-from olmo_core.distributed.parallel.data_parallel import DataParallelConfig, DataParallelType
-from olmo_core.testing import run_distributed_test
+测试的多进程机制来自 [testing/distributed.py:L111-L147](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/testing/distributed.py#L111-L147)：`run_distributed_test` 用 `torch.multiprocessing` 起N 个子进程，每个子进程设置好 rank 环境变量后调用 `init_distributed(backend="gloo")`，再执行你给的函数——这就是「CPU 多进程模拟分布式」的标准工具，也是第 5 节综合实践的基础。
 
-def worker(dp_name: str):
-    dp = DataParallelConfig(name=dp_name)
-    if dp.name == DataParallelType.hsdp:
-        dp.num_replicas, dp.shard_degree = 2, 2   # 4 rank → 2 副本 × 2 分片
-    mesh = build_world_mesh(dp=dp)
-    print(f"[rank {torch.distributed.get_rank()}] {dp_name}: "
-          f"mesh dims={dict(zip(mesh.mesh_dim_names, mesh.shape))}, "
-          f"dp_model_mesh={get_dp_model_mesh(mesh).shape}, "
-          f"dp_mesh={get_dp_mesh(mesh).shape}")
+**需要观察的现象**：测试在两个子进程中各自完成 mesh 构建与断言，全部通过；`-k "dp_only"` 会分别以 `fsdp` 和 `hsdp` 两种 `dp_type` 参数化各跑一次。
 
-for name in ("ddp", "fsdp", "hsdp"):
-    run_distributed_test(worker, backend="gloo", world_size=4,
-                         start_method="spawn", func_args=(name,))
-```
-
-3. 需要观察的现象：`ddp` 只有 `dp=4` 一维；`fsdp` 同样是 `dp=4`（mesh 形状相同，差别在后面的包装方式）；`hsdp` 是 `dp_replicate=2, dp_shard=2` 两维。
-4. 预期结果：三种类型下 `dp_model_mesh` 与 `dp_mesh` 形状均为 `(4,)` 或 `(2,2)`（对应总 rank 数）；若再次循环构建会因 `_WORLD_MESH` 重复而报错——`run_distributed_test` 每轮起新进程（spawn），所以不会触发。本脚本基于 [parallel_test.py:L149-L160](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L149-L160) 的同款模式，CPU 可直接验证。
+**预期结果**：`dp_only` 组合只命中 `PARALLEL_MESH_TESTCONFIGS` 中的一条参数（2 进程纯 DP），配合 `dp_type` 的 fsdp/hsdp 两档共 2 个用例，全部通过。具体用例数量以本地输出为准，待本地验证。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：16 卡、PP=2、TP=2、剩余全给 DP。用 HSDP 且希望每个节点（8 卡/节点）一份副本，`num_replicas` 和 `shard_degree` 各是多少？
+**练习 1**：为什么 `get_dp_model_mesh` 要把 CP 维折进 DP，而 `get_dp_mesh` 不折？
 
-**答案**：dp_world_size = 16/(2×2) = 4。注意 DP 维已经很小：若 nodes=2，默认推导会得到 num_replicas=2、shard_degree=2——但 2×2=4 恰好成立。这里的陷阱是**副本/分片是作用在 DP world size 上，而不是总 world size 上**。
+答案：模型参数在每个 CP rank 上都是完整的副本，反向时梯度必须跨 DP×CP 全体归约，所以模型视角 CP 等价于一组 DP 副本；而数据视角下，同一 CP 组的 rank 处理的是同一条序列的不同片段，必须拿到**同一份**输入数据，因此数据加载的 DP mesh 不能包含 CP 维。
 
-**练习 2**：为什么 `get_dp_model_mesh()` 要把 CP 维折叠进 DP，而 `get_dp_mesh()` 不折叠？
+**练习 2**：`build_world_mesh` 为什么把 PP 维放在 mesh 最前面、TP 放最后？
 
-**答案**：模型视角——CP 各 rank 都持有完整参数、各自产生梯度，聚合梯度时必须把 CP 组当成一组成员，所以 DP×CP 要合并成一个大通信域；数据视角——CP 组内各 rank 消费同一 batch 的不同序列段，数据加载只需按 DP 维区分，折叠 CP 会让同一份数据被加载多份。
+答案：mesh 维度的顺序决定了进程编号的切分粒度：前面的维度变化慢。PP 放最前使同一 PP stage 的进程编号连续（便于 stage 间点对点通信），TP 放最后使同一 TP 组的进程编号紧邻（通常在单节点内、共享高带宽互联）。这类布局直接影响集合通信的实际带宽。
 
-**练习 3**：`build_world_mesh` 为什么设计成「只能调用一次」？
+**练习 3**：`_WORLD_MESH` 单例（重复构建会报错）对写测试有什么影响？
 
-**答案**：mesh 创建会建立进程组并登记到全局 `_WORLD_MESH`，重复创建既浪费通信资源又会产生不一致的组句柄；训练模块（4.4.3）与测试都依赖「全局唯一 mesh」这一不变量。
+答案：一个进程只能构建一次 world mesh。想在同一段代码里对比多种并行配置的 mesh，必须每种配置单独起一组进程（例如多次调用 `run_distributed_test`），而不能在一个进程里连续 `build_world_mesh`。
 
-### 4.3 FSDP 路线：parallelize_model 与 apply_fsdp
+### 4.3 FSDP 与 HSDP：fully_shard 分片与两段式梯度归约
 
 #### 4.3.1 概念说明
 
-`parallelize_model()` 是 u6-l2 讲过的「并行化固定顺序」的执行者，DP 是顺序中倒数第二步（最后一步才是 `init_weights()`）。`fsdp` 与 `hsdp` 共用同一条 FSDP 路线：都调用模型的 `apply_fsdp()`，唯一区别是传入的 mesh 不同——fsdp 传一维 `dp` mesh，hsdp 传 `dp_replicate × dp_shard` 二维 mesh（FSDP2 的 `fully_shard` 原生支持二维 mesh： shard 维分片、replicate 维复制，HSDP 语义由 PyTorch 侧解释）。
+OLMo-core 的 FSDP 走的是 PyTorch 官方 **FSDP2** 路线：不用 `FSDP(module)` 包装器类，而是调用 `torch.distributed.fsdp.fully_shard(module, mesh=...)` 原地改造模块——模块参数变成 `DTensor` 分片，前向/反向自动插入 all-gather / reduce-scatter。
 
-FSDP1 时代用 `auto_wrap_policy` 自动决定包裹哪些子模块；FSDP2 改为 **composable 的 `fully_shard(module)` 手动落点**。OLMo-core 把落点选择封装成 `TransformerDataParallelWrappingStrategy` 枚举——这就是本讲所说的「fsdp wrap policy 的配置」。
+HSDP 不需要单独的实现：把一个**二维 mesh** `(dp_replicate, dp_shard)` 传给 `fully_shard`，FSDP2 自动沿 shard 维 reduce-scatter、沿 replicate 维 all-reduce，这正是 HSDP 的语义。所以「HSDP 是一种 FSDP」在这套实现里体现得非常直白。
+
+三种策略的每卡显存与每步通信量对比（设参数量 \(\Psi\) 个元素、DP 世界大小 \(N\)、HSDP 划分 \(N = R \times S\)、bf16 参数 + fp32 AdamW 状态；数字为量级估算）：
+
+\[ \text{每卡参数+优化器状态} \approx \begin{cases} 14\,\Psi & \text{DDP（与 } N\text{ 无关）} \\ 14\,\Psi / N & \text{FSDP} \\ 14\,\Psi / S & \text{HSDP} \end{cases} \]
+
+（\(14\Psi\) = bf16 参数 \(2\Psi\) + fp32 主参数 \(4\Psi\) + 一/二阶矩各 \(4\Psi\) 字节。）
+
+每步通信量（bf16 梯度/参数、ring 集合通信，每卡收发约为数据量的 2 倍）：
+
+\[ \text{DDP}: \;\; \approx 4\Psi \;\; \text{（反向一次 all-reduce）} \qquad \text{FSDP}: \;\; \approx 3 \times \text{all-gather/reduce-scatter 覆盖 } \Psi \text{ 的通信} \]
+
+FSDP 通信更多但可以被计算重叠；HSDP 则把大通信限制在 shard 子组内、副本间只对已分片的小梯度做一次 all-reduce，**用「分片收益变小」换「跨节点通信变少」**。
 
 #### 4.3.2 核心流程
 
-`apply_fsdp()` 的包裹流程：
+`parallelize_model` 中 DP 是**最后一个**被应用的策略（顺序：PP → FP8 → CP → TP → EP → 激活检查点 → compile → DP → init_weights），因为 `fully_shard` 会原地改写模块类与参数形态，必须等其它策略都就位：
 
 ```text
-mp_policy = MixedPrecisionPolicy(param_dtype, reduce_dtype)
-reshard_after_forward = False if 启用PP else True     # PP 时前向后不回收分片
-for 每个 block:
-    按 wrapping_strategy 落 fully_shard:
-        fine_grained: 先 attention、再 feed_forward、最后整个 block
-        其他:        只包整个 block
-embeddings: fully_shard + set_unshard_in_backward(False)   # 反向不需要参数分片
-             （tie_word_embeddings 时不包, 留在 root 组共享）
-lm_head:    fully_shard(reshard_after_forward=False)
-root(模型本体): fully_shard —— 收纳所有未被单独包裹的参数
-prefetch_factor > 0 时: 建立前向预取链 block[i] → block[i+1...]
+parallelize_model(model, dp_config=...)
+    └── dp_config.name ∈ {fsdp, hsdp}
+        ├── (MoE 模型先 prepare_experts_for_fsdp)
+        └── 对每个 model part 调 model.apply_fsdp(dp_mesh, ...)
+                ├── 构造 MixedPrecisionPolicy(param_dtype, reduce_dtype)
+                ├── 每个 block 调 block.apply_fsdp(...)   ← wrap 策略在此生效
+                ├── 未 tie 权重时单独分片 embeddings / lm_head
+                ├── fully_shard(self, ...)                 ← 根模块，兜住其余参数
+                └── prefetch_factor > 0 时配置前向预取链
 ```
 
-要点：FSDP2 的参数在包裹后变为 **DTensor**（Shard(0) 布局），`p.numel()` 是全局量、`p.to_local()` 才是本 rank 实际存储——这是本讲综合实践对比分片差异的原理。
+梯度同步时机（训练循环侧，见 4.3.3 最后一条引用）：梯度累积的**非最后** micro-batch 上，FSDP 调 `set_is_last_backward(False)`；HSDP 额外调 `set_requires_all_reduce(False)` 把副本维的 all-reduce 推迟到累积窗口末尾——两个开关都只在最后一个 micro-batch 放行完整归约。
 
 #### 4.3.3 源码精读
 
-[common.py:L115-L145](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L115-L145) —— `parallelize_model()` 的 DP 段：先 `get_dp_model_mesh()` 取模型 DP mesh（4.2），再把 `param_dtype`/`reduce_dtype` 从 olmo 的 `DType` 枚举转成 `torch.dtype`；`name` 是 `fsdp` 或 `hsdp` 都走 `apply_fsdp()` 分支（MoE 模型先 `prepare_experts_for_fsdp()`），`ddp` 走 `apply_ddp()` 分支。包裹完成后的权重初始化在 [common.py:L147-L156](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L147-L156)（承接 u3-l6：`_apply_init` + `distribute_like` 保证分片一致性）。
+[train_module/transformer/common.py:L115-L145](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L115-L145)
+`parallelize_model` 的 DP 分发处：`dp_config.name in (fsdp, hsdp)` 走 `apply_fsdp`（两种策略共用同一条 FSDP 路径，差异完全由 mesh 形状承载）；`ddp` 走 `apply_ddp`；其他值抛 `NotImplementedError`。注意第 118 行取的是 `get_dp_model_mesh`——模型包装永远用模型视角的子网格。
 
-[model.py:L1174-L1204](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1174-L1204) —— `apply_fsdp()` 开头：构造 `MixedPrecisionPolicy`（param/reduce 双 dtype 分离），并决定 `reshard_after_forward`——启用 PP 时置 False，避免每个 micro-batch 都重新 all-gather 整层参数。
+[model.py:L1174-L1204](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1174-L1204)
+`Transformer.apply_fsdp` 开头：构造 `MixedPrecisionPolicy(param_dtype, reduce_dtype)`（参数低精度物化 + 梯度高精度归约）；`reshard_after_forward=False if pp_enabled else True`——开流水线时前向用完不把参数丢回分片态，避免每个 micro-batch 都付一次 all-gather。
 
-[model.py:L1206-L1233](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1206-L1233) —— 落点细节：逐 block 委托 `block.apply_fsdp()`（见下条）；embedding 单独分片且反向不物化（`set_unshard_in_backward(False)`）；**tie_word_embeddings 时 embedding 与 lm_head 共享参数，必须留在同一个（root）FSDP 组**（L1216-L1218 注释）；最后 `fully_shard(self)` 包住模型根，兜底收纳所有未单独包裹的参数。
+[model.py:L1206-L1233](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1206-L1233)
+分片三步：① 逐 block 调 `block.apply_fsdp`（wrap 策略下发到块级）；② 权重未 tie 时单独分片 `embeddings`（并设 `set_unshard_in_backward(False)`，embedding 参数反向不需要重新物化）与 `lm_head`；③ `fully_shard(self, ...)` 分片根模块，兜住 norm 等散落参数。tie 权重的 embedding 与 lm_head 共享同一个参数，必须留在同一个 FSDP 组（根）里，注释明确解释了这一点。
 
-[model.py:L1241-L1248](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1241-L1248) —— `prefetch_factor > 0` 时为每个 block 设置前向预取目标（下一个或多个 block、最后一个 block 预取 lm_head），用计算掩盖 all-gather 通信延迟。
+[block.py:L221-L236](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/block.py#L221-L236)
+`TransformerBlock.apply_fsdp`：`fine_grained` 策略额外把 `attention`、`feed_forward` 各自 `fully_shard`（分片单元更小、流水线更细，预取链也按 att→mlp 配置）；其他策略只分片整个 block。
 
-[config.py:L42-L60](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L42-L60) —— `TransformerDataParallelWrappingStrategy` 三档：`full`（默认，包每个 block 与 lm_head）、`blocks`（不单独包 lm_head）、`fine_grained`（block 内再细分）。
+[nn/transformer/config.py:L42-L60](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/config.py#L42-L60)
+`TransformerDataParallelWrappingStrategy` 三档：`full`（每个 block + lm_head 等都包）、`blocks`（像 full 但 lm_head 不单独包）、`fine_grained`（block 内部再包 attention / feed_forward）。分片单元越小，单次 all-gather 越小、越容易与计算重叠，但元数据与调度开销越多。
 
-[block.py:L221-L236](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/block.py#L221-L236) —— `TransformerBlock.apply_fsdp()`：`fine_grained` 时依次 `fully_shard(self.attention)`、`fully_shard(self.feed_forward)`、再包 block 本身，并建立块内预取链。包裹粒度越细，单次 all-gather 的张量越小、流水越细，但通信次数与元数据开销越多——这正是 wrap policy 的调优空间。
+[model.py:L1241-L1248](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1241-L1248)
+`prefetch_factor > 0` 时为每个 block 配置「下一个 block 的参数预取」，最后一个 block 预取 lm_head——用提前的 all-gather 掩盖通信延迟。
 
-[train/config.py:L227-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L227-L268) —— `TransformerDataParallelConfig` 在基类之上增加的 transformer 专属字段：`wrapping_strategy`（L233-L238）、`prefetch_factor`（L240）、`only_allreduce_last_microbatch`（L242-L248，见 4.5）、`reduce_grads_in_fp32` / `accumulate_grads_in_fp32`（L250-L254）、`bucket_cap_mb`（L256-L257）、`use_reduce_scatter`（L259-L268，见 4.5）。它在 [TransformerTrainModuleConfig](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L386-L415) 中通过 `dp_config` 字段（L411）挂载。
+[train_module/transformer/train_module.py:L636-L655](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L636-L655)
+`_train_microbatch_context`——梯度同步的时机控制：模型是 `FSDPModule` 时每个 micro-batch 调 `set_is_last_backward(is_last_mb)`；HSDP 再加 `set_requires_all_reduce(is_last_mb)` 延迟副本维归约；DDP 则在非最后 micro-batch 进入 `no_sync()` 上下文。三种策略在这里汇合成同一条规则：**梯度累积窗口内只在最后一步做完整同步**。
 
-#### 4.3.4 代码实践
+[train_module/transformer/train_module.py:L683-L696](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L683-L696)
+`_clip_grad_norm`：梯度裁剪必须感知分片——FSDP 路径走 FSDP 自己的 `clip_grad_norm_`（内部跨分片归约全局范数），不能对本地分片直接算范数，否则裁剪阈值就错了。
 
-**实践目标**：通过修改 `wrapping_strategy`，观察 FSDP 包裹落点数量与日志变化。
+#### 4.3.4 代码实践：数一数 wrap 策略产生多少个分片单元
 
-1. 阅读 [common.py:L115-L145](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L115-L145) 与 [model.py:L1206-L1233](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1206-L1233)，数一数 `full` 策略下一个 N 层模型会调用多少次 `fully_shard`（答案：N 个 block + embedding + lm_head + root = N+3 次，tie 时 N+1 次）。
-2. 若有 ≥2 张 GPU（无 GPU 则记「待本地验证」），仿照 [muon_test.py:L115-L124](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/muon_test.py#L115-L124) 的 `_run_fsdp_muon` 写法，把 `dp_config` 换成：
+**实践目标**：把 `wrapping_strategy` 三档翻译成「模型里有多少个 FSDP 分片单元」，验证你对 wrap 链的理解。
+
+**操作步骤**（源码阅读 + 推算，不依赖 GPU）：
+
+1. 读 [common.py:L115-L137](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L115-L137) 与 [model.py:L1206-L1233](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1206-L1233)，对一个 `n_layers=4`、未 tie 权重、含 `embedding_norm` 的 `Transformer`，分别列出 `full` / `blocks` / `fine_grained` 三档下 `fully_shard` 被调用的位置清单。
+2. 有 GPU 的读者可运行（示例代码，待本地验证）：
 
 ```python
-TransformerDataParallelConfig(
-    name=DataParallelType.fsdp,
-    wrapping_strategy=TransformerDataParallelWrappingStrategy.fine_grained,
-    prefetch_factor=1,
-)
+from torch.distributed.fsdp import FSDPModule
+# 假设 model 已在 2 进程 FSDP 环境下 parallelize_model 完成
+n_units = sum(1 for m in model.modules() if isinstance(m, FSDPModule))
 ```
 
-再用 `parallelize_model(model, world_mesh=..., device=..., dp_config=dp_config)` 包裹一个 `TransformerConfig.olmo2_30M(vocab_size=1024)` 模型。
+**需要观察的现象**：三档的分片单元数分别约为：`full` → 4(block) + embeddings + embedding_norm + lm_head + 根 = 7；`blocks` → 4(block) + embeddings + 根 = 6（norm 与 lm_head 不单独包，留在根里）；`fine_grained` → 每个 block 再多出 attention、feed_forward 两个单元，4×3 + embeddings + 根 = 15。
 
-3. 需要观察的现象：包裹后 `model.blocks["0"].attention` 与 `model.blocks["0"].feed_forward` 是否都变成了 `FSDPModule`；日志中 `Applied FSDP to the model with ...` 的 mesh 信息。
-4. 预期结果：`fine_grained` 下块内 attention 与 feed_forward 各自成为独立 FSDP 单元；显存峰值进一步下降（单次物化的参数更小），但前向 all-gather 次数翻倍。GPU 行为**待本地验证**（本讲编写环境无 GPU，未实际运行）。
+**预期结果**：分片单元数随档位递增；`blocks` 档的 lm_head 参数随根模块一起分片。精确计数依赖模型组件是否存在（如 `embedding_norm` 为 None 时少一个），请以你构建的配置为准。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么 embedding 要 `set_unshard_in_backward(False)`？
+**练习 1**：HSDP 没有独立的 `apply_hsdp` 方法，实现差异在哪里体现？
 
-**答案**：embedding 位于计算图最前端，反向传播到它之后就再也没有模块需要它的参数分片了，因此反向阶段无需物化（unshard）参数，省一次 all-gather。
+答案：在 mesh。`build_world_mesh` 为 hsdp 生成 `(dp_replicate, dp_shard)` 二维网格，`get_dp_model_mesh` 原样把它交给 `fully_shard`；FSDP2 对多维 mesh 的解释（沿最后一维 reduce-scatter、沿其余维 all-reduce）天然就是 HSDP。
 
-**练习 2**：`wrapping_strategy=blocks`（不单独包 lm_head）的动机是什么？
+**练习 2**：为什么 tie_word_embeddings 时不能把 embeddings 和 lm_head 各自 `fully_shard`？
 
-**答案**：lm_head 不被单独包裹时，其参数并入 root FSDP 组，与 embedding/最终 norm 一起分片。对 vocab 很大的模型，lm_head 参数巨大，单独成组会让该组的 all-gather 成为长尾；并入 root 组可以平衡各组体积。取舍是 root 组变大、细粒度流水化程度降低。
+答案：tie 时二者共享同一份参数张量，属于同一个参数；若分别放进两个 FSDP 单元，同一张量会被两套 all-gather/分片逻辑管理，状态互相冲突。所以必须让它们留在同一个（根）FSDP 组里。
 
-**练习 3**：HSDP 与 FSDP 在 `apply_fsdp()` 代码路径上有何不同？
+**练习 3**：`set_requires_all_reduce(is_last_mb)` 只在 HSDP 分支调用，FSDP 分支为什么不需要？
 
-**答案**：**没有不同**——两者都调用同一个 `apply_fsdp()`，差异完全由传入的 mesh 形状表达（一维 `dp` vs 二维 `dp_replicate×dp_shard`），`fully_shard` 依据 mesh 维度数自动解释 HSDP 语义。这是「配置驱动、单一代码路径」设计的典型例子。
+答案：纯 FSDP 只有 reduce-scatter 一种归约（随反向流式进行），由 `set_is_last_backward` 控制收尾即可；HSDP 在 reduce-scatter 之外还有一次跨副本的 all-reduce，这次 all-reduce 对整个累积窗口只需要做一次，因此要显式推迟到最后一个 micro-batch。
 
-### 4.4 DDP 路线与梯度同步时机
+### 4.4 DDP：replicate 包装、梯度桶归约与 OLMoDDP 路径
 
 #### 4.4.1 概念说明
 
-`ddp` 类型走 PyTorch 的 composable DDP（`torch.distributed._composable.replicate`）：参数**完整复制**在每个 rank 上，反向传播时按桶（bucket）自动 all-reduce 梯度。它适合**模型放得下单卡**的场景——没有 all-gather 开销，实现最简单，通信只有反向的一轮 all-reduce。
+`DataParallelType.ddp` 对应经典的复制式数据并行：每个进程持有完整参数，反向时框架把梯度切进「桶（bucket）」，桶满即对 DP 进程组做 all-reduce，与反向计算重叠。OLMo-core 用的是 PyTorch 新的 `torch.distributed._composable.replicate` 组合式 API（而非老的 `DistributedDataParallel` 包装类），同样是原地改造模块。
 
-本模块的第二个主题是**梯度同步时机**。u6-l2 讲过一个 batch 会被切成 K 个 micro-batch 逐个反向；由于 loss 已经按「全批有效 token 数 N」归一（sum/N 语义），本地梯度满足
-
-\[ g_{\text{local}} = \sum_{i=1}^{K} g_i \]
-
-即 K 次 micro-batch 的梯度**累加**等价于一次性全批反向。因此跨 rank 的聚合只需在**最后一个 micro-batch 反向后**做一次，中间各步同步是纯浪费。三种实现：
-
-- DDP：非最后 micro-batch 用 `no_sync()` 上下文挂起归约；
-- FSDP：`set_is_last_backward(True/False)` 告知 FSDP 何时等待并清理梯度归约；
-- HSDP 额外有 `set_requires_all_reduce(is_last)`——把 replicate 维的 all-reduce 延迟到最后的 micro-batch（shard 维的 reduce-scatter 本来就发生在最后一个 backward）。
+另外要澄清一个命名冲突：仓库里还有一族 `OLMoDDP*` 类（`OLMoDDPModel` / `OLMoDDPOptimizer` / `OLMoDDPTrainModule`），那是 **MoE-v2 融合分布式优化器**的专用路径，虽然名字里带 DDP，但它是一套独立的实现，本讲只在最后带一眼。
 
 #### 4.4.2 核心流程
 
-DDP 路径（`parallelize_model` → `apply_ddp`）：
-
 ```text
-可选: 把模型 cast 到 param_dtype
-可选: compile 时设置 torch._dynamo.config.optimize_ddp
-replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)   # 原地改造, 不换对象
+parallelize_model(dp_config.name == "ddp")
+    └── (MoE 模型先 prepare_experts_for_ddp)
+    └── model.apply_ddp(dp_mesh, compile_enabled, param_dtype)
+            ├── 需要时先把整个模型 cast 到 param_dtype
+            └── replicate(model, device_mesh=dp_mesh, bucket_cap_mb=100)
+
+训练循环（TransformerTrainModule）：
+    for micro_batch in micro_batches:
+        with (no_sync() 若非最后 micro-batch):
+            forward + backward          ← 桶 all-reduce 只在最后一步真正执行
+    → optim_step（梯度已是跨 rank 平均后的）
 ```
 
-训练单步内的同步时机（`TransformerTrainModule.train_batch` 的 micro-batch 循环，见 u6-l2）：
-
-```text
-for i, micro_batch in enumerate(micro_batches):
-    with _train_microbatch_context(i, K):    # ← 本模块主角
-        forward; loss.backward()
-# 循环外: optim_step 中按组 set_lr → optim.step()
-```
-
-`_train_microbatch_context(i, K)` 的内部分派：
-
-```text
-is_last_mb = (i == K - 1)
-if 模型是 FSDPModule:
-    set_is_last_backward(is_last_mb)
-    if dp 类型是 hsdp: set_requires_all_reduce(is_last_mb)
-elif 模型是 DDP:
-    if not is_last_mb: 进入 no_sync() 上下文
-```
+关键点：DDP 的梯度归约是「隐式」的——`backward()` 触发桶归约，库代码必须用 `no_sync()` 把中间 micro-batch 的归约关掉，否则同一个梯度会被归约多次（累积窗口内多次 all-reduce 会把梯度放大）。
 
 #### 4.4.3 源码精读
 
-[model.py:L1252-L1283](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1252-L1283) —— `Transformer.apply_ddp()`：先按 `param_dtype` 显式 cast 模型（L1264-L1267）；compile 场景下配置 dynamo 的 DDP 优化器（`ddp_optimizer` 或 `python_reducer_without_compiled_forward`，L1271-L1275）；核心一行是 L1277 的 `replicate(self, device_mesh=dp_mesh, bucket_cap_mb=100)`——composable DDP 原地注册反向钩子，**模型对象不换**，这与 FSDP2 的 `fully_shard` 风格一致。
+[model.py:L1252-L1283](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1252-L1283)
+`Transformer.apply_ddp`：先把模型 cast 到目标 dtype（第 1265-1267 行），再调用 `replicate(self, device_mesh=dp_mesh, bucket_cap_mb=100)`（第 1277 行）原地挂上梯度桶归约；`compile_enabled` 时还会按是否编译反向调整 `torch._dynamo.config.optimize_ddp`（代码注释标明改编自 torchtitan）。
 
-[train_module.py:L171-L187](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L171-L187) —— `TransformerTrainModule.__init__` 中：分布式环境下用 `dp_config` 等调用 `build_world_mesh()`（4.2）；**非分布式却给了并行配置则直接报错**（L179-L187）。随后 L198-L212 调用 `parallelize_model()`（4.3）。
+[common.py:L138-L143](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L138-L143)
+`parallelize_model` 的 DDP 分支：MoE 模型先 `prepare_experts_for_ddp`（专家参数的归约路径与普通参数不同），再 `apply_ddp`。DDP 分支**不消费** `wrapping_strategy` / `prefetch_factor` 这些 FSDP 专属字段。
 
-[train_module.py:L636-L653](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L636-L653) —— `_train_microbatch_context()`：4.4.2 流程图的原文。FSDP 分支调用 `set_is_last_backward`；HSDP 分支多调 `set_requires_all_reduce`（注释原文："For HSDP we can delay the gradients all-reduce until the final micro-batch"）；DDP 分支对非最后 micro-batch 进入 `no_sync()`。
+[train_module/transformer/train_module.py:L636-L655](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L636-L655)
+（同 4.3.3 引用的片段，DDP 视角看第 650-653 行）模型是 `DDP` 时，非最后 micro-batch 进入 `self.model.no_sync()`——把桶归约推迟，实现「累积一次、归约一次」。
 
-[train_module.py:L683-L710](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L683-L710) —— `_clip_grad_norm()`：梯度裁剪的 DP 感知实现。FSDP1 包装走模型自带 `clip_grad_norm_`；FSDP2 下各参数是 DTensor，`get_total_norm` 得到的是 `_NormPartial` 布局的 DTensor，必须 `full_tensor()` 归约成全局范数（L704-L707 注释解释了这与 u6-l2 所讲「DTensor 范数须 full_tensor 归约」是同一段代码）。这正是数据并行对训练循环的渗透：**连梯度裁剪都要知道参数是分片的**。
+再看 MoE-v2 的 OLMoDDP 路径对 DDP 配置的强约束：
 
-[train_module.py:L244-L246](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L244-L246) 与 [L280-L289](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L280-L289) —— `dp_process_group` 属性（给 Trainer 的数据加载与指标归约用）与 `pre_train()` 里的整除校验：`global_batch_size` 必须能被 `rank_microbatch_size × DP world size` 整除——把 u6-l2 的 batch 尺寸契约与 DP 维度联系起来。
+[ddp_train_module.py:L244-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L244-L268)
+`OLMoDDPTrainModule.__init__` 的校验：DP 配置必填且**必须** `name == "ddp"`；`use_reduce_scatter=True` 时还有一串额外限制（不支持 CP、必须只在最后 micro-batch 同步、开 PP 时要求自定义 stage 实现）。
 
-#### 4.4.4 代码实践
+[ddp_train_module.py:L270-L279](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L270-L279)
+最有趣的一条硬性规则：`only_allreduce_last_microbatch` 必须为 True，否则直接抛错。注释解释了原因——`MultiGroupDistributedDataParallel` 把梯度原地累加进扁平桶视图，一个桶在一个累积窗口内只能被 all-reduce 一次；若每个 micro-batch 都归约，会把「已归约的梯度」再归约一遍，轻则梯度未归约、重则数值损坏。这与 4.4.2 的 `no_sync()` 逻辑是同一个道理的「强制版」。
 
-**实践目标**：源码阅读型实践——验证「只在最后一个 micro-batch 同步」的正确性论证。
+#### 4.4.4 代码实践：跟踪一条「为什么必须只在最后一步归约」的证据链
 
-1. 精读 [train_module.py:L465-L493](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L465-L493) 的 micro-batch 循环：注意 `loss_div_factor=batch_num_tokens_for_loss`（全批有效 token 数）在循环**外**算好、对每个 micro-batch 相同。
-2. 写下等价性论证：设第 i 个 micro-batch 的损失为 \( L_i = s_i / N \)（\( s_i \) 是该 micro-batch 的损失和，N 是全批 token 数），则 \( \nabla \sum_i L_i = \nabla (\sum_i s_i)/N = \nabla L_{\text{batch}} \)——即梯度累加天然等于全批平均损失梯度，中间不需要任何跨 rank 通信。
-3. 回答：如果 `loss_div_factor` 误设为「每个 micro-batch 各自的 token 数」，这个论证还成立吗？
-4. 预期结果：不成立——不同 micro-batch 的归一化系数不同，累加出来的不再是全批平均损失梯度，最后一次性 all-reduce 会得到与逐步同步不同的结果。这也解释了为什么 `batch_num_tokens_for_loss` 的计算被小心翼翼地放在循环外（且 SkipStepOptimizer 场景下还要先跨 rank 归约，见 u5-l3/u6-l2）。
+**实践目标**：通过纯源码阅读，把「每个 micro-batch 都 all-reduce 会发生什么」的因果链写出来。
+
+**操作步骤**：
+
+1. 读 [train_module.py:L650-L653](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L650-L653)（经典 DDP 的 `no_sync`）。
+2. 读 [ddp_train_module.py:L270-L279](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L270-L279)（MoE-v2 路径直接把错误配置拒绝在构造期）。
+3. 假设 2 个 micro-batch、DP 世界大小为 2、梯度张量 g 在两个 rank 上分别是 \(g_1, g_2\)，手算以下两种策略在 optim_step 时本地看到的梯度值（设每个 micro-batch 对梯度的贡献分别为 a 和 b，两个 rank 各自独立）：
+
+   - 错误策略（每步都 all-reduce 求和）：第一次归约后本地是 \((a_1+a_2)\)，累加 b 后第二次归约得到 \((a_1+a_2+b_1)+(a_1+a_2+b_2) = 2(a_1+a_2)+(b_1+b_2)\)——a 的归约贡献被计了两次。
+   - 正确策略（最后一步才归约）：本地累积 \(a_i+b_i\)，一次归约得 \((a_1+b_1)+(a_2+b_2)\)。
+
+**需要观察的现象**：错误策略的结果中 \(a_1+a_2\) 的系数是 2，梯度被系统性放大且随 micro-batch 数恶化。
+
+**预期结果**：这解释了两处源码为何都把「只在最后 micro-batch 归约」作为不变量——一处用上下文管理器保证，一处用构造期断言强制。
 
 #### 4.4.5 小练习与答案
 
-**练习 1**：`no_sync()` 挂起归约后，DDP 的梯度桶里存的是什么？
+**练习 1**：`apply_ddp` 里 `replicate(..., bucket_cap_mb=100)` 的桶大小调大/调小各有什么影响？
 
-**答案**：本地梯度在桶视图里**继续累加**（DDP 的 reducer 在 no_sync 下不触发 all-reduce，但 autograd 钩子仍把各参数梯度写进桶）。退出 no_sync 后的最后一个 backward 触发一次 all-reduce，通信量从 K 次降为 1 次。
+答案：桶越大，单次 all-gather... 更准确地说：桶越大，归约次数越少、每次通信越大，与反向重叠的机会越多，但需要先把更多梯度攒齐、首个桶的等待时间变长；桶越小则通信更频繁、调度开销更大。100 MiB 是 torchtitan 风格的大桶默认值。`TransformerDataParallelConfig.bucket_cap_mb` 字段允许覆盖（`None` = 后端默认）。
 
-**练习 2**：DDP 的 `bucket_cap_mb=100`（[model.py:L1277](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/nn/transformer/model.py#L1277)）调大/调小各有什么影响？
+**练习 2**：DDP 路径为什么不消费 `wrapping_strategy`？
 
-**答案**：桶越大，单次 all-reduce 通信越大、次数越少，越容易与其他计算重叠，但梯度「就绪等待」的尾巴越长（桶要等慢的参数到齐）；桶越小则反之。100MiB 是偏大的吞吐优先取值。
+答案：wrap 策略描述的是「哪些模块各自成为一个分片单元」，这是分片式（FSDP）才有的概念；DDP 复制完整参数，没有分片单元可言，只需要把整个模型挂上 `replicate` 的桶归约。
 
-**练习 3**：为什么 `_train_microbatch_context` 对 FSDP 与 DDP 用完全不同的机制（标志位 vs 上下文管理器）表达同一件事？
+**练习 3**：`OLMoDDPTrainModule` 与 `TransformerTrainModule` 都接受 `dp_config`，二者对它的使用有何本质区别？
 
-**答案**：这是两个 PyTorch API 的形状差异——FSDP2 通过 `FSDPModule` 的 setter 声明「最后一个 backward」，DDP（含 composable replicate）通过 `no_sync()` 上下文挂起归约。OLMo-core 的价值在于把两种机制收敛到同一个 hook 点，训练循环正文（u6-l2）完全不感知差异。
-
-### 4.5 OLMoDDPTrainModule：融合 MoE-v2 的 DDP 变体与 reduce-scatter
-
-#### 4.5.1 概念说明
-
-读源码时千万别把两个「DDP」混为一谈：
-
-1. **`DataParallelType.ddp`**：4.4 讲的标准路线，任何 `Transformer` 都能用，配 `TransformerTrainModule` 与普通 `OptimConfig`。
-2. **`OLMoDDPTrainModule`**（本模块，位于 `ddp_train_module.py`）：一条**平行的高级路线**，专门训练融合 MoE-v2 Transformer（模型类 `OLMoDDPModel`，见 u3-l5），配 `OLMoDDPOptimizerConfig`——一个**分布式优化器**：普通参数（非专家参数）的 fp32 主参数与 AdamW 动量可以按 DP 维切片存放（ZeRO 风格），梯度同步由模型侧的 `MultiGroupDistributedDataParallel` 包装器拥有。
-
-这条路线最有意思的开关是 `TransformerDataParallelConfig.use_reduce_scatter`：开启后**普通参数的梯度直接 reduce-scatter 进优化器分片**——反传结束的瞬间，每个 rank 手里的梯度恰好只是自己负责的那 1/D 片，优化器状态无需物化全量梯度。拥有复制优化器状态的参数（如某些共享缓冲）仍走 all-reduce。
-
-#### 4.5.2 核心流程
-
-`OLMoDDPTrainModule.__init__` 中与 DP 相关的构造流程：
-
-```text
-校验: dp_config 必须存在且 name == "ddp"
-校验: only_allreduce_last_microbatch 必须为 True
-       （MultiGroupDDP 的桶视图一个累积窗口只能被 reduce 一次）
-校验: use_reduce_scatter 的三项附加约束
-       （要求最后一步同步 / 不支持 CP / PP 时要求自定义 stage 实现）
-构建自有 dense_mesh（维度 = [pp?, dp, cp?]）与可选 moe_mesh
-parallelize_and_init_model(...): EP/CP/PP 改造 + DP 包裹 + 初始化
-optim.build(model_parts, ...): 构建分布式优化器
-if use_reduce_scatter:
-    sharded = optim.normal_params_with_sharded_optimizer_state()
-    对每个 model part: MultiGroupDDP.configure_reduce_scatter_params(本 part 的分片参数)
-```
-
-训练步内的配套约定：`train_batch` 末尾对每个 model part 调 `finalize_grad_reduce()`；`zero_grads` 用 `m.zero_grad(set_to_none=False)` 保持桶视图稳定（优化器不负责清模型梯度缓冲）。
-
-#### 4.5.3 源码精读
-
-[ddp_train_module.py:L146-L175](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L146-L175) —— `OLMoDDPTrainModule` 类定义与构造签名：模型必须是 `OLMoDDPModel`（L175 断言），优化器是 `OLMoDDPOptimizerConfig`，同样是 DP/TP/CP/EP/PP 六套配置齐挂。
-
-[ddp_train_module.py:L244-L245](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L244-L245) —— 两条硬断言：dp_config 必填、且 `name` 必须是 `"ddp"`。也就是说这条路线**不支持 fsdp/hsdp**——参数复制、优化器状态分片，省显存的任务全交给分布式优化器而不是参数分片。
-
-[ddp_train_module.py:L270-L279](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L270-L279) —— `only_allreduce_last_microbatch=True` 被强制要求，L270-L275 的注释给出理由：`MultiGroupDistributedDataParallel` 把梯度**原地累加进扁平桶视图**，一个累积窗口内每个桶只能被 all-reduce 一次；若每个 micro-batch 都 reduce，会重复归约正在写入的桶，导致梯度缺失或损坏。这是 4.4 「最后一步同步」约定在这条路线上的工程化表述。
-
-[ddp_train_module.py:L246-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L246-L268) —— `use_reduce_scatter` 的三项约束：必须 `only_allreduce_last_microbatch=True`；不支持与 CP 同用（稠密梯度在 DP×CP 上归约而优化器状态只在 DP 上分片，两者不一致）；与 PP 同用时要求 `use_custom_stage_implementation=True`（非最终 stage 的本地反向要跑在 `no_sync()` 里）。字段语义见 [train/config.py:L259-L268](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L259-L268)。
-
-[ddp_train_module.py:L296-L309](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L296-L309) —— 与标准模块不同：这条路线**强制要求分布式环境**（`is_distributed()` 为假直接抛错），并自建 mesh（不走 `build_world_mesh()`）。
-
-[ddp_train_module.py:L532-L548](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L532-L548) —— 自有 dense mesh 的维度拼装：`[pp?] + [dp] + [cp?]`——注意这里 DP 永远是单维（因为 name 锁死为 ddp，不存在 HSDP 拆维）。DP 进程组在 [L630](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L630) 取自 `self.dense_mesh["dp"].get_group()`；MoE 部分另有 `ep_dp`/`ep_mp` 二维 mesh（专家的数据并行与模型并行，详见 u7-l2）。
-
-[ddp_train_module.py:L365-L400](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L365-L400) —— 优化器构建与 reduce-scatter 接线：`optim.build(model_parts, self, strict=False)` 后，若 `use_reduce_scatter`，取出「优化器状态分片的普通参数」集合，逐 model part 调 `configure_reduce_scatter_params()`，并确保每个分片参数都被某个 `MultiGroupDistributedDataParallel` part 管理（L396-L400 漏接即抛错）。L380-L382 的注释点明分工：MultiGroupDDP 拥有普通参数归约，优化器旧的 post-backward reducer 被停用。
-
-[ddp_train_module.py:L1824-L1827](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L1824-L1827) 与 [L2290-L2295](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L2290-L2295) —— 配套契约：`train_batch` 尾声对每个 part 调 `finalize_grad_reduce()`（确保挂起的归约完成）；`zero_grads` 用 `set_to_none=False` 清梯度——桶视图地址必须保持稳定，不能置 None 重建（注释原文："Keep grad-buffer lifecycle in the model wrapper so bucket views stay stable"）。
-
-配置入口：[train/config.py:L484-L539](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L484-L539) 的 `OLMoDDPTrainModuleConfig`（optim 字段类型锁为 `OLMoDDPOptimizerConfig`），其 `build()` 在 [L541-L576](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/config.py#L541-L576)，还顺手把废弃的 `grad_accum_in_fp32` 映射到 dp_config 的 `accumulate_grads_in_fp32`（L565-L569，避免旧配置被静默忽略）。
-
-#### 4.5.4 代码实践
-
-**实践目标**：验证这条路线的配置约束，并观察 CPU 上可跑的构造测试。
-
-1. 运行两个纯配置测试（无分布式、无 GPU，可直接跑）：
-
-```bash
-pytest -v src/test/train/train_module/transformer/ddp_train_module_test.py -k roundtrips
-```
-
-2. 对照阅读 [ddp_train_module_test.py:L44-L57](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/train/train_module/transformer/ddp_train_module_test.py#L44-L57)：注意第二个 round-trip 测试里 `dp_config` 用了 `name=DataParallelType.hsdp` 也能通过——因为这只是**序列化**测试；而真正构造模块的测试（[L102-L120](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/train/train_module/transformer/ddp_train_module_test.py#L102-L120)）用的是 `name=DataParallelType.ddp`，否则会撞上 L245 的断言。
-3. 需要观察的现象：两个 round-trip 测试通过；构造测试（`_run_construct_no_ep`）在你的机器上若无可用的分布式/GPU 环境会被跳过或需要 `run_distributed_test`（其 CPU 构造路径**待本地验证**）。
-4. 预期结果：round-trip 断言 `restored == config` 成立——这是 u2-l1/u2-l2 所讲 Config 序列化能力在并行配置上的体现。
-
-#### 4.5.5 小练习与答案
-
-**练习 1**：`OLMoDDPTrainModule` 路线里，普通参数的显存账和 4.1 表格里的 DDP 行一样吗？
-
-**答案**：不一样。参数与梯度仍是复制的（\( P \) + \( P \)），但优化器的 fp32 主参数与动量按 DP 切片（\( 2P/D \)），合计 \( 2P + 2P/D \)——介于 DDP（\( 4P \)）与 FSDP（\( 4P/D \)）之间；开启 `use_reduce_scatter` 后全量梯度缓冲也不再需要常驻。
-
-**练习 2**：为什么 `use_reduce_scatter` 与上下文并行（CP）暂不兼容？
-
-**答案**：[ddp_train_module.py:L247-L252](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/ddp_train_module.py#L247-L252) 的报错信息给出了答案：稠密参数的梯度要在 **DP×CP** 联合进程组上归约（CP rank 各持完整参数，见 4.2），而优化器状态只在 **DP** 上分片——两个通信域不重合，reduce-scatter 的接收分片无法与优化器分片对齐。
-
-**练习 3**：`zero_grads` 为什么坚持 `set_to_none=False`？
-
-**答案**：MultiGroupDDP 的梯度桶是对扁平缓冲的**视图**，`set_to_none=True` 会把 `p.grad` 置为 None、下次反向重建张量，视图地址失效；保持缓冲不重建（只清零）才能让桶布局在步与步之间保持稳定。
+答案：`TransformerTrainModule` 把 `dp_config.name` 当作三选一的策略开关（fsdp/hsdp 走 `apply_fsdp`，ddp 走 `apply_ddp`）；`OLMoDDPTrainModule`（MoE-v2 融合优化器路径）则把它当作 DDP 专属的调参对象——name 必须是 `ddp`，其余字段（如 `use_reduce_scatter`、`reduce_grads_in_fp32`）控制其自研 `MultiGroupDistributedDataParallel` 的归约行为。
 
 ## 5. 综合实践
 
-**任务**：亲手对比 DDP 与 FSDP 两种配置下的参数分片差异，并用显存公式解释 HSDP 的取舍。分三部分，难度递进。
+设计一个「双进程 CPU 实验」：分别以 `fsdp`、`hsdp`、`ddp` 三种配置构建 world mesh，打印 DP 子网格结构，再回答 HSDP 与 FSDP 的取舍问题。全程不需要 GPU。
 
-### 第 1 步：CPU 双进程验证 mesh 与度数（必做，无 GPU 可跑）
-
-把下面脚本存为 `dp_mesh_compare.py`（示例代码）并运行：
+**任务**：编写脚本 `dp_mesh_compare.py`（示例代码，放在仓库外任意目录运行均可）：
 
 ```python
-"""对比 ddp/fsdp/hsdp 三种 DataParallelConfig 产生的 mesh 形状（CPU + gloo）。"""
+"""对比 fsdp / hsdp / ddp 三种 DataParallelType 的 mesh 结构（CPU + gloo）。"""
+import sys
+
 import torch
-from olmo_core.distributed.parallel import build_world_mesh, get_dp_model_mesh, get_dp_mesh
-from olmo_core.distributed.parallel.data_parallel import DataParallelConfig, DataParallelType
+from olmo_core.distributed.parallel import (
+    build_world_mesh, get_device_mesh_info, get_dp_mesh, get_dp_model_mesh,
+)
+from olmo_core.distributed.parallel.data_parallel import (
+    DataParallelConfig, DataParallelType,
+)
 from olmo_core.testing import run_distributed_test
 
-def worker(dp_name: str):
-    dp = DataParallelConfig(name=dp_name)
-    if dp.name == DataParallelType.hsdp:
-        dp.num_replicas, dp.shard_degree = 2, 2
-    mesh = build_world_mesh(dp=dp)
-    r = torch.distributed.get_rank()
-    print(f"rank{r} {dp_name}: dims={dict(zip(mesh.mesh_diam_names if False else mesh.mesh_dim_names, mesh.shape))} "
-          f"model_mesh={get_dp_model_mesh(mesh).shape} data_mesh={get_dp_mesh(mesh).shape}")
+
+def main(dp_name: str, num_replicas=None, shard_degree=None):
+    dp_cfg = DataParallelConfig(
+        name=DataParallelType(dp_name),
+        num_replicas=num_replicas,
+        shard_degree=shard_degree,
+    )
+    mesh = build_world_mesh(dp=dp_cfg, device_type="cpu")
+    print(f"[rank {mesh.get_rank()}] world mesh: {get_device_mesh_info(mesh)}")
+    print(f"[rank {mesh.get_rank()}] dp model mesh: {get_device_mesh_info(get_dp_model_mesh(mesh))}")
+    print(f"[rank {mesh.get_rank()}] dp data  mesh: {get_device_mesh_info(get_dp_mesh(mesh))}")
+
 
 if __name__ == "__main__":
-    for name in ("ddp", "fsdp", "hsdp"):
-        run_distributed_test(worker, backend="gloo", world_size=4,
-                             start_method="spawn", func_args=(name,))
+    dp_name = sys.argv[1] if len(sys.argv) > 1 else "fsdp"
+    if dp_name == "hsdp":
+        # 4 进程、2 副本 × 2 分片：显式指定，避免单机默认 (1, N) 退化成纯 FSDP
+        run_distributed_test(
+            main, world_size=4, backend="gloo",
+            func_args=("hsdp", 2, 2),
+        )
+    else:
+        run_distributed_test(
+            main, world_size=2, backend="gloo", func_args=(dp_name,),
+        )
 ```
 
-预期：`ddp`/`fsdp` 输出 `dp=4`；`hsdp` 输出 `dp_replicate=2, dp_shard=2`。三种类型的 `data_mesh` 形状积都是 4。仿照的测试蓝本是 [parallel_test.py:L149-L160](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L149-L160)。
+**操作步骤**：
 
-### 第 2 步：对比参数分片与优化器状态（需 ≥2 GPU，无 GPU 则做源码推演并记「待本地验证」）
+1. 分别运行 `python dp_mesh_compare.py fsdp`、`python dp_mesh_compare.py ddp`、`python dp_mesh_compare.py hsdp`。
+2. 记录三种配置下 `dp model mesh` 与 `dp data mesh` 的维度名和形状。
+3. 回答三个问题（答案见源码，可对照 4.2/4.3）：
+   - fsdp 与 ddp 的两种 DP 子网格形状分别是什么？（都应为 1D `dp=进程数`——二者 mesh 相同，差异在后续 `fully_shard` vs `replicate`）
+   - hsdp 的 model mesh 为什么是二维？`num_replicas=2, shard_degree=2` 时形状是什么？（`dp_replicate=2, dp_shard=2`）
+   - 单机不显式指定 `num_replicas` 时 hsdp 会退化成什么？（`(1, 4)`，等价纯 FSDP——因为 `get_num_nodes()` 返回 1）
+4. **注意单例陷阱**：`build_world_mesh` 一个进程只能调用一次（[parallel/__init__.py:L157-L158](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L157-L158)），所以三种配置必须分三次进程运行，不能在同一进程里循环构建——上面的脚本正是为此设计成每次运行只处理一种配置。
 
-仿照 [muon_test.py:L115-L137](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/muon_test.py#L115-L137)（`_run_fsdp_muon`）写一个 worker，分别用 `name=DataParallelType.ddp` 与 `name=DataParallelType.fsdp` 走 `build_world_mesh` → `TransformerConfig.olmo2_30M(vocab_size=1024).build(init_device=device.type)` → `parallelize_model(...)`，然后：
+**进阶（可选，待本地验证）**：若你的 PyTorch 版本支持 CPU 上的 FSDP2/DTensor（gloo），可在此脚本中继续调用 `parallelize_model`（[common.py:L34-L49](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/common.py#L34-L49)）对 `TransformerConfig.olmo2_1M()` 构建的小模型分别施加 fsdp 与 ddp，然后遍历 `model.parameters()` 对比 `p.numel()` 与 `type(p)`：FSDP 下参数应变为 `DTensor` 且本地 numel 约为总量的 1/N，DDP 下保持普通张量且 numel 等于总量；再各自 `optim.build(model)` 后检查优化器状态的分片差异。CPU 上的可行性依赖具体 torch 版本，无法在无 GPU 环境保证，故标注待本地验证。
 
-```python
-from torch.distributed.tensor import DTensor
-total_local = total_global = 0
-for _, p in model.named_parameters():
-    total_global += p.numel()                      # DTensor 的 numel() 是全局量
-    total_local += p.to_local().numel() if isinstance(p, DTensor) else p.numel()
-print(f"rank{torch.distributed.get_rank()}: local={total_local:,} global={total_global:,}")
-```
-
-预期结果：
-
-| 配置 | 每个 rank 的 local | global |
-| --- | --- | --- |
-| ddp | = 全模型参数量（复制） | = 全模型参数量 |
-| fsdp | ≈ 全模型参数量 / 2（相邻 rank 拼起来等于全量） | = 全模型参数量 |
-
-再各自 `optim_config.build(model)` 做一次 `optim.step()`，对比两边 `len(optim.state)` 与单个参数状态张量的形状——DDP 的优化器状态是全量的，FSDP 的状态跟随 DTensor 分片（约为一半）。这一步的具体数值**待本地验证**（本讲编写环境无 GPU；FSDP 模型级包裹在仓库测试中均标注 `requires_multi_gpu`，如 [muon_test.py:L95-L112](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/muon_test.py#L95-L112)）。
-
-### 第 3 步：用公式解释 HSDP 取舍（纸面推演）
-
-设 8 卡单机、模型参数量 \( P \)、AdamW。分别计算并填表：
-
-| 方案 | 每卡权重态 | all-gather 范围 | 跨组通信 |
-| --- | --- | --- | --- |
-| DDP | \( 4P \) | 无 | — |
-| FSDP（D=8） | \( 4P/8 \) | 8 卡 | — |
-| HSDP（R=2, S=4） | \( 4P/4 = P \) | 4 卡（组内） | 组间 all-reduce |
-
-**结论要点**（也是本实践的交付物）：HSDP 每卡显存是 FSDP 的 \( R \) 倍、DDP 的 \( 1/S \)；all-gather 被限制在 \( S \) 卡小组内。当 \( S \) 恰好等于单节点 GPU 数时（这正是 [data_parallel.py:L41-L49](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/data_parallel.py#L41-L49) 的默认值），大体积的 all-gather/reduce-scatter 全部落在节点内 NVLink 上，跨节点只剩小范围的副本间 all-reduce——这就是 HSDP 相对 FSDP 在多节点场景的核心收益。
+**预期结果**：mesh 部分的输出形状可从源码完全推出（见步骤 3 的参考答案）；模型/优化器分片对比部分在有 GPU 的环境下结论同样成立（此时建议直接改 `src/examples/llm/train.py` 第 188-190 行的 `name` 字段做 2 卡小实验）。
 
 ## 6. 本讲小结
 
-- `DataParallelType` 三值（ddp/fsdp/hsdp）决定的不是「是否数据并行」，而是**参数/梯度/优化器状态的摆放方式与梯度聚合原语**：DDP 全复制 + all-reduce（每卡 \( 4P \)）；FSDP 全分片 + reduce-scatter/all-gather（每卡 \( 4P/D \)）；HSDP 组内分片、组间复制（每卡 \( 4P/S \)，all-gather 限制在组内）。
-- HSDP 的 `num_replicas × shard_degree` 必须等于 DP world size，默认「每节点一副本、节点内 GPU 数为分片度」，由 `get_replicate_and_shard_degree()` 推导并在 mesh 中展开为 `dp_replicate × dp_shard` 两个维度。
-- `build_world_mesh()` 把 DP 作为「扣除 PP/CP/TP/EP 之后的余量」切出来；`get_dp_model_mesh()`（模型包装用，折叠 EP 与 CP）与 `get_dp_mesh()`（数据加载用，不折叠 CP）是两个不同的投影。
-- `parallelize_model()` 里 fsdp/hsdp 共用 `apply_fsdp()`（`fully_shard` 逐 block/embedding/lm_head/root 落点，粒度由 `TransformerDataParallelWrappingStrategy` 控制，即 FSDP2 时代的 wrap policy）；ddp 走 `replicate()`。
-- 「梯度只在最后一个 micro-batch 同步」是跨模块契约：FSDP 用 `set_is_last_backward`（HSDP 再加 `set_requires_all_reduce`），DDP 用 `no_sync()`；其正确性依赖 u6-l2 的 sum/N 损失归一。
-- `OLMoDDPTrainModule` 是融合 MoE-v2 的平行路线：dp_config 锁死 `name="ddp"`，梯度归约由 `MultiGroupDistributedDataParallel` 拥有，`use_reduce_scatter` 可把普通参数梯度直接归约进分布式优化器分片。
+- **一个枚举三种策略**：`DataParallelConfig.name`（fsdp/hsdp/ddp）是数据并行的唯一开关；fsdp 与 hsdp 共用同一条 `fully_shard` 路径，差异完全由 mesh 维度承载——hsdp 产生 `dp_replicate × dp_shard` 二维网格，FSDP2 对二维 mesh 的解释天然就是 HSDP。
+- **mesh 是并行策略的骨架**：`build_world_mesh` 按 pp → dp（→ replicate+shard）→ cp → tp 的顺序组织进程；模型视角的 `get_dp_model_mesh` 会把 CP/EP 折进 DP 维（参数同步需要），数据视角的 `get_dp_mesh` 折 EP 不折 CP（数据分配需要），二者职责分明。
+- **并行化顺序是契约**：`parallelize_model` 中 DP 最后应用、`init_weights` 在其后、优化器 build 更在其后——优化器看到的参数形态决定了优化器状态的形态（分片或完整）。
+- **梯度同步时机是隐式契约**：三种策略都遵守「梯度累积窗口内只在最后一个 micro-batch 归约」——FSDP 用 `set_is_last_backward`，HSDP 再加 `set_requires_all_reduce`，DDP 用 `no_sync()`，MoE-v2 的 OLMoDDP 路径则把这条规则升级为构造期硬断言。
+- **显存与通信的取舍**：DDP 每卡约 \(14\Psi\) 字节与 N 无关、通信最少；FSDP 除以 N、通信约三倍；HSDP 除以 S、大通信限制在 shard 子组内。默认「每节点一副本」正是为了把 all-gather/reduce-scatter 留在节点内高带宽互联上。
+- **细节里藏着正确性**：tie 权重必须留在同一 FSDP 组、梯度裁剪必须走分片感知的 `clip_grad_norm_`、`bucket_cap_mb` 可调桶大小——这些点都直接来自源码注释与校验逻辑。
 
 ## 7. 下一步学习建议
 
-下一讲 **u7-l2（张量、流水线、上下文与专家并行）** 将补齐 mesh 的其余维度：TP 如何切注意力头、PP 的进程组划分与 train module、CP（ring attention）的负载均衡、EP 的 `ep_dp`/`ep_mp` 折叠——其中 EP「只允许搭配 HSDP、复用 `dp_shard` 维」的结论正是本讲 4.2 埋下的伏笔。阅读建议：
+下一讲 **u7-l2（张量、流水线、上下文与专家并行）** 将打开 `distributed/parallel/` 的其余维度：`tensor_parallel.py`、`pipeline_parallel.py`、`context_parallel.py`、`expert_parallel.py`，看它们如何与本讲的 DP 维组合成多维 mesh（本讲已经见过两个衔接点：EP 目前只允许搭配 HSDP、CP 维在模型 mesh 中被折进 DP）。之后再进入 **u7-l3（分布式工具与测试基础设施）**，深入 `init_distributed`、进程组管理与 `run_distributed_test` 的多进程机制——本讲综合实践已经用到了它，届时会理解其实现细节。
 
-- 精读 [src/olmo_core/distributed/parallel/__init__.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/distributed/parallel/__init__.py#L116-L259) 的 `build_world_mesh()` 全文，把「维度顺序 = [pp, (dp_replicate, dp_shard)|dp, cp, tp]」记牢。
-- 跑一遍 [src/test/distributed/parallel/parallel_test.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L136-L160) 的全部 CPU 参数化用例，对照 [parallel_test.py:L30-L43](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/distributed/parallel/parallel_test.py#L30-L43) 的期望 DP world size 公式。
-- 有条件时在 2×GPU 上跑 [src/test/optim/muon_test.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/muon_test.py#L68-L112) 的 HSDP/FSDP 参数化用例，把本讲综合实践第 2 步的「待本地验证」补上。
+建议继续阅读的源码（按优先级）：
+
+1. `src/olmo_core/nn/moe/mlp.py` 第 102-112 行附近——MoE 专家在 HSDP 下如何选择在哪个 mesh 维上 `fully_shard`；
+2. `src/olmo_core/distributed/parallel/expert_parallel.py`——EP 的配置与 `build_expert_parallel_mesh`；
+3. `src/test/nn/parallel/distributed_test.py`——分布式原语层面的更多 CPU 可跑测试。

@@ -7,7 +7,7 @@ DeepSpeed 不只跑在 NVIDIA GPU 上。读完本讲，你应该能够：
 1. 列举 `AbstractAccelerator`（`DeepSpeedAccelerator`）定义的 20+ 组设备无关接口，并按「设备 / RNG / 流与事件 / 显存 / 数据类型 / 图操作 / 张量 / pinned memory / 算子构建」分组归类。
 2. 解释 `real_accelerator.py` 的探测加载机制：`DS_ACCELERATOR` 环境变量覆盖优先，其次按「装了哪个 torch 扩展」自动探测，探测顺序为什么必须把「伪装成 torch.cuda 的后端」放在 CUDA 之前。
 3. 以 CUDA 与 CPU 两个参照实现为例，对比同一接口在不同硬件上的语义差异（同步设备、可用内存、通信后端、图捕获）。
-4. 解释图捕获能力的**显式 opt-in** 设计：`is_graph_capture_supported()` 默认 `False`，后端验证通过后才覆写为 `True`；KLXPU 如何从「显式拒绝」演进到「继承 CUDA 的 opt-in」（#9042）。
+4. 解释图捕获能力的**显式 opt-in** 设计：`is_graph_capture_supported()` 默认 `False`，后端验证通过后才覆写为 `True`。并对比三种接入姿势——CUDA/NPU 的「原生 opt-in」、XPU 的「能力探测式 opt-in」（#9007：torch ≥ 2.11 提供了 `torch.xpu.XPUGraph` / 流捕获 / `is_current_stream_capturing`，XPU 后端从此不再是 stub，HybridEngine 可在 XPU 上走图捕获路径）、KLXPU 的「先显式拒绝、#9042 验证后删除覆写恢复继承」。
 5. 以 XPU 后端为例，看一个 accelerator 如何绕过 torch、用 `ctypes` 直接驱动 Level Zero 的 `ZE_extension_external_memmap_sysmem` 扩展注册页锁定主机内存——「torch 通道不可用时后端自力更生」的实现模式。
 
 ## 2. 前置知识
@@ -16,7 +16,7 @@ DeepSpeed 不只跑在 NVIDIA GPU 上。读完本讲，你应该能够：
 - **ABC 抽象基类**：Python 的 `abc.ABC` + `@abc.abstractmethod` 定义「子类必须实现」的接口。抽象方法只写 `...`（函数体为空），实现类必须逐一落实。
 - **全局单例**：`real_accelerator.py` 用模块级全局变量 `ds_accelerator` 缓存当前选中的后端实例，首次 `get_accelerator()` 时探测并构造，之后直接复用。
 - **pinned memory（页锁定主机内存）**：普通主机内存可能被操作系统换页（page out），设备异步 DMA 拷贝期间内存被搬走会得到脏数据。pinned memory 被锁在物理页上，且能被设备直接映射进设备页表，是高速 H2D/D2H 拷贝和 ZeRO-Offload 的基础。CUDA 里对应 `cudaHostRegister`/`cudaHostUnregister`。
-- **CUDA Graph（图捕获）**：把一段 GPU 操作录制（capture）成一张图，之后一次 replay 就重放全部操作，省去逐 kernel 的 launch 开销。图捕获期间很多 host 端调用（如查询、同步）是非法的，所以「是否正处于捕获中」本身也需要一个查询接口。DeepSpeed 的 Hybrid Engine 用它加速推理 rollout（详见 u7-l4）。
+- **CUDA Graph（图捕获）**：把一段 GPU 操作录制（capture）成一张图，之后一次 replay 就重放全部操作，省去逐 kernel 的 launch 开销。图捕获期间很多 host 端调用（如查询、同步）是非法的，所以「是否正处于捕获中」本身也需要一个查询接口。DeepSpeed 的 Hybrid Engine 用它加速推理 rollout（详见 u7-l4）。注意：PyTorch 直到 2.11 才为 XPU 提供同套图 API（`torch.xpu.XPUGraph`、`torch.xpu.graph` 捕获上下文、`torch.xpu.is_current_stream_capturing()`）——这是本讲 #9007 的前提。
 - **ctypes / FFI**：Python 标准库 `ctypes` 可以直接 `CDLL` 加载动态库（如 `libze_loader.so.1`）、按 C 结构体布局定义 `Structure`、声明函数签名后直接调用 C 函数——不需要写任何 C 扩展。
 - **符号链接双轨布局**（u1-l2 已建立）：git 实际跟踪的是仓库顶层的 `accelerator/` 目录；`deepspeed/accelerator` 是一个指向 `../accelerator/` 的符号链接。两个导入路径（`accelerator.xxx` 与 `deepspeed.accelerator.xxx`）解析到同一份源码文件，但在 Python 里是两个独立模块对象。
 
@@ -24,15 +24,15 @@ DeepSpeed 不只跑在 NVIDIA GPU 上。读完本讲，你应该能够：
 
 | 文件 | 作用 |
 | --- | --- |
-| [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py) | 抽象基类 `DeepSpeedAccelerator`，定义全部设备无关接口与若干带默认实现的「opt-in 能力位」 |
-| [accelerator/real_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py) | 探测器：`get_accelerator()` / `set_accelerator()` / `is_current_accelerator_supported()`，维护全局单例 |
-| [accelerator/cuda_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py) | CUDA 参照实现（NVIDIA GPU），也是多数后端继承的「最完整实现」 |
-| [accelerator/cpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py) | CPU 参照实现，展示「没有 GPU 语义时接口如何退化」 |
-| [accelerator/klxpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/klxpu_accelerator.py) | 昆仑芯 XPU 后端：继承 CUDA、只覆写差异点，是「继承 + 显式能力声明」的样本 |
-| [accelerator/xpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py) | Intel GPU 后端：`ctypes` 直驱 Level Zero 注册 pinned memory 的「自力更生」样本 |
-| [deepspeed/accelerator/__init__.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/accelerator/__init__.py) | 门面：只导出 `DeepSpeedAccelerator`、`get_accelerator`、`set_accelerator`、`is_current_accelerator_supported` 四个名字 |
-| [tests/unit/accelerator/test_accelerator_graph.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/tests/unit/accelerator/test_accelerator_graph.py) | 图操作接口的契约测试：支持图的后端做「捕获-回放」往返，不支持的后端必须「eager 执行 + replay 空操作」 |
-| [docs/_tutorials/accelerator-abstraction-interface.md](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/docs/_tutorials/accelerator-abstraction-interface.md) | 官方移植指南：`torch.cuda.xxx` → `get_accelerator().xxx` 的改写规则与图捕获 opt-in 契约 |
+| [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py) | 抽象基类 `DeepSpeedAccelerator`，定义全部设备无关接口与若干带默认实现的「opt-in 能力位」 |
+| [accelerator/real_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py) | 探测器：`get_accelerator()` / `set_accelerator()` / `is_current_accelerator_supported()`，维护全局单例 |
+| [accelerator/cuda_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py) | CUDA 参照实现（NVIDIA GPU），也是多数后端继承的「最完整实现」 |
+| [accelerator/cpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py) | CPU 参照实现，展示「没有 GPU 语义时接口如何退化」 |
+| [accelerator/klxpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/klxpu_accelerator.py) | 昆仑芯 XPU 后端：继承 CUDA、只覆写差异点，是「继承 + 显式能力声明」的样本 |
+| [accelerator/xpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py) | Intel GPU 后端：`ctypes` 直驱 Level Zero 注册 pinned memory 的「自力更生」样本；#9007 后图操作五件套也是「能力探测式 opt-in」的样本 |
+| [deepspeed/accelerator/__init__.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/accelerator/__init__.py) | 门面：只导出 `DeepSpeedAccelerator`、`get_accelerator`、`set_accelerator`、`is_current_accelerator_supported` 四个名字 |
+| [tests/unit/accelerator/test_accelerator_graph.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/tests/unit/accelerator/test_accelerator_graph.py) | 图操作接口的契约测试：支持图的后端做「捕获-回放」往返，不支持的后端必须「eager 执行 + replay 空操作」；#9007 新增 XPU 的 opt-in 一致性测试 |
+| [docs/_tutorials/accelerator-abstraction-interface.md](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/docs/_tutorials/accelerator-abstraction-interface.md) | 官方移植指南：`torch.cuda.xxx` → `get_accelerator().xxx` 的改写规则与图捕获 opt-in 契约 |
 
 > 注意：`deepspeed/accelerator/` 在仓库里是符号链接（`ls -la deepspeed/` 可见 `accelerator -> ../accelerator/`），git 只跟踪顶层 `accelerator/`。因此本文永久链接统一使用 `accelerator/...` 这一真实路径；你在代码里看到 `from deepspeed.accelerator.cuda_accelerator import ...` 时，读到的就是同一个文件。
 
@@ -71,7 +71,7 @@ DeepSpeed 的 runtime 代码（engine、ZeRO、通信……）要同时支持十
 
 类的骨架与四个「同步设备」行为接口：
 
-[accelerator/abstract_accelerator.py:L10-L32](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L10-L32) 定义抽象基类。开头四个抽象方法是一组「设备执行模型」声明：`is_synchronized_device`（设备是否与 host 天然同步执行）、`use_host_timers`（计时用 host 时钟还是设备事件）、`resolves_data_dependency`、`handles_memory_backpressure`。CUDA 这类异步设备对四者基本答「否」，CPU 这类同步设备答「是」——它们决定了上层是否需要额外的 stream 同步与流控逻辑。
+[accelerator/abstract_accelerator.py:L10-L32](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L10-L32) 定义抽象基类。开头四个抽象方法是一组「设备执行模型」声明：`is_synchronized_device`（设备是否与 host 天然同步执行）、`use_host_timers`（计时用 host 时钟还是设备事件）、`resolves_data_dependency`、`handles_memory_backpressure`。CUDA 这类异步设备对四者基本答「否」，CPU 这类同步设备答「是」——它们决定了上层是否需要额外的 stream 同步与流控逻辑。
 
 接口按注释分组，共约 20 组、60+ 个方法：
 
@@ -91,17 +91,17 @@ DeepSpeed 的 runtime 代码（engine、ZeRO、通信……）要同时支持十
 
 两个「能力位」的默认实现，注意它们都是**显式 opt-in**（默认关闭）：
 
-- [accelerator/abstract_accelerator.py:L210-L216](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L210-L216)：`prefer_triton_grouped_mm()` 默认 `False`，注释说明只有当 Triton grouped-GEMM 确实快于 `torch._grouped_mm` 的后端才覆写为 `True`。
-- [accelerator/abstract_accelerator.py:L225-L229](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L225-L229)：`is_graph_capture_supported()` 默认 `False`、`is_current_stream_capturing()` 默认 `False`——这段注释是本讲 4.4 节的核心，先记住结论：**只暴露图 API 不等于支持图捕获，未验证的后端留在 eager 路径**。
+- [accelerator/abstract_accelerator.py:L210-L216](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L210-L216)：`prefer_triton_grouped_mm()` 默认 `False`，注释说明只有当 Triton grouped-GEMM 确实快于 `torch._grouped_mm` 的后端才覆写为 `True`。
+- [accelerator/abstract_accelerator.py:L218-L229](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L218-L229)：`is_graph_capture_supported()` 默认 `False`、`is_current_stream_capturing()` 默认 `False`——这段注释是本讲 4.4 节的核心，先记住结论：**只暴露图 API 不等于支持图捕获，未验证的后端留在 eager 路径**。
 
 pinned memory 的公共分发层（XPU 会覆写其中的 `register_host_memory`）：
 
-- [accelerator/abstract_accelerator.py:L293-L303](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L293-L303)：`register_host_memory(address, num_bytes)` 默认返回 `False`（「本后端不支持向设备运行时注册已有主机内存」），`unregister_host_memory` 默认 `None`，`pin_memory_alignment` 默认 1（无对齐要求）。
-- [accelerator/abstract_accelerator.py:L337-L352](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L337-L352)：`pin_memory()` 先查是否启用了原生 pinned 后端（经 `DS_PIN_MEMORY_BACKEND` 选择，见 [deepspeed/utils/pin_memory.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/utils/pin_memory.py)），有则走原生通道并记账，没有则回退 torch 的 `tensor.pin_memory()`。原生通道内部最终就会调用后端的 `register_host_memory`——这就是 4.5 节 XPU 实现的接入点。
+- [accelerator/abstract_accelerator.py:L293-L303](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L293-L303)：`register_host_memory(address, num_bytes)` 默认返回 `False`（「本后端不支持向设备运行时注册已有主机内存」），`unregister_host_memory` 默认 `None`，`pin_memory_alignment` 默认 1（无对齐要求）。
+- [accelerator/abstract_accelerator.py:L337-L352](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L337-L352)：`pin_memory()` 先查是否启用了原生 pinned 后端（经 `DS_PIN_MEMORY_BACKEND` 选择，见 [deepspeed/utils/pin_memory.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/utils/pin_memory.py)），有则走原生通道并记账，没有则回退 torch 的 `tensor.pin_memory()`。原生通道内部最终就会调用后端的 `register_host_memory`——这就是 4.5 节 XPU 实现的接入点。
 
 最后看门面导出：
 
-- [deepspeed/accelerator/__init__.py:L6-L7](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/accelerator/__init__.py#L6-L7)：整个包对外只有四个名字，用户侧最常见的写法是 `from deepspeed.accelerator import get_accelerator`。
+- [deepspeed/accelerator/__init__.py:L6-L7](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/accelerator/__init__.py#L6-L7)：整个包对外只有四个名字，用户侧最常见的写法是 `from deepspeed.accelerator import get_accelerator`。
 
 #### 4.1.4 代码实践
 
@@ -109,7 +109,7 @@ pinned memory 的公共分发层（XPU 会覆写其中的 `register_host_memory`
 
 **操作步骤**：
 
-1. 打开 [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py)，按上面的分组表数一遍抽象方法。
+1. 打开 [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py)，按上面的分组表数一遍抽象方法。
 2. 在任意装了 deepspeed 的环境（CPU 机器即可）运行下面脚本（**示例代码**，非项目原有文件）：
 
 ```python
@@ -145,7 +145,7 @@ for probe in ("is_fp64_supported", "prefer_triton_grouped_mm",
 #### 4.1.5 小练习与答案
 
 **练习 1**：为什么 `is_fp64_supported` 不是抽象方法，而是带默认实现 `return True`？
-**答案**：见 [accelerator/abstract_accelerator.py:L177-L179](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L177-L179) 的注释——几乎所有加速器都支持 fp64，只有少数不支持的后端才需要覆写；把它做成抽象方法会强迫所有后端写一模一样的样板代码。这也是抽象层的一个通用取舍：**越是「几乎人人都有」的能力越适合给默认实现，越是「人人不同」的能力越适合抽象方法**。
+**答案**：见 [accelerator/abstract_accelerator.py:L177-L179](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L177-L179) 的注释——几乎所有加速器都支持 fp64，只有少数不支持的后端才需要覆写；把它做成抽象方法会强迫所有后端写一模一样的样板代码。这也是抽象层的一个通用取舍：**越是「几乎人人都有」的能力越适合给默认实现，越是「人人不同」的能力越适合抽象方法**。
 
 **练习 2**：`get_accelerator()` 返回的对象为什么不每次新建？
 **答案**：探测器把实例缓存在模块级全局变量 `ds_accelerator`（见 4.2.3），首次构造后复用。后端对象自身带有状态（如 CUDA 的 pynvml 句柄、CPU 的 max_mem 统计），反复新建既浪费又会重复初始化原生库。
@@ -186,25 +186,25 @@ get_accelerator()
 
 支持的后端清单与全局缓存变量：
 
-- [accelerator/real_accelerator.py:L23-L25](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L23-L25)：`SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa', 'klxpu']` 共 10 种；`ds_accelerator = None` 就是单例缓存。
+- [accelerator/real_accelerator.py:L23-L25](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L23-L25)：`SUPPORTED_ACCELERATOR_LIST = ['cuda', 'cpu', 'xpu', 'npu', 'mps', 'hpu', 'mlu', 'sdaa', 'supa', 'klxpu']` 共 10 种；`ds_accelerator = None` 就是单例缓存。
 
 「双基类」校验——符号链接布局的直接后果：
 
-- [accelerator/real_accelerator.py:L28-L44](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L28-L44)：`_validate_accelerator` 同时导入两条路径的基类（`accelerator.abstract_accelerator` 与 `deepspeed.accelerator.abstract_accelerator`），实例只要是其**之一**的实例即算合格。原因写在注释里：安装期用 `accelerator.*` 路径、运行期扩展用 `deepspeed.accelerator.*` 路径，符号链接让两个路径指向同一文件，但 Python 会为它们生成两个不同的类对象——单一路径的 `isinstance` 会误拒合法后端。
+- [accelerator/real_accelerator.py:L28-L44](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L28-L44)：`_validate_accelerator` 同时导入两条路径的基类（`accelerator.abstract_accelerator` 与 `deepspeed.accelerator.abstract_accelerator`），实例只要是其**之一**的实例即算合格。原因写在注释里：安装期用 `accelerator.*` 路径、运行期扩展用 `deepspeed.accelerator.*` 路径，符号链接让两个路径指向同一文件，但 Python 会为它们生成两个不同的类对象——单一路径的 `isinstance` 会误拒合法后端。
 
 环境变量覆盖与扩展预检（以 klxpu 分支为例）：
 
-- [accelerator/real_accelerator.py:L58-L114](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L58-L114)：`DS_ACCELERATOR` 存在时逐后端预检，例如 `klxpu` 分支（L106-L110）尝试 `import torch_xmlir`，失败即抛 `ValueError("KLXPU_Accelerator requires torch_xmlir, ...")`；不在清单里的值（L111-L113）直接拒绝。注意 `cpu` 分支（L68-L69）什么都不检——CPU 永远可用。
+- [accelerator/real_accelerator.py:L58-L114](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L58-L114)：`DS_ACCELERATOR` 存在时逐后端预检，例如 `klxpu` 分支（L106-L110）尝试 `import torch_xmlir`，失败即抛 `ValueError("KLXPU_Accelerator requires torch_xmlir, ...")`；不在清单里的值（L111-L113）直接拒绝。注意 `cpu` 分支（L68-L69）什么都不检——CPU 永远可用。
 
 自动探测链与两处「必须在 CUDA 之前」的顺序：
 
-- [accelerator/real_accelerator.py:L175-L194](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L175-L194)：`supa` 与 `klxpu` 的探测注释都写明「spooofs/presents itself through torch.cuda, so this check must come before the CUDA detection below」。`torch_xmlir` 导入成功即选 `klxpu`。
-- [accelerator/real_accelerator.py:L195-L216](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L195-L216)：真正的 CUDA 判定要求 `torch.cuda.device_count() > 0 and torch.cuda.is_available()` 两个条件（注释引用 PR#6810：`device_count` 先行可以避免无设备时的 CUDA 调用，`is_available` 保证没有初始化错误）；全部失败则 warning「Setting accelerator to CPU...」并兜底 `cpu`。代码里散落的 `#ignore-cuda` 注释是仓库标注「此处故意使用 torch.cuda」的记号——运行时代码按文档约定应改写为 `get_accelerator().xxx()`，探测器与后端实现内部属于例外。
+- [accelerator/real_accelerator.py:L175-L194](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L175-L194)：`supa` 与 `klxpu` 的探测注释都写明「spooofs/presents itself through torch.cuda, so this check must come before the CUDA detection below」。`torch_xmlir` 导入成功即选 `klxpu`。
+- [accelerator/real_accelerator.py:L195-L216](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L195-L216)：真正的 CUDA 判定要求 `torch.cuda.device_count() > 0 and torch.cuda.is_available()` 两个条件（注释引用 PR#6810：`device_count` 先行可以避免无设备时的 CUDA 调用，`is_available` 保证没有初始化错误）；全部失败则 warning「Setting accelerator to CPU...」并兜底 `cpu`。代码里散落的 `#ignore-cuda` 注释是仓库标注「此处故意使用 torch.cuda」的记号——运行时代码按文档约定应改写为 `get_accelerator().xxx()`，探测器与后端实现内部属于例外。
 
 按名字实例化并记录日志：
 
-- [accelerator/real_accelerator.py:L220-L264](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L220-L264)：一长串 `elif` 把名字映射到 `from .xxx_accelerator import XXX_Accelerator` 的**延迟导入**（只有选中的后端才被 import，避免装不上无关扩展），最后 `_validate_accelerator` 并打日志 `Setting ds_accelerator to {name} ({ds_set_method})`。
-- [accelerator/real_accelerator.py:L267-L272](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/real_accelerator.py#L267-L272)：`set_accelerator(accel_obj)` 允许外部（例如测试、或扩展包）替换单例，同样先做双基类校验。
+- [accelerator/real_accelerator.py:L220-L264](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L220-L264)：一长串 `elif` 把名字映射到 `from .xxx_accelerator import XXX_Accelerator` 的**延迟导入**（只有选中的后端才被 import，避免装不上无关扩展），最后 `_validate_accelerator` 并打日志 `Setting ds_accelerator to {name} ({ds_set_method})`。
+- [accelerator/real_accelerator.py:L267-L272](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/real_accelerator.py#L267-L272)：`set_accelerator(accel_obj)` 允许外部（例如测试、或扩展包）替换单例，同样先做双基类校验。
 
 文件尾部（L275-L317）还保留了一段用法示例字符串，演示 `get_accelerator()` 与 `set_accelerator()` 的典型输出，可直接阅读。
 
@@ -272,36 +272,38 @@ KLXPU 等后端更进一步：**直接继承 `CUDA_Accelerator`**，只覆写差
 
 先看构造函数里两个重要字段：
 
-- [accelerator/cuda_accelerator.py:L29-L37](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L29-L37)：CUDA 后端 `_name='cuda'`，通信后端为 `'nccl'`（Windows 下降级 `'gloo'`），编译后端 `"inductor"`；pynvml 延迟初始化（CUDA 不可用时 import 也不炸）。
-- [accelerator/cpu_accelerator.py:L165-L179](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L165-L179)：CPU 后端的通信后端是 `'ccl'`（装了 oneccl 绑定时）或 `'gloo'`，并用 `psutil` 记录进程 RSS 作为内存统计基础。
+- [accelerator/cuda_accelerator.py:L29-L37](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L29-L37)：CUDA 后端 `_name='cuda'`，通信后端为 `'nccl'`（Windows 下降级 `'gloo'`），编译后端 `"inductor"`；pynvml 延迟初始化（CUDA 不可用时 import 也不炸）。
+- [accelerator/cpu_accelerator.py:L165-L179](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L165-L179)：CPU 后端的通信后端是 `'ccl'`（装了 oneccl 绑定时）或 `'gloo'`，并用 `psutil` 记录进程 RSS 作为内存统计基础。
 
 **对比一：执行模型四连问。**
 
-- [accelerator/cuda_accelerator.py:L51-L61](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L51-L61)：CUDA 答 `is_synchronized_device() == False`，其余三个方法全部转发给它——GPU 异步执行，所以计时要用设备事件、数据依赖要显式 stream 同步、显存反压要自己处理。
-- [accelerator/cpu_accelerator.py:L182-L192](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L182-L192)：CPU 全部答 `True`。子类只需覆写 `is_synchronized_device` 一个方法，其余继承——**把四个问题归约为一个事实**是这对实现里最值得学习的技巧。
+- [accelerator/cuda_accelerator.py:L51-L61](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L51-L61)：CUDA 答 `is_synchronized_device() == False`，其余三个方法全部转发给它——GPU 异步执行，所以计时要用设备事件、数据依赖要显式 stream 同步、显存反压要自己处理。
+- [accelerator/cpu_accelerator.py:L182-L192](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L182-L192)：CPU 全部答 `True`。子类只需覆写 `is_synchronized_device` 一个方法，其余继承——**把四个问题归约为一个事实**是这对实现里最值得学习的技巧。
 
 **对比二：`synchronize`。**
 
-- [accelerator/cuda_accelerator.py:L87-L92](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L87-L92)：CUDA 版注释解释了一个真实兼容性坑——Torch 2.14 的 Dynamo 拒绝 `torch.cuda.synchronize(None)`，而 `None` 语义上是「当前设备」，所以要显式省略参数。
-- [accelerator/cpu_accelerator.py:L230-L231](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L230-L231)：CPU 版就是 `return`——同步设备无需同步。
+- [accelerator/cuda_accelerator.py:L87-L92](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L87-L92)：CUDA 版注释解释了一个真实兼容性坑——Torch 2.14 的 Dynamo 拒绝 `torch.cuda.synchronize(None)`，而 `None` 语义上是「当前设备」，所以要显式省略参数。
+- [accelerator/cpu_accelerator.py:L230-L231](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L230-L231)：CPU 版就是 `return`——同步设备无需同步。
 
 **对比三：`available_memory`（本讲实践任务指定的对比方法之一）。**
 
-- [accelerator/cuda_accelerator.py:L178-L204](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L178-L204)：`total_memory` 读设备属性；`available_memory` 优先用 pynvml 拿驱动视角的**整机空闲显存**（还要经 `_get_nvml_gpu_id` 做 `CUDA_VISIBLE_DEVICES` 的 id 重映射，因为 pynvml 不认这个环境变量），pynvml 不可用时回退到近似：
+- [accelerator/cuda_accelerator.py:L178-L204](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L178-L204)：`total_memory` 读设备属性；`available_memory` 优先用 pynvml 拿驱动视角的**整机空闲显存**（还要经 `_get_nvml_gpu_id` 做 `CUDA_VISIBLE_DEVICES` 的 id 重映射，因为 pynvml 不认这个环境变量），pynvml 不可用时回退到近似：
 
   \[ \text{available} \approx \text{total\_memory} - \text{memory\_allocated} \]
 
   （近似在于没算缓存与碎片，只用于降级路径。）
-- [accelerator/cpu_accelerator.py:L333-L346](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L333-L346)：CPU 版用 `psutil.virtual_memory()`，并与 **cgroup 限额**取 `min`——容器里「机器有 512G 但容器限额 64G」时，必须报 64G 口径的可用量，否则 ZeRO 的内存规划会严重超卖。
+- [accelerator/cpu_accelerator.py:L333-L346](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L333-L346)：CPU 版用 `psutil.virtual_memory()`，并与 **cgroup 限额**取 `min`——容器里「机器有 512G 但容器限额 64G」时，必须报 64G 口径的可用量，否则 ZeRO 的内存规划会严重超卖。
 
 **对比四：`communication_backend_name`（实践任务指定的对比方法之二）。**
 
-- [accelerator/cuda_accelerator.py:L263-L264](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L263-L264) 与 [accelerator/cpu_accelerator.py:L365-L366](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L365-L366)：两者都返回构造期写好的 `self._communication_backend_name`，但取值不同（CUDA → `nccl`；CPU → `ccl`/`gloo`）。上层 `init_process_group(get_accelerator().communication_backend_name())` 由此做到后端无关。
+- [accelerator/cuda_accelerator.py:L263-L264](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L263-L264) 与 [accelerator/cpu_accelerator.py:L365-L366](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L365-L366)：两者都返回构造期写好的 `self._communication_backend_name`，但取值不同（CUDA → `nccl`；CPU → `ccl`/`gloo`）。上层 `init_process_group(get_accelerator().communication_backend_name())` 由此做到后端无关。
 
 **对比五：图操作（实践任务指定的对比方法之三，详见 4.4）。**
 
-- [accelerator/cuda_accelerator.py:L290-L305](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L290-L305)：CUDA 是真图——`CUDAGraph`、`torch.cuda.graph` 上下文、`graph.replay()`。
-- [accelerator/cpu_accelerator.py:L388-L397](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L388-L397)：CPU 的 `create_graph()` 返回 `None`、`capture_to_graph()` 返回空上下文、`replay_graph()` 直接返回——**暴露图 API 的形状，但语义是「假装捕获、立即执行、回放空操作」**。
+- [accelerator/cuda_accelerator.py:L289-L305](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L289-L305)：CUDA 是真图——`is_graph_capture_supported() -> True`、`CUDAGraph`、`torch.cuda.graph` 上下文、`graph.replay()`。
+- [accelerator/cpu_accelerator.py:L388-L397](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L388-L397)：CPU 的 `create_graph()` 返回 `None`、`capture_to_graph()` 返回空上下文、`replay_graph()` 直接返回——**暴露图 API 的形状，但语义是「假装捕获、立即执行、回放空操作」**。
+
+顺带一提算子构建接口本周期的小变化（#9085 的一部分）：[accelerator/cuda_accelerator.py:L389-L393](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L389-L393) 的 `create_op_builder` 里，与 CPU 加速器共享的 builder 清单从三个 CPU 优化器扩展为四个——`AsyncIOBuilder`（异步 I/O 经主机内存中转设备张量，构建不需要 CUDA）也加入共享，注释同步改写。算子构建体系的完整讲解在 u1-l3 与 u9-l1。
 
 #### 4.3.4 代码实践
 
@@ -309,7 +311,7 @@ KLXPU 等后端更进一步：**直接继承 `CUDA_Accelerator`**，只覆写差
 
 **操作步骤**：
 
-1. 通读 [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py) 的方法签名，从中挑 5 个：建议 `is_synchronized_device`、`available_memory`、`communication_backend_name`、`is_graph_capture_supported`、`synchronize`。
+1. 通读 [accelerator/abstract_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py) 的方法签名，从中挑 5 个：建议 `is_synchronized_device`、`available_memory`、`communication_backend_name`、`is_graph_capture_supported`、`synchronize`。
 2. 逐个打开 cuda_accelerator.py 与 cpu_accelerator.py 的对应实现，填出下表（参考答案已给出，请自行核对源码行号）：
 
 | 方法 | CUDA 实现 | CPU 实现 | 语义差异要点 |
@@ -318,7 +320,7 @@ KLXPU 等后端更进一步：**直接继承 `CUDA_Accelerator`**，只覆写差
 | `synchronize` | `torch.cuda.synchronize(...)`（L87-L92） | 空操作（L230-L231） | 需要屏障 vs 天然串行 |
 | `available_memory` | pynvml 空闲显存，回退 total−allocated（L196-L204） | psutil 可用内存 ∧ cgroup 限额（L339-L346） | 驱动口径 vs 进程/容器口径 |
 | `communication_backend_name` | `nccl`（构造期，L32-L35） | `ccl`/`gloo`（构造期，L170-L174） | 集合通信库随硬件走 |
-| `is_graph_capture_supported` | `True`（L291-L292） | 未覆写，继承基类 `False`（L225-L226） | 真 CUDA Graph vs eager 空操作（4.4 详解） |
+| `is_graph_capture_supported` | `True`（L290-L291） | 未覆写，继承基类 `False`（L225-L226） | 真 CUDA Graph vs eager 空操作（4.4 详解） |
 
 3. 在 CPU 机器上实际验证其中两行（**示例代码**）：
 
@@ -338,7 +340,7 @@ print(a.available_memory() > 0)          # True（psutil 口径）
 #### 4.3.5 小练习与答案
 
 **练习 1**：`CPU_Accelerator.device()` 返回 `None` 而不是 `torch.device('cpu')`，为什么上层没有崩？
-**答案**：见 [accelerator/cpu_accelerator.py:L198-L199](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L198-L199)。接口约定「返回当前设备对象」，而 CPU 场景下张量创建惯用 `device=get_accelerator().current_device_name()`（即字符串 `'cpu'`）或默认设备；`None` 传给 torch 的多数 API 恰好表示「默认设备」。约定俗成的配合点，移植新后端时要照抄语义而不是照抄返回值。
+**答案**：见 [accelerator/cpu_accelerator.py:L198-L199](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cpu_accelerator.py#L198-L199)。接口约定「返回当前设备对象」，而 CPU 场景下张量创建惯用 `device=get_accelerator().current_device_name()`（即字符串 `'cpu'`）或默认设备；`None` 传给 torch 的多数 API 恰好表示「默认设备」。约定俗成的配合点，移植新后端时要照抄语义而不是照抄返回值。
 
 **练习 2**：CUDA 的 `available_memory` 为什么不直接用 `torch.cuda.mem_get_info()` 之类的 torch API，而引入 pynvml？
 **答案**：pynvml 给的是**驱动视角的整机空闲显存**（包含其他进程占用的排除），torch 的 allocated 统计只算本进程张量缓存池。对「还差多少显存才能放得下参数分区」这类问题，驱动口径更接近真相；pynvml 缺失时才退回 `total - allocated` 的近似（L203-L204）。代价是必须处理 pynvml 与 torch 的设备编号不一致（`_get_nvml_gpu_id` 的 `CUDA_VISIBLE_DEVICES` 重映射，L181-L194）。
@@ -346,7 +348,7 @@ print(a.available_memory() > 0)          # True（psutil 口径）
 **练习 3**：`use_host_timers` 为什么等于 `is_synchronized_device`？
 **答案**：异步设备上 host 时钟与 kernel 执行不对齐——host 记时的起止点之间 GPU 可能还在排队，测出来的「耗时」包含排队噪声。同步设备（CPU）上计算与时钟同源，host 计时既准又便宜。所以这组派生关系（L54-L55、L185-L186）把「用哪种计时」归约到「设备是否同步」这一个事实上。KLXPU 后端覆写 `use_host_timers` 的理由也在此：它的 CUDA 事件计时器默认返回 0.0，不得不用 host 计时（见 4.4.3）。
 
-### 4.4 模块四：图捕获能力的显式 opt-in 声明（含 KLXPU 演进，#9042）
+### 4.4 模块四：图捕获能力的显式 opt-in 声明（CUDA/NPU、XPU #9007、KLXPU #9042）
 
 #### 4.4.1 概念说明
 
@@ -356,7 +358,13 @@ print(a.available_memory() > 0)          # True（psutil 口径）
 - 后端必须**同时**实现 `is_current_stream_capturing()`（供静态 KV cache 等组件在捕获期间跳过非法的 host 端检查），并经验证后才覆写为 `True`；
 - 该能力**可被继承**，所以「继承自 CUDA 但尚未验证」的子类必须显式覆写回 `False`（default-deny）。
 
-KLXPU 正是这条规则的标准案例：它继承 `CUDA_Accelerator`（因为 `torch_xmlir` 接管了 torch.cuda API），图捕获未经验证期间在子类里显式 `return False`；#9042 完成验证后**删除了这个覆写**，于是随 CUDA 一起进入图捕获路径。整个演进过程中，「是否支持」始终是后端自己显式声明的决定，而不是隐式继承的副作用。
+本周期仓库里凑齐了三种接入姿势，正好构成一部「opt-in 演进史」：
+
+1. **原生 opt-in（CUDA / NPU）**：自家运行时本来就有完整图支持，直接覆写 `True` 并把三件套映射到原生 API。
+2. **能力探测式 opt-in（XPU，#9007）**：上游 PyTorch 从 2.11 起才为 XPU 提供 `torch.xpu.XPUGraph`、`torch.xpu.graph` 捕获上下文与 `torch.xpu.is_current_stream_capturing()`。此前 `XPU_Accelerator` 的图接口全是 stub（`create_graph()` 返回 `None`、捕获是空上下文、replay 无操作），HybridEngine 在 XPU 上只能跑 eager。#9007 把真实支持接上，且 opt-in 判定本身是**运行时能力探测**——`torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')`：老 torch 上自动保持 eager，不靠版本号硬编码。
+3. **default-deny 后继承（KLXPU，#9042）**：先在子类里显式 `return False` 拒绝，验证完成后删除覆写、恢复继承 CUDA 的 opt-in。
+
+三个案例共同点：**「是否支持」始终是后端自己显式声明的决定（或显式探测的事实），而不是隐式继承的副作用**。
 
 #### 4.4.2 核心流程
 
@@ -368,36 +376,60 @@ KLXPU 正是这条规则的标准案例：它继承 `CUDA_Accelerator`（因为 
        │            跳过 host 端检查）
        └─ False → warning_once + 回退 eager 生成（不报错）
 
-后端侧的生命周期：
-  暴露图 API（create_graph/capture_to_graph/replay_graph）   ← 必须实现（抽象）
-  实现 is_current_stream_capturing                            ← opt-in 前提
-  验证通过 → 覆写 is_graph_capture_supported = True           ← 显式 opt-in
-  继承自已 opt-in 的基类但未验证 → 子类显式覆写回 False        ← default-deny
-  验证完成 → 删除子类覆写，恢复继承                            ← KLXPU 的 #9042
+后端侧的三种接入姿势：
+  A. 原生 opt-in（CUDA/NPU）
+       实现三件套 + is_current_stream_capturing → 覆写 True
+  B. 能力探测式 opt-in（XPU，#9007）
+       is_graph_capture_supported = torch.xpu.is_available()
+                                    and hasattr(torch.xpu, 'is_current_stream_capturing')
+       三件套内部再分层降级：有 XPUGraph → 真图；没有 → 退回 stub（None 图 + eager + 空 replay）
+  C. default-deny 后继承（KLXPU，#9042）
+       继承 CUDA 但未验证 → 子类显式覆写回 False
+       验证完成 → 删除子类覆写，恢复继承
 ```
 
 #### 4.4.3 源码精读
 
 **基类契约**：
 
-- [accelerator/abstract_accelerator.py:L218-L241](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/abstract_accelerator.py#L218-L241)：注释逐条写明契约——后端**显式** opt-in；且只有实现 `is_current_stream_capturing` 之后才允许 opt-in（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）；默认 `False` 让「只暴露图 API」的后端留在 eager 路径直到验证完成。`create_graph/capture_to_graph/replay_graph` 是抽象方法（人人要有形状），`is_graph_capture_supported/is_current_stream_capturing` 是能力位（人人默认关闭）。
+- [accelerator/abstract_accelerator.py:L218-L241](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/abstract_accelerator.py#L218-L241)：注释逐条写明契约——后端**显式** opt-in；且只有实现 `is_current_stream_capturing` 之后才允许 opt-in（静态 KV cache 靠它跳过图捕获期间非法的 host 端检查）；默认 `False` 让「只暴露图 API」的后端留在 eager 路径直到验证完成。`create_graph/capture_to_graph/replay_graph` 是抽象方法（人人要有形状），`is_graph_capture_supported/is_current_stream_capturing` 是能力位（人人默认关闭）。
 
-**CUDA 的 opt-in**：
+**CUDA 的原生 opt-in**：
 
-- [accelerator/cuda_accelerator.py:L290-L305](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cuda_accelerator.py#L290-L305)：`is_graph_capture_supported() -> True`，`is_current_stream_capturing()` 委托 `torch.cuda.is_current_stream_capturing()`，图三件套直接映射 `torch.cuda.CUDAGraph` / `torch.cuda.graph` / `graph.replay()`。
-- [accelerator/npu_accelerator.py:L249-L263](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/npu_accelerator.py#L249-L263)：NPU 是另一个合法 opt-in 样本——`True` + `torch.npu.is_current_stream_capturing()` + `NPUGraph`，结构与 CUDA 完全对称。
+- [accelerator/cuda_accelerator.py:L289-L305](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/cuda_accelerator.py#L289-L305)：`is_graph_capture_supported() -> True`，`is_current_stream_capturing()` 委托 `torch.cuda.is_current_stream_capturing()`，图三件套直接映射 `torch.cuda.CUDAGraph` / `torch.cuda.graph` / `graph.replay()`。
+- [accelerator/npu_accelerator.py:L249-L263](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/npu_accelerator.py#L249-L263)：NPU 是另一个合法 opt-in 样本——`True` + `torch.npu.is_current_stream_capturing()` + `NPUGraph`，结构与 CUDA 完全对称。
 
-**CPU 的「有形状、无能力」**：
+**XPU 的能力探测式 opt-in（#9007）**——五件套逐行读：
 
-- [accelerator/cpu_accelerator.py:L388-L397](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/cpu_accelerator.py#L388-L397)：`create_graph()` 返回 `None`，`capture_to_graph()` 返回空上下文（函数体立即 eager 执行），`replay_graph()` 为空操作；同时**不覆写** `is_graph_capture_supported`，继承基类 `False`。
+- [accelerator/xpu_accelerator.py:L339-L340](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L339-L340)：`is_graph_capture_supported()` 返回 `torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')`。两个检查缺一不可（PR #9007 的说明）：**不带 XPU 后端的 torch 构建会给 `torch.xpu` 打上哑类型桩**——查询函数存在但一调用就抛错；而 **2.11 之前的 torch 干脆没有这个查询**。两种情形都必须留在 opt-out（eager 回退），`hasattr` 探测恰好同时挡住这两类。注意这里没有写死版本号——「有没有能力」用探测回答，比「torch>=2.11」的版本判断更稳（同一个主版本可能有不带 XPU 的构建）。
+- [accelerator/xpu_accelerator.py:L342-L345](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L342-L345)：`is_current_stream_capturing()` 先用 `hasattr` 守卫（老 torch 上返回 `False` 而不是 AttributeError），再委托 `torch.xpu.is_current_stream_capturing()`——这正是基类契约要求的「opt-in 前提钩子」。
+- [accelerator/xpu_accelerator.py:L347-L350](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L347-L350)：`create_graph()` 在 `torch.xpu` 没有 `XPUGraph` 属性时返回 `None`（老 torch 保持 eager），否则返回 `torch.xpu.XPUGraph()`。
+- [accelerator/xpu_accelerator.py:L352-L356](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L352-L356)：`capture_to_graph()` 在 `graph is None` 时返回 `noop_context()`（即 #9007 之前的老行为），否则进入 `torch.xpu.graph(graph, pool, stream)` 真捕获上下文。
+- [accelerator/xpu_accelerator.py:L358-L361](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L358-L361)：`replay_graph()` 只在 `graph is not None` 时 `graph.replay()`，否则静默返回。
+
+  把这五行连起来看：**同一个后端类在新旧 torch 上呈现两种形态**——新 torch 是真图捕获，老 torch 自动退化成与 CPU 一模一样的「假捕获 + 空 replay」。降级逻辑内建在方法体里，调用方完全无感。改造前的 stub（**历史代码，当前版本已不存在**，`git show 92661b29f^:accelerator/xpu_accelerator.py` 可复现）是：
+
+```python
+def create_graph(self):
+    return None
+
+def capture_to_graph(self, graph, pool=None, stream=None):
+    from deepspeed.runtime.utils import noop_context
+    return noop_context()
+
+def replay_graph(self, graph):
+    return
+```
 
 **消费方：查能力位、优雅回退**：
 
-- [deepspeed/runtime/rollout/hybrid_engine_rollout.py:L208-L215](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/runtime/rollout/hybrid_engine_rollout.py#L208-L215)：rollout 路径在 `use_graph_capture` 为真时先查 `is_graph_capture_supported()`，不支持则 `logger.warning_once`「falling back to eager generation」并置 `use_graph_capture = False`——**回退而非报错**。同类检查也出现在 [deepspeed/runtime/hybrid_engine_graph.py:L201](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/runtime/hybrid_engine_graph.py#L201) 的图缓存校验里。
+- [deepspeed/runtime/rollout/hybrid_engine_rollout.py:L323-L331](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/runtime/rollout/hybrid_engine_rollout.py#L323-L331)：`_generate_batched`（静态图生成路径）在 `use_graph_capture` 为真时先查 `is_graph_capture_supported()`，不支持则 `logger.warning_once`「falling back to eager generation」并置 `use_graph_capture = False`——**回退而非报错**。注释还记录了两条相关演化的门控语义（#8980 的能力收窄 + #8939 允许采样进图路径）。
+- [deepspeed/runtime/rollout/hybrid_engine_rollout.py:L453-L458](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/runtime/rollout/hybrid_engine_rollout.py#L453-L458)：`_generate_continuous`（连续批处理路径）有一模一样的第二道门，回退文案是「falling back to eager continuous batching」。
+- 同类检查也出现在 [deepspeed/runtime/hybrid_engine_graph.py:L201](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/runtime/hybrid_engine_graph.py#L201) 的图缓存校验里。#9007 之后，这三处门在 XPU 上都会放行。
 
 **KLXPU：从 default-deny 到继承 opt-in（#9042）**：
 
-- [accelerator/klxpu_accelerator.py:L9-L35](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/klxpu_accelerator.py#L9-L35)：现在的 KLXPU 类继承 `CudaAccelerator`，类注释说明原因——`torch_xmlir` 以 torch.cuda 的面目呈现，设备字符串、流、RNG、内存管理全部继承 CUDA；子类只覆写真正的差异点（host 计时、nvtx、triton、算子目录、环境变量）。**注意现在的文件里已经没有 `is_graph_capture_supported` 的覆写**——这就是 #9042 的结果。
+- [accelerator/klxpu_accelerator.py:L9-L35](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/klxpu_accelerator.py#L9-L35)：现在的 KLXPU 类继承 `CudaAccelerator`，类注释说明原因——`torch_xmlir` 以 torch.cuda 的面目呈现，设备字符串、流、RNG、内存管理全部继承 CUDA；子类只覆写真正的差异点（host 计时、nvtx、triton、算子目录、环境变量）。**注意现在的文件里已经没有 `is_graph_capture_supported` 的覆写**——这就是 #9042 的结果。
 - 历史（[commit de6fcf18b](https://github.com/deepspeedai/DeepSpeed/commit/de6fcf18ba1d3395dbcf0c6d48060da263b82da8)，`git show de6fcf18b` 可复现）：删除前子类里有这样一段（**历史代码，当前版本已不存在**）：
 
 ```python
@@ -409,16 +441,24 @@ def is_graph_capture_supported(self):
 ```
 
   注释把动机写得非常清楚：通过 CUDA runtime 呈现 ≠ 图捕获已验证，所以宁可显式拒绝也不隐式继承 CUDA 的 opt-in。同一提交还删掉了配套的回归测试 `test_klxpu_keeps_explicit_graph_capture_opt_out`（原 tests/unit/accelerator/test_accelerator_graph.py 尾部，断言 KLXPU 实例的 `is_graph_capture_supported() is False`）——能力位翻转后，守护旧契约的测试一并退役。
-- 契约的文档化表述：[docs/_tutorials/accelerator-abstraction-interface.md:L51-L57](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/docs/_tutorials/accelerator-abstraction-interface.md#L51-L57) 写明「opt-in 可被继承，因此未验证的子类必须覆写为 False；静态 KV cache 用该查询跳过录制期间的 host 端边界检查，缺任一钩子的后端保持 eager 生成」。
+- 对比 XPU 的做法很有意思：KLXPU 走「人工验证 → 删覆写」，XPU 走「运行时探测 → 自动判定」。当能力取决于「自家栈是否验证过」时用前者，取决于「上游 torch 是否提供 API」时用后者。
+
+**契约的文档化表述**：
+
+- [docs/_tutorials/accelerator-abstraction-interface.md:L46-L52](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/docs/_tutorials/accelerator-abstraction-interface.md#L46-L52)：`is_current_stream_capturing` 的查询约定，其中 #9007 新增的三行明确写出 XPU 的 opt-in 条件——「只有当安装的 torch 提供 `torch.xpu` 流捕获支持（`torch.xpu.is_current_stream_capturing()` 与 `torch.xpu.XPUGraph`）才 opt-in，更老的 torch 保持 opt-out 并跑 eager 生成」。
+- [docs/_tutorials/accelerator-abstraction-interface.md:L54-L60](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/docs/_tutorials/accelerator-abstraction-interface.md#L54-L60)：HybridEngine 图捕获（含 rollout 生成路径）都门控在 `is_graph_capture_supported()` 上；opt-in 可被继承，因此未验证的子类必须覆写为 `False`；静态 KV cache 用该查询跳过录制期间的 host 端边界检查，缺任一钩子的后端保持 eager 生成。
 
 **契约测试**：
 
-- [tests/unit/accelerator/test_accelerator_graph.py:L11-L44](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/tests/unit/accelerator/test_accelerator_graph.py#L11-L44)：`test_graph_capture_replay_roundtrip` 在「当前后端暴露图」时做完整的捕获-回放往返（含 side-stream 预热——与 `graph_process` 相同的模式），并断言捕获体内 `is_current_stream_capturing()` 为真。
-- [tests/unit/accelerator/test_accelerator_graph.py:L47-L67](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/tests/unit/accelerator/test_accelerator_graph.py#L47-L67)：`test_graph_ops_run_eagerly_without_graph_support` 固化 CPU 契约：`create_graph()` 为 `None`、捕获体立即执行、`replay_graph` 既不报错也不改变值——注释点明这是 CPU-only CI 上跑的契约。
+- [tests/unit/accelerator/test_accelerator_graph.py:L11-L44](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/tests/unit/accelerator/test_accelerator_graph.py#L11-L44)：`test_graph_capture_replay_roundtrip` 在「当前后端暴露图」时做完整的捕获-回放往返（含 side-stream 预热——与 `graph_process` 相同的模式），并断言捕获体内 `is_current_stream_capturing()` 为真。#9007 的 PR 在 Intel Arc Pro B60 + torch 2.15.0+xpu 上跑过它，验证真实 XPUGraph 的捕获-回放（含捕获中查询）。
+- [tests/unit/accelerator/test_accelerator_graph.py:L47-L67](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/tests/unit/accelerator/test_accelerator_graph.py#L47-L67)：`test_graph_ops_run_eagerly_without_graph_support` 固化 CPU 契约：`create_graph()` 为 `None`、捕获体立即执行、`replay_graph` 既不报错也不改变值——注释点明这是 CPU-only CI 上跑的契约。XPU 返回真图后这个测试在 XPU 上会按设计 skip。
+- [tests/unit/accelerator/test_accelerator_graph.py:L70-L76](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/tests/unit/accelerator/test_accelerator_graph.py#L70-L76)：**#9007 新增**的 `test_xpu_opt_in_matches_torch_xpu_stream_capture_capability`。两个细节值得学：其一，用 `object.__new__(XPU_Accelerator)` 绕过 `__init__` 构造实例——这个断言不需要真实设备，只测方法返回值，避免在 CUDA 机器上初始化 XPU 后端；其二，断言写成一个等式 `accelerator.is_graph_capture_supported() == torch_can_capture`（其中 `torch_can_capture = torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')`），**双向钉死**：如果将来有人把 opt-in 硬编码成 `True`（在无 XPU 的机器上越权）或忘了在新 torch 上 opt-in，同一行断言都会失败。它在任何加速器上都能跑绿，因此进了通用 CI。
+
+**收益佐证（PR #9007 报告的数据）**：Intel Arc Pro B60 单卡、torch 2.15.0+xpu，GPT-2 small 124M bf16、8 条 prompt × 64 个新 token、continuous_batch_size=4、greedy 的 rollout 微基准：eager 466 tok/s vs 图捕获 2109 tok/s（约 4.53 倍）。输出 prompt 完全一致，个别 response token 在 bf16 数值级联下出现差异——符合预期。
 
 #### 4.4.4 代码实践
 
-**实践目标**：亲手验证「默认关闭、显式开启、优雅回退」三段契约，并用 git 历史复现 KLXPU 的演进（本讲指定实践任务的第三部分）。
+**实践目标**：亲手验证「默认关闭、显式开启、优雅回退」三段契约，用 git 历史复现 KLXPU 与 XPU 的两次演进（本讲指定实践任务的一部分）。
 
 **操作步骤**：
 
@@ -428,7 +468,7 @@ def is_graph_capture_supported(self):
 python -m pytest tests/unit/accelerator/test_accelerator_graph.py -v
 ```
 
-预期 `test_graph_capture_replay_roundtrip` 被 skip（CPU 不支持图），`test_graph_ops_run_eagerly_without_graph_support` 通过。
+预期 `test_graph_capture_replay_roundtrip` 与 `test_graph_ops_run_eagerly_without_graph_support` 按后端能力通过/skip，`test_xpu_opt_in_matches_torch_xpu_stream_capture_capability` 直接通过——它只对比「DeepSpeed 的声明」与「torch.xpu 的实际能力」，两者在无 XPU 的机器上都是 `False`。
 
 2. **手动复现回退行为**（**示例代码**）：
 
@@ -442,30 +482,35 @@ if use_graph_capture and not get_accelerator().is_graph_capture_supported():
 print("use_graph_capture =", use_graph_capture)   # CPU 上为 False
 ```
 
-3. **复现 KLXPU 演进**：
+3. **复现两次能力位演进**：
 
 ```bash
-git show de6fcf18b                     # 查看被删除的 default-deny 覆写与配套测试
+# KLXPU：default-deny 覆写的删除（#9042）
+git show de6fcf18b
 git show de6fcf18b^:accelerator/klxpu_accelerator.py | grep -n -A4 is_graph_capture_supported
 grep -n is_graph_capture_supported accelerator/klxpu_accelerator.py   # 当前版本：无匹配
+
+# XPU：stub 到能力探测式 opt-in（#9007）
+git show 92661b29f -- accelerator/xpu_accelerator.py
+git show 92661b29f^:accelerator/xpu_accelerator.py | grep -n -B1 -A6 "def create_graph"
 ```
 
-4. 阅读 [docs/_tutorials/accelerator-abstraction-interface.md:L46-L57](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/docs/_tutorials/accelerator-abstraction-interface.md#L46-L57)，对照源码注释逐句确认契约表述。
+4. 阅读 [docs/_tutorials/accelerator-abstraction-interface.md:L46-L60](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/docs/_tutorials/accelerator-abstraction-interface.md#L46-L60)，对照源码注释逐句确认契约表述（注意 XPU 段落是 #9007 新增的）。
 
-**需要观察的现象**：第 3 步里，父提交（`de6fcf18b^`）的文件里有 `return False` 的覆写，当前 HEAD 的文件里 `grep` 无输出——**能力位从「子类显式拒绝」变为「继承 CUDA 的 True」只删除了 6 行**。同时 tests/unit/accelerator/test_accelerator_graph.py 里守护旧契约的测试也被删除（而不是被改绿），这是「契约测试随契约退役」的示范。
+**需要观察的现象**：第 3 步里，KLXPU 的父提交（`de6fcf18b^`）文件里有 `return False` 覆写、当前 HEAD 无匹配；XPU 的父提交（`92661b29f^`）里 `create_graph` 是 `return None` 的 stub、当前 HEAD 是 `hasattr` 守卫 + `torch.xpu.XPUGraph()`——**两处能力位翻转都只改了十来行**，且各自的守护测试都随之增删而不是硬改绿。
 
-**预期结果**：CPU 上三条命令全部可复现；GPU 机器上第 1 步的 roundtrip 测试应通过（待本地验证）。据此你可以回答：一个新后端从「拒绝图捕获」到「进入图捕获路径」需要做的事是——实现 `is_current_stream_capturing`、完成 HybridEngine 图路径验证、删除 default-deny 覆写、（若原有守护测试）一并移除。
+**预期结果**：CPU 上三条命令全部可复现；GPU/XPU 机器上第 1 步的 roundtrip 测试应做真捕获-回放（待本地验证）。据此你可以回答：一个新后端从「拒绝图捕获」到「进入图捕获路径」有两条路——像 KLXPU 那样人工验证后删 default-deny 覆写，或像 XPU 那样把 opt-in 判定写成对上游能力的运行时探测（并保证探测失败时方法体自动退化为 stub）。
 
 #### 4.4.5 小练习与答案
 
 **练习 1**：为什么不把 `is_graph_capture_supported` 设计成「`create_graph()` 返回非 None 即支持」的自动推断？
 **答案**：CPU 的存在就是反例——它可以实现完整的图 API 形状（`create_graph` 可返回对象），但语义是 eager 假捕获；反过来，一个后端可能有图 API 却没实现 `is_current_stream_capturing`，捕获期间静态 KV cache 的 host 端检查会非法。能力位把「有 API」与「验证过、能安全捕获」拆成两个正交声明，基类注释（abstract_accelerator.py L218-L224）对此有明确表述。
 
-**练习 2**：#9042 删除覆写后，如何防止「KLXPU 图捕获回归」被无意引入？
-**答案**：守护方向翻转了：旧测试断言「必须是 False」，删除后由通用的 `test_graph_capture_replay_roundtrip`（在任何暴露图的后端上做真实捕获-回放往返）与 HybridEngine rollout 的图路径测试（u7-l4 涉及）兜底——一旦图捕获在 KLXPU 上真正失效，往返测试会失败。能力位的语义责任从「显式声明」交还给「真实能力」。
+**练习 2**：XPU 的 `is_graph_capture_supported` 为什么要同时检查 `torch.xpu.is_available()` 和 `hasattr(torch.xpu, 'is_current_stream_capturing')`，只查后者行不行？
+**答案**：不行。两个失败模式各被一个检查挡住：不带 XPU 后端的 torch 构建会给 `torch.xpu` 打哑类型桩——查询**存在**但调用即抛错，`hasattr` 为真，必须靠 `is_available()` 挡住；2.11 之前的 torch 则**根本没有**这个查询，`hasattr` 为假即可挡住。少任何一个检查，都会在某类 torch 构建上把不可用的后端误判为支持图捕获，进而让 HybridEngine 在真捕获时崩溃。这也是「能力探测要覆盖能力存在与能力可用两层」的一般教训。
 
-**练习 3**：设想你要新增 `XYZ_Accelerator(CUDA_Accelerator)`，图捕获尚未验证，你该写什么？
-**答案**：按文档契约「未验证的子类必须覆写为 False」：实现 `def is_graph_capture_supported(self): return False` 并加注释说明「继承 CUDA 但未验证」。这与 KLXPU 在 #9042 之前的写法完全一致（见 4.4.3 的历史代码）。验证完成后再删除覆写。
+**练习 3**：设想你要新增 `XYZ_Accelerator(CUDA_Accelerator)`，图捕获尚未验证，你该写什么？如果它的图支持完全取决于某个上游库是否装了 `xyz_graph` 模块呢？
+**答案**：前一种情况按文档契约「未验证的子类必须覆写为 False」：实现 `def is_graph_capture_supported(self): return False` 并加注释说明「继承 CUDA 但未验证」（KLXPU #9042 之前的写法），验证完成后删除覆写。后一种情况学 XPU（#9007）：`return _xyz_available()`（探测函数），并让 `create_graph/capture_to_graph/replay_graph` 在探测失败时退化为 None 图 + 空上下文 + 空 replay——opt-in 判定与三件套的降级路径必须配套。
 
 ### 4.5 模块五：XPU 的 Level Zero pinned memory 注册——绕过 torch 的自力更生
 
@@ -509,20 +554,20 @@ unregister_host_memory(address)
 
 文件头的设计注释与 ABI 常量：
 
-- [accelerator/xpu_accelerator.py:L19-L35](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L19-L35)：注释先讲清机制——`zeMemAllocHost` 挂上 `ze_external_memmap_sysmem_ext_desc_t` 链式描述符后，可把**已存在的页锁定主机缓冲**映射进设备页表（返回指针等于输入指针，恒等映射），`zeMemFree` 只解除映射不触碰主机内存本身；「这是 cudaHostRegister/cudaHostUnregister 的 XPU 等价物」。随后是从 `ze_api.h` 抄出的稳定 ABI 常量（结构体类型码、结果码、扩展名长度）。L38-L63 的四个 `ctypes.Structure`（`_ZeContextDesc`、`_ZeExternalMemmapSysmemDesc`、`_ZeHostMemAllocDesc`、`_ZeDriverExtensionProperties`）与 C 布局逐字段对应。
+- [accelerator/xpu_accelerator.py:L19-L34](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L19-L34)：注释先讲清机制——`zeMemAllocHost` 挂上 `ze_external_memmap_sysmem_ext_desc_t` 链式描述符后，可把**已存在的页锁定主机缓冲**映射进设备页表（返回指针等于输入指针，恒等映射），`zeMemFree` 只解除映射不触碰主机内存本身；「这是 cudaHostRegister/cudaHostUnregister 的 XPU 等价物」。随后是从 `ze_api.h` 抄出的稳定 ABI 常量（结构体类型码、结果码）。L38-L63 的 `ctypes.Structure`（`_ZeContextDesc`、`_ZeExternalMemmapSysmemDesc`、`_ZeHostMemAllocDesc`、`_ZeDriverExtensionProperties`、`_ZeDeviceProperties`）与 C 布局逐字段对应。
 
 加载器与扩展探测：
 
-- [accelerator/xpu_accelerator.py:L66-L125](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L66-L125)：`_l0_loader()` 带 `@functools.lru_cache(maxsize=None)`——进程内只加载一次。流程：`CDLL("libze_loader.so.1")`（失败返回 `None`）→ `zeInit` → `zeDriverGet` 枚举驱动 → `zeDriverGetExtensionProperties` **探测**扩展名列表，找不到 `ZE_extension_external_memmap_sysmem` 就返回 `None`（注释明确「带描述符的 zeMemAllocHost 是可选扩展，用前先探测」）→ 逐个声明 `zeContextCreateEx`/`zeMemAllocHost`/`zeMemFree` 的 argtypes/restype。
+- [accelerator/xpu_accelerator.py:L66-L125](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L66-L125)：`_l0_loader()` 带 `@functools.lru_cache(maxsize=None)`——进程内只加载一次。流程：`CDLL("libze_loader.so.1")`（失败返回 `None`）→ `zeInit` → `zeDriverGet` 枚举驱动 → `zeDriverGetExtensionProperties` **探测**扩展名列表（L89-L104），找不到 `ZE_extension_external_memmap_sysmem` 就返回 `None`（注释明确「带描述符的 zeMemAllocHost 是可选扩展，用前先探测」）→ 逐个声明 `zeContextCreateEx`/`zeMemAllocHost`/`zeMemFree` 的 argtypes/restype。
 
 单设备上下文与 UUID 匹配：
 
-- [accelerator/xpu_accelerator.py:L128-L170](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L128-L170)：`_l0_device_context(device_index)` 的 docstring 解释了两个非显然的坑：其一，多设备上下文里驱动只为**首个**设备映射内存范围，其他设备发起的拷贝会报 `ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY`，所以要用 `zeContextCreateEx` 建**只含目标设备**的上下文；其二，`zeDeviceGet` 的设备顺序不保证与 torch 一致，所以拿 `torch.xpu.get_device_properties(idx).uuid` 与 Level Zero 读出的 UUID 逐个比对（并格式化成相同的 `8-4-4-4-12` 连字符形式），**不做位置等同假设**。设备页表跨上下文共享，映射建好后 torch 自己的运行时上下文也能用。
+- [accelerator/xpu_accelerator.py:L128-L170](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L128-L170)：`_l0_device_context(device_index)` 的 docstring 解释了两个非显然的坑：其一，多设备上下文里驱动只为**首个**设备映射内存范围，其他设备发起的拷贝会报 `ZE_RESULT_ERROR_OUT_OF_DEVICE_MEMORY`，所以要用 `zeContextCreateEx` 建**只含目标设备**的上下文；其二，`zeDeviceGet` 的设备顺序不保证与 torch 一致，所以拿 `torch.xpu.get_device_properties(idx).uuid` 与 Level Zero 读出的 UUID 逐个比对（L151-L162，格式化成相同的 `8-4-4-4-12` 连字符形式），**不做位置等同假设**。设备页表跨上下文共享，映射建好后 torch 自己的运行时上下文也能用。
 
 注册与注销：
 
-- [accelerator/xpu_accelerator.py:L400-L434](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L400-L434)：`register_host_memory` 把 `pSystemMemory=address, size=num_bytes` 填进 memmap 描述符、链到 host 分配描述符上、调 `zeMemAllocHost`。三条失败路径全部**优雅降级**：无 Level Zero → warning_once + `False`；调用失败 → warning_once + `False`；**非恒等映射**（`mapped.value != address`）→ 释放映射 + `False`（调用方持有原指针，映射搬了地址就没法用）。成功则登记 `_l0_registrations[address]`（L174 的模块级 dict，按地址记账）并返回 `True`。
-- [accelerator/xpu_accelerator.py:L436-L447](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L436-L447)：`unregister_host_memory` 用 `zeMemFree` 解除映射，**失败时 raise RuntimeError**——注释解释了与注册侧不对称的原因：报错能让 `NativePinnedMemory.unpin` 保留 CPU 分配存活，避免释放掉驱动可能仍映射着的页。注册侧「降级」而注销侧「报错」，是因为前者缺了功能仍可跑（mlock-only），后者静默失败会造成真正的内存安全隐患。
+- [accelerator/xpu_accelerator.py:L414-L448](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L414-L448)：`register_host_memory` 把 `pSystemMemory=address, size=num_bytes` 填进 memmap 描述符、链到 host 分配描述符上、调 `zeMemAllocHost`。三条失败路径全部**优雅降级**：无 Level Zero → warning_once + `False`；调用失败 → warning_once + `False`；**非恒等映射**（`mapped.value != address`）→ 释放映射 + `False`（调用方持有原指针，映射搬了地址就没法用）。成功则登记 `_l0_registrations[address]`（L174 的模块级 dict，按地址记账）并返回 `True`。
+- [accelerator/xpu_accelerator.py:L450-L462](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L450-L462)：`unregister_host_memory` 用 `zeMemFree` 解除映射，**失败时 raise RuntimeError**——注释解释了与注册侧不对称的原因：报错能让 `NativePinnedMemory.unpin` 保留 CPU 分配存活，避免释放掉驱动可能仍映射着的页。注册侧「降级」而注销侧「报错」，是因为前者缺了功能仍可跑（mlock-only），后者静默失败会造成真正的内存安全隐患。
 
 #### 4.5.4 代码实践
 
@@ -530,15 +575,15 @@ unregister_host_memory(address)
 
 **操作步骤**：
 
-1. 通读 [accelerator/xpu_accelerator.py:L19-L63](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/xpu_accelerator.py#L19-L63)，列出「CUDA 概念 → Level Zero 对应物」映射表：
+1. 通读 [accelerator/xpu_accelerator.py:L19-L63](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/xpu_accelerator.py#L19-L63)，列出「CUDA 概念 → Level Zero 对应物」映射表：
 
 | CUDA / 通用概念 | Level Zero 对应（源码位置） |
 | --- | --- |
 | 驱动加载 | `ctypes.CDLL("libze_loader.so.1")`（L70） |
-| `cudaHostRegister(ptr, size, flags)` | `zeMemAllocHost` + memmap 扩展描述符链（L409-L417） |
-| `cudaHostUnregister(ptr)` | `zeMemFree(context, ptr)`（L441） |
-| 恒等映射保证 | `mapped.value != address` 检查（L424-L432） |
-| 可选能力探测 | `zeDriverGetExtensionProperties`（L89-L103） |
+| `cudaHostRegister(ptr, size, flags)` | `zeMemAllocHost` + memmap 扩展描述符链（L422-L431） |
+| `cudaHostUnregister(ptr)` | `zeMemFree(context, ptr)`（L454） |
+| 恒等映射保证 | `mapped.value != address` 检查（L436-L443） |
+| 可选能力探测 | `zeDriverGetExtensionProperties`（L89-L104） |
 
 2. 在**任意机器**（包括 CPU）上梳理失败路径：`_l0_loader()` 第一步 `CDLL` 就会因找不到 `libze_loader.so.1` 返回 `None`，随后 `_l0_device_context` 返回 `None`，最终 `register_host_memory` 打出 warning_once「Level Zero host-memory registration is unavailable ... native pinned memory stays mlock-only」并返回 `False`。用下列**示例代码**在 CPU 上验证这条降级链不需要任何 Intel 硬件：
 
@@ -555,18 +600,18 @@ print(accel.register_host_memory(0, 0))   # 基类默认：False（CPU 未覆写
 
 **需要观察的现象**：第 2 步在 CPU 上返回 `False` 且不抛异常；如果你在 Intel GPU 机器上运行（装好 torch.xpu 与 Level Zero），应看到注册返回 `True`、`_l0_registrations` 里出现一条记录（待本地验证）。
 
-**预期结果**：你总结出的模式应当是——**探测（probe）先行、可选能力不假设、失败路径全部有降级、资源注销失败宁可报错也不静默**。这四条同样适用于你为任何新硬件写后端适配。
+**预期结果**：你总结出的模式应当是——**探测（probe）先行、可选能力不假设、失败路径全部有降级、资源注销失败宁可报错也不静默**。这四条同样适用于你为任何新硬件写后端适配；4.4 的 XPU 图捕获 opt-in（`hasattr` 探测 + 降级为 stub）用的也是同一套思路。
 
 #### 4.5.5 小练习与答案
 
 **练习 1**：为什么 `_l0_loader` 与 `_l0_device_context` 都加 `lru_cache`，而 `_l0_registrations` 是普通 dict？
-**答案**：前两者是**纯函数式的环境事实**——加载器句柄与设备上下文在进程内不变，缓存避免每次注册都重复 `CDLL`/`zeInit`/UUID 扫描。`_l0_registrations` 是**可变状态**（注册了什么、注销了什么随运行变化），必须允许修改，dict 按地址作为 key 记账（L174、L433、L437）。
+**答案**：前两者是**纯函数式的环境事实**——加载器句柄与设备上下文在进程内不变，缓存避免每次注册都重复 `CDLL`/`zeInit`/UUID 扫描。`_l0_registrations` 是**可变状态**（注册了什么、注销了什么随运行变化），必须允许修改，dict 按地址作为 key 记账（L174、L447、L451）。
 
 **练习 2**：`register_host_memory` 要求恒等映射（返回指针 == 输入指针），为什么这是硬性要求？
-**答案**：调用方（原生 pinned 通道）已经持有并继续使用**原始**指针——张量数据结构里存的就是它。若驱动返回一个搬了家的映射地址，设备访问映射区与 host 访问原地址会落在两块内存上，数据悄无声息地不一致；而调用方无法整体换用新地址。所以非恒等映射只能释放掉并按「不可用」降级（L424-L432 的注释原文：callers hold the original pointer）。
+**答案**：调用方（原生 pinned 通道）已经持有并继续使用**原始**指针——张量数据结构里存的就是它。若驱动返回一个搬了家的映射地址，设备访问映射区与 host 访问原地址会落在两块内存上，数据悄无声息地不一致；而调用方无法整体换用新地址。所以非恒等映射只能释放掉并按「不可用」降级（L436-L443 的注释原文：callers hold the original pointer）。
 
 **练习 3**：注册失败走 warning + 降级，注销失败却 raise，这个不对称合理吗？
-**答案**：合理，按「失败后能否安全继续」划分。注册失败 = 功能缺失，mlock-only 的 pinned 内存仍然正确（少了设备页表映射的性能收益），可以继续跑；注销失败 = 驱动可能仍持有对这段主机内存的映射，此时把 CPU 侧内存释放掉，后续任意写入都可能污染尚在进行的设备 DMA——静默继续是不安全的，报错让上层保留分配（L442-L447 注释）才是安全默认。
+**答案**：合理，按「失败后能否安全继续」划分。注册失败 = 功能缺失，mlock-only 的 pinned 内存仍然正确（少了设备页表映射的性能收益），可以继续跑；注销失败 = 驱动可能仍持有对这段主机内存的映射，此时把 CPU 侧内存释放掉，后续任意写入都可能污染尚在进行的设备 DMA——静默继续是不安全的，报错让上层保留分配（L455-L462 注释）才是安全默认。
 
 ## 5. 综合实践
 
@@ -578,6 +623,7 @@ print(accel.register_host_memory(0, 0))   # 基类默认：False（CPU 未覆写
 # probe_backend.py —— 后端能力探针
 from deepspeed.accelerator import get_accelerator, set_accelerator
 from deepspeed.accelerator.cpu_accelerator import CPU_Accelerator
+import torch
 
 # ① 当前后端的基本能力报告
 a = get_accelerator()
@@ -587,6 +633,7 @@ report = {
     "is_synchronized_device": a.is_synchronized_device(),
     "use_host_timers": a.use_host_timers(),
     "graph_capture_supported": a.is_graph_capture_supported(),
+    "torch_xpu_capture_api": hasattr(torch.xpu, "is_current_stream_capturing"),
     "bf16": a.is_bf16_supported(),
     "fp16": a.is_fp16_supported(),
     "fp64": a.is_fp64_supported(),
@@ -600,7 +647,6 @@ for k, v in report.items():
     print(f"{k:28s} = {v}")
 
 # ② 图操作契约：CPU 上应是「假捕获 + 空回放」
-import torch
 g = a.create_graph()
 print("create_graph() ->", g)            # CPU: None
 t = torch.zeros(1)
@@ -621,11 +667,12 @@ set_accelerator(mine)
 print("swapped to:", get_accelerator()._name)   # mycpu
 ```
 
-完成后再做三件复盘：
+完成后再做四件复盘：
 
 1. 把报告输出与 4.3.4 的对照表并排，逐项确认 CPU 列与源码一致；
 2. 对照 4.4 的契约解释 `graph_capture_supported=False` 时脚本②的行为为什么是「安全降级」而非「功能缺失报错」；
-3. 用 `git show de6fcf18b` 复现 KLXPU 能力位翻转，回答：如果 `MyCPUAccelerator` 继承的是 `CUDA_Accelerator` 且图捕获未验证，你应该在类里加哪三行代码？（答案见 4.4.5 练习 3。）
+3. 用 `git show de6fcf18b` 与 `git show 92661b29f` 分别复现 KLXPU、XPU 的能力位翻转，回答：如果 `MyCPUAccelerator` 继承的是 `CUDA_Accelerator` 且图捕获未验证，你应该在类里加哪三行代码？（答案见 4.4.5 练习 3。）
+4. 在报告中加一行 `"xpu_opt_in_expected": report['torch_xpu_capture_api'] and torch.xpu.is_available()`，对照 `graph_capture_supported`——在 XPU 后端上两者应相等（这正是 tests/unit/accelerator/test_accelerator_graph.py:L70-L76 固化的不变量；CPU 上两者都为 False）。
 
 **预期结果**：CPU 环境下脚本全绿；③证明单例可替换且替换经过 `_validate_accelerator` 双基类校验。GPU/XPU 环境下同一脚本输出的差异（`nccl`、`graph_capture_supported=True`、pynvml 口径显存、Level Zero 注册成功）即为各后端语义差异的活样本（待本地验证）。
 
@@ -634,12 +681,12 @@ print("swapped to:", get_accelerator()._name)   # mycpu
 - **抽象层的形状**：`DeepSpeedAccelerator` 用约 20 组、60+ 个方法覆盖设备/RNG/流/内存/类型/图/张量/pinned memory/算子构建；抽象方法强制「人人实现」，能力位（`is_graph_capture_supported`、`prefer_triton_grouped_mm`、`register_host_memory`…）默认保守值、后端显式 opt-in。
 - **探测协议**：`DS_ACCELERATOR` 覆盖优先（带扩展预检、非法值 fail-fast），否则按固定顺序 try-import 自动探测；`torch_supa`/`torch_xmlir` 会伪装成 torch.cuda，必须在 CUDA 之前检查；结果缓存在全局单例，`set_accelerator` 可替换并经双基类 isinstance 校验（符号链接双轨布局的必然产物）。
 - **参照实现的取舍**：CUDA 直连 `torch.cuda`（pynvml 空闲显存、nccl、真图捕获），CPU 全面退化（psutil + cgroup 口径、ccl/gloo、`None` 图 + eager 空操作）；`is_synchronized_device` 一个事实派生出计时/依赖/反压三个问题。
-- **图捕获是显式声明而非隐式继承**：基类默认 `False`；CUDA/NPU 验证后 opt-in 且必须先实现 `is_current_stream_capturing`；消费方（rollout、图缓存）查到不支持就 warning + 回退 eager。KLXPU 先 default-deny、#9042 验证后删除覆写恢复继承——支持与否始终是后端自己的显式决定。
-- **自力更生模式**：XPU 在 torch 无对应通道时用 ctypes 直驱 Level Zero——lru_cache 的加载器、可选扩展先探测、UUID 匹配设备、单设备上下文、恒等映射校验、失败一律 warn + 降级、注销失败宁可报错。
+- **图捕获是显式声明而非隐式继承**：基类默认 `False`；CUDA/NPU 验证后 opt-in 且必须先实现 `is_current_stream_capturing`；XPU（#9007）用能力探测式 opt-in——`torch.xpu.is_available() and hasattr(torch.xpu, 'is_current_stream_capturing')` 同时挡住「哑类型桩」与「pre-2.11 无查询」两类假阳性，三件套在老 torch 上自动退化为 stub；消费方（rollout 两条生成路径、图缓存）查到不支持就 warning + 回退 eager。KLXPU 则先 default-deny、#9042 验证后删除覆写恢复继承。支持与否始终是后端自己的显式决定。
+- **自力更生模式**：XPU 在 torch 无对应通道时用 ctypes 直驱 Level Zero——lru_cache 的加载器、可选扩展先探测、UUID 匹配设备、单设备上下文、恒等映射校验、失败一律 warn + 降级、注销失败宁可报错。图捕获 opt-in 的 `hasattr` 探测与降级复用同一思想。
 
 ## 7. 下一步学习建议
 
 - **下一讲 u3-l2（deepspeed.comm）**：`communication_backend_name()` 返回的 `nccl`/`gloo`/`ccl` 字符串正是 comm 层初始化进程组的输入——加速器抽象回答「用哪个后端」，comm 层回答「怎么通信」。
 - **u3-l3（进程组管理）**：ZeRO 与各种并行的坐标系建立在这些基础之上。
-- **u7-l4（Hybrid Engine）**：本讲的 `is_graph_capture_supported` 在那里被两条生成路径消费（回退 eager 的 warning 就来自那里），静态 KV cache 与 `is_current_stream_capturing` 的配合也将展开。
-- **延伸阅读**：[docs/_tutorials/accelerator-abstraction-interface.md](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/docs/_tutorials/accelerator-abstraction-interface.md)（移植规则全表）与 [deepspeed/utils/pin_memory.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/deepspeed/utils/pin_memory.py)（`DS_PIN_MEMORY_BACKEND` 原生 pinned 通道，4.5 的调用上游）；有兴趣可以对照读 [accelerator/hpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/hpu_accelerator.py) 与 [accelerator/supa_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/84679e9d3a2582bffc53a5259d13cfc7278c9772/accelerator/supa_accelerator.py)，看其余后端如何组合这两种策略。
+- **u7-l4（Hybrid Engine）**：本讲的 `is_graph_capture_supported` 在那里被两条生成路径消费（回退 eager 的 warning 就来自那里），静态 KV cache 与 `is_current_stream_capturing` 的配合也将展开；#9007 之后这些图路径在 XPU 上同样生效。
+- **延伸阅读**：[docs/_tutorials/accelerator-abstraction-interface.md](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/docs/_tutorials/accelerator-abstraction-interface.md)（移植规则全表，含 #9007 新增的 XPU opt-in 段落）与 [deepspeed/utils/pin_memory.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/deepspeed/utils/pin_memory.py)（`DS_PIN_MEMORY_BACKEND` 原生 pinned 通道，4.5 的调用上游）；有兴趣可以对照读 [accelerator/hpu_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/hpu_accelerator.py) 与 [accelerator/supa_accelerator.py](https://github.com/deepspeedai/DeepSpeed/blob/7681845b3e20b371e28f1affe6cd6b813f1aa237/accelerator/supa_accelerator.py)，看其余后端如何组合这两种策略。
