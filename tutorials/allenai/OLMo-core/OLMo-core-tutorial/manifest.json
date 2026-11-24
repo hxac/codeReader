@@ -1,4 +1,7 @@
 {
+  "head": "29ab5b92b94322dbd6e28e7d39af5068b89a23dc",
+  "project": "OLMo-core",
+  "rationale": "本轮增量（704625ad9..29ab5b92b，仅提交 #957 \"Normalize TransformerTrainModule loss by the global loss-token count\"）只改动三个文件：train/train_module/transformer/train_module.py 在 train_batch 中插入 13 行——batch_num_tokens_for_loss 先在数据并行进程组内 all-reduce（SUM）再除以 DP world size 并 clamp_min(1)，使训练目标从「各 rank token 均值的平均」变为「全局 token 均值」（CP/TP rank 看到相同 labels 不参与求和、仍由 LMHead 处理；单进程或无 dp_config 时保持本地计数），并新增测试文件 src/test/train/train_module/transformer/train_module_test.py（parametrize FSDP/DDP × 微批划分，run_distributed_test 拉起 CPU gloo 双/四 rank，用单进程 F.cross_entropy 参照验证梯度与 CE 恰为全局 token 均值），CHANGELOG.md 在 Unreleased 的 Fixed 段顶部插入 1 行。据此决策：u6-l2 是本轮核心受影响讲义——其 4.3 节把 N 讲成「本 batch 的有效 token 数」需改写为全局计数语义，且 L451 之后所有行号锚点整体 +13，标记 update 并扩展主题/学习目标/实践任务、把新测试文件加入 source_files；u5-l2（L595-L602→L608-L615）、u5-l3（L502 起十余处锚点）、u7-l1（L636-L655、L683-L696 等锚点，且 DP 梯度平均正是全局计数归一化成立的前提，主题与目标补充这一配合关系并将 train_module.py 列入引用）、u8-l1（L539-L581 eval_batch 锚点）四处仅因 train_module.py 行号偏移需刷新锚点，标记 update；u1-l1 因 CHANGELOG 行号 +1（Unreleased 段 L8-L45、v3.0.0 链接移至 L49）标记 update；u5-l1 在该文件的唯一锚点 L235-L242 位于插入点之前且内容不涉及损失归一化，u3 系列虽提及 loss_div_factor 但 lm_head.py、moe/loss.py、model.py 均未变（loss_div_factor 的下游机制不受影响），其余已生成讲义引用的源码完全未动，全部 keep；未生成讲义保持 new，其中 u10-l6 补充新增的 train_module_test.py 作为 parametrize + run_distributed_test 约定的最新范例。另注：提交说明明确 TransformerPipelineTrainModule.train_batch 仍用本地计数（留作后续 follow-up），u7-l2 引用的流水线代码未变，维持 keep。",
   "units": [
     {
       "id": "u1",
@@ -57,7 +60,7 @@
           "topic": "讲解如何安装 OLMo-core（含可选依赖）、如何用 pytest 运行测试（GPU 测试无 GPU 时自动跳过）、以及 make style/lint/type-check 等代码检查工具链。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l2"
           ],
@@ -84,7 +87,7 @@
           "topic": "带读者走一遍 src/olmo_core 的目录结构：config.py、nn/（模型）、data/（数据）、train/（训练）、distributed/（并行与 checkpoint）、optim/（优化器）、eval/、generate/、launch/、kernels/，以及 src/test 与源码一一镜像的组织方式。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u1-l3"
           ],
@@ -143,7 +146,7 @@
           "topic": "讲解 src/olmo_core/config.py 中的 Config dataclass 基类：YAML/JSON 序列化、嵌套组合、以及为什么整个库都用 @dataclass 配置类。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -205,7 +208,7 @@
       "id": "u3",
       "lectures": [
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u2-l1"
           ],
@@ -232,7 +235,7 @@
           "topic": "精读 nn/transformer/model.py 的 Transformer 类与 block.py 的 TransformerBlock，理解残差流、block 堆叠和前向传播主链路。"
         },
         {
-          "action": "update",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -254,10 +257,10 @@
             "src/olmo_core/nn/transformer/config.py"
           ],
           "title": "TransformerConfig 与预置架构工厂方法",
-          "topic": "讲解 TransformerConfig 的字段含义（含本轮新增的可选 completedp 参数化字段，详见 u10-l8）与 olmo2_1M 到 olmo2_32B、olmo3 系列等预置工厂方法，以及 build() 如何初始化一个模型。"
+          "topic": "讲解 TransformerConfig 的字段含义（含可选 completedp 参数化字段，详见 u10-l8）与 olmo2_1M 到 olmo2_32B、olmo3 系列等预置工厂方法，以及 build() 如何初始化一个模型。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l1"
           ],
@@ -285,7 +288,7 @@
           "topic": "讲解 nn/attention/ 的抽象：base.py 的注意力基类、backend.py 的后端枚举、flash attention/ring attention 等实现，以及后端如何通过 Registrable 配置切换。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -313,10 +316,10 @@
             "src/olmo_core/nn/embedding.py"
           ],
           "title": "核心组件：前馈网络、LayerNorm、RoPE 与 LM Head",
-          "topic": "逐一讲解 feed_forward.py（SwiGLU 等）、layer_norm.py（含本轮新增的 LayerNorm.output_scale 增益缩放）、rope.py（旋转位置编码）、lm_head.py 与 embedding.py 这些标准组件的实现与配置项。"
+          "topic": "逐一讲解 feed_forward.py（SwiGLU 等）、layer_norm.py（含 LayerNorm.output_scale 增益缩放）、rope.py（旋转位置编码）、lm_head.py 与 embedding.py 这些标准组件的实现与配置项。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l4"
           ],
@@ -346,7 +349,7 @@
           "topic": "讲解 nn/moe/ 的 MoE 实现：router 的负载均衡路由、专家 MLP、并行专家（parallel_mlp.py）与 MoE 辅助损失。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -355,7 +358,7 @@
           "learning_goals": [
             "理解 init 功能（标准差缩放等）如何按参数类型应用",
             "复现同一 seed 下的确定性初始化",
-            "说明本轮新增 InitMethod.nanochat 的谱条件公式 std = 1/√fan_in · min(1, √(fan_out/fan_in)) 及其覆盖的组件（attention、KDA、GatedDeltaNet、dense/MoE 前馈）",
+            "说明 InitMethod.nanochat 的谱条件公式 std = 1/√fan_in · min(1, √(fan_out/fan_in)) 及其覆盖的组件（attention、KDA、GatedDeltaNet、dense/MoE 前馈）",
             "自定义新参数类型的初始化方案"
           ],
           "level": "intermediate",
@@ -372,7 +375,7 @@
             "src/olmo_core/nn/transformer/config.py"
           ],
           "title": "模型初始化：权重从哪里来",
-          "topic": "讲解 nn/transformer/init.py 的参数初始化方案（normal、llama、fan_in、normalized，以及本轮新增的 nanochat 谱条件初始化与 nanochat_std/init_linear_nanochat）与 init_seed 如何保证可复现。"
+          "topic": "讲解 nn/transformer/init.py 的参数初始化方案（normal、llama、fan_in、normalized，以及 nanochat 谱条件初始化与 nanochat_std/init_linear_nanochat）与 init_seed 如何保证可复现。"
         }
       ],
       "level": "intermediate",
@@ -383,7 +386,7 @@
       "id": "u4",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l1",
             "u3-l2"
@@ -413,7 +416,7 @@
           "topic": "讲解 data/numpy_dataset.py 的内存映射 .npy 数据集家族与 data_loader.py 的 NumpyDataLoader，包括 TokenizerConfig 与 collator 的配合。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l1"
           ],
@@ -444,7 +447,7 @@
           "topic": "讲解新一代数据 API data/composable/：TokenSource、InstanceSource 的切片/采样/混合/packing 组合子，以及 ComposableDataLoader 的拼装与 visualize 可视化。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u4-l2"
           ],
@@ -479,7 +482,7 @@
       "id": "u5",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l2",
             "u3-l2"
@@ -490,7 +493,7 @@
             "掌握 OptimConfig 家族的公共字段与参数组覆盖机制",
             "理解 build() 如何从配置生成真实优化器实例",
             "为不同参数组设置不同超参",
-            "了解本轮新增的 OptimConfig.mup / OptimConfig.completedp 可选字段的作用入口"
+            "了解 OptimConfig.mup / OptimConfig.completedp 可选字段的作用入口"
           ],
           "level": "intermediate",
           "minimal_modules": [
@@ -507,10 +510,10 @@
             "src/olmo_core/optim/lion.py"
           ],
           "title": "优化器配置体系：AdamW、Lion 与参数组覆盖",
-          "topic": "讲解 optim/ 包：OptimConfig 基类（含本轮新增的 mup/completedp 可选字段，深入实现见 u10-l7/u10-l8）、AdamWConfig/LionConfig/MuonConfig 等实现，以及 OptimGroupOverride 如何对特定参数组覆盖超参。"
+          "topic": "讲解 optim/ 包：OptimConfig 基类（含 mup/completedp 可选字段，深入实现见 u10-l7/u10-l8）、AdamWConfig/LionConfig/MuonConfig 等实现，以及 OptimGroupOverride 如何对特定参数组覆盖超参。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u5-l1"
           ],
@@ -536,7 +539,7 @@
           "topic": "讲解 optim/scheduler.py 的 CosWithWarmup 等学习率调度器：如何按 step 计算即时学习率、warmup 与衰减的配置方式。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u5-l2"
           ],
@@ -572,7 +575,7 @@
       "id": "u6",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u1-l4",
             "u5-l2"
@@ -601,7 +604,7 @@
           "topic": "精读 train/trainer.py 的 Trainer 类与 TrainerConfig：训练主循环、step 管理、指标收集与归约、Duration（按 step/token/epoch 停训）语义。"
         },
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l1"
           ],
@@ -610,27 +613,30 @@
           "learning_goals": [
             "理解 TrainModule 抽象与 TransformerTrainModule 的分工",
             "说明并行配置为何挂在 train module 上",
-            "梳理一次 forward/backward/optimizer step 的代码路径"
+            "梳理一次 forward/backward/optimizer step 的代码路径",
+            "解释 train_batch 为何按全局 loss token 数（在 DP 进程组内 all-reduce 后除以 DP world size）归一化损失，梯度经 DP 平均后恰好等于全局 token 均值的目标，以及 label masking（SFT）下与旧「各 rank 均值的平均」目标的差异"
           ],
           "level": "intermediate",
           "minimal_modules": [
             "TrainModule",
-            "TransformerTrainModule"
+            "TransformerTrainModule",
+            "全局 token 数损失归一化"
           ],
           "order": 2,
-          "practice_task": "构建一个最小 TransformerTrainModuleConfig（单卡 DP），配合随机数据手动执行一次 train_step，打印 loss 与优化器状态，验证你理解的调用链与源码一致。",
+          "practice_task": "构建一个最小 TransformerTrainModuleConfig（单进程 DP），配合随机数据手动执行一次 train_step，打印 loss 与优化器状态，验证你理解的调用链与源码一致（注意单进程路径仍用本地 token 计数并 clamp_min(1)）；再阅读 src/test/train/train_module/transformer/train_module_test.py 中 test_train_batch_normalizes_loss_by_global_token_count 的做法，解释它如何用单进程参照（F.cross_entropy + ignore_index=-100）验证 2 个 DP rank 上不均衡的 loss token 分布（7+6 对 1+2）经梯度平均后恰好等于全局 token 均值的梯度与 CE。",
           "source_files": [
             "src/olmo_core/train/train_module/train_module.py",
             "src/olmo_core/train/train_module/config.py",
             "src/olmo_core/train/train_module/transformer/train_module.py",
             "src/olmo_core/train/train_module/transformer/config.py",
-            "src/olmo_core/train/train_module/transformer/common.py"
+            "src/olmo_core/train/train_module/transformer/common.py",
+            "src/test/train/train_module/transformer/train_module_test.py"
           ],
           "title": "TransformerTrainModule：前向、反向与并行设置的汇聚点",
-          "topic": "讲解 train/train_module/ 的 TrainModule 抽象与 TransformerTrainModule：它包装模型、优化器与并行策略（DP/TP/PP/CP/EP 配置都存放在此），并实现 forward/backward 逻辑。"
+          "topic": "讲解 train/train_module/ 的 TrainModule 抽象与 TransformerTrainModule：它包装模型、优化器与并行策略（DP/TP/PP/CP/EP 配置都存放在此），并实现 forward/backward 逻辑；结合本轮 #957 修复精读 train_batch 的损失归一化——batch_num_tokens_for_loss 先在 DP 进程组内 all-reduce 再除以 DP world size，使目标函数从「各 rank token 均值的平均」变为「全局 token 均值」（CP/TP rank 看到相同 labels 不参与求和、仍由 LMHead 处理；单进程或无 dp_config 时保持本地计数）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l1"
           ],
@@ -660,7 +666,7 @@
           "topic": "讲解 train/callbacks/ 的 Callback 钩子体系与丰富的内置回调：checkpoint、评估、日志（WandB/Comet/console）、速度与显存监控、序列长度调度等。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u6-l3"
           ],
@@ -697,7 +703,7 @@
       "id": "u7",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l2"
           ],
@@ -706,7 +712,8 @@
           "learning_goals": [
             "区分 DDP、FSDP、HSDP 的分片与梯度同步差异",
             "通过 DataParallelConfig 切换并行策略",
-            "理解 gradient reduction 与 fsdp wrap policy 的配置"
+            "理解 gradient reduction 与 fsdp wrap policy 的配置",
+            "说明 FSDP/HSDP/DDP 的梯度平均与 #957 的全局 token 数损失归一化如何配合：除以 DP world size 的全局计数经梯度平均后还原全局 token 均值目标"
           ],
           "level": "advanced",
           "minimal_modules": [
@@ -715,17 +722,18 @@
             "HSDP"
           ],
           "order": 1,
-          "practice_task": "分别用 DDP 与 FSDP 配置（单进程模拟或 CPU 多进程）构建训练设置，对比优化器状态中参数分片的差异，并解释 HSDP 与 FSDP 的参数量取舍。",
+          "practice_task": "分别用 DDP 与 FSDP 配置（单进程模拟或 CPU 多进程）构建训练设置，对比优化器状态中参数分片的差异，并解释 HSDP 与 FSDP 的参数量取舍；再结合 train_batch 中新增的 DP 组 all-reduce 全局 token 计数，解释「除以 DP world size + 梯度平均」为何恰好等价于在全局 batch 上直接求 token 均值。",
           "source_files": [
             "src/olmo_core/distributed/parallel/data_parallel.py",
             "src/olmo_core/train/train_module/transformer/ddp_train_module.py",
-            "src/olmo_core/train/train_module/transformer/config.py"
+            "src/olmo_core/train/train_module/transformer/config.py",
+            "src/olmo_core/train/train_module/transformer/train_module.py"
           ],
           "title": "数据并行：DDP、FSDP 与 HSDP",
-          "topic": "讲解 distributed/parallel/data_parallel.py 的 DataParallelType（DDP/FSDP/HSDP）与对应的 train module 设置，理解分片策略与梯度归约。"
+          "topic": "讲解 distributed/parallel/data_parallel.py 的 DataParallelType（DDP/FSDP/HSDP）与对应的 train module 设置，理解分片策略与梯度归约；并结合本轮 #957 说明 DP 梯度平均为何要求损失按全局 loss token 数（DP 组 all-reduce 后除以 DP world size）归一化，OLMoDDPTrainModule 早已采用同一做法。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l1"
           ],
@@ -758,7 +766,7 @@
           "topic": "总览其余并行维度：tensor_parallel、pipeline_parallel（含 pipeline train module）、context_parallel（ring attention）、expert_parallel，以及它们如何与 DP 组合成多维并行；并结合 cross_entropy_loss.py 讲清张量并行下损失如何跨 rank 归约（Partial 输出布局与按全局有效 token 数归一化，对应 075a7892d 的修复）。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u7-l2"
           ],
@@ -775,7 +783,7 @@
             "distributed 测试工具"
           ],
           "order": 3,
-          "practice_task": "基于 olmo_core.testing/distributed.py 的工具写一个双进程的小测试：各自持有一半数据，all-gather 后验证合并结果，并用 pytest 跑通它。",
+          "practice_task": "基于 olmo_core/testing/distributed.py 的工具写一个双进程的小测试：各自持有一半数据，all-gather 后验证合并结果，并用 pytest 跑通它。",
           "source_files": [
             "src/olmo_core/distributed/utils.py",
             "src/olmo_core/distributed/nn.py",
@@ -794,7 +802,7 @@
       "id": "u8",
       "lectures": [
         {
-          "action": "new",
+          "action": "update",
           "depends_on": [
             "u6-l3"
           ],
@@ -824,7 +832,7 @@
           "topic": "讲解 eval/ 包的 Evaluator 抽象、LMEvaluator 的困惑度评估、task_groups 与训练中的 DownstreamEvaluatorCallback/LMEvaluatorCallback。"
         },
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u3-l2"
           ],
@@ -862,7 +870,7 @@
       "id": "u9",
       "lectures": [
         {
-          "action": "new",
+          "action": "keep",
           "depends_on": [
             "u2-l3",
             "u6-l4"
@@ -1130,10 +1138,11 @@
             "src/olmo_core/testing/distributed.py",
             "src/test/data/composable/data_loader_test.py",
             "src/test/nn/ddp/helpers.py",
+            "src/test/train/train_module/transformer/train_module_test.py",
             "Makefile"
           ],
           "title": "测试体系与贡献流程",
-          "topic": "讲解 src/test 的组织约定（test_* 命名、parametrize、@pytest.mark.gpu、分布式测试工具）、olmo_core.testing 工具与贡献时的格式/lint/类型检查要求，并以 src/test/nn/ddp/helpers.py 为例说明如何把重复的分布式测试整合为共享 helper 与参数化套件。"
+          "topic": "讲解 src/test 的组织约定（test_* 命名、parametrize、@pytest.mark.gpu、分布式测试工具）、olmo_core.testing 工具与贡献时的格式/lint/类型检查要求；以 src/test/nn/ddp/helpers.py 为例说明如何把重复的分布式测试整合为共享 helper 与参数化套件，并以本轮新增的 src/test/train/train_module/transformer/train_module_test.py（run_distributed_test 拉起 CPU gloo 双/四 rank，parametrize FSDP/DDP × 微批划分，用单进程参照验证全局 token 均值）为最新范例。"
         },
         {
           "action": "new",
@@ -1206,8 +1215,5 @@
       "order": 10,
       "title": "单元十：高级主题与二次开发"
     }
-  ],
-  "head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
-  "project": "OLMo-core",
-  "rationale": "本轮增量（075a7892d..704625ad9，仅提交 #955 \"Implement NanoChat Init, muP, complete(d)P\"）引入三套现代参数化方案：InitMethod.nanochat 谱条件初始化（init.py 大幅扩展，attention/__init__.py、kda.py、recurrent.py、model.py 的 SplitVocabEmbedding 附加行初始化同步修改）、muP 学习率（新增 nn/transformer/mup.py 与 optim/mup.py，OptimConfig 新增 mup 字段并在 build 时按 lr 乘数切分参数组）、CompletedP 参数化（新增 nn/transformer/completedp.py 与 optim/completedp.py，TransformerConfig 新增 completedp 字段，LayerNorm 新增 output_scale），并附带 src/examples/mup、src/examples/completedp 坐标检查示例与大量新测试。据此决策：已生成的九篇讲义中，u1-l2、u2-l1、u2-l3 引用的文件完全未变，标记 keep；u1-l1 引用的 CHANGELOG 在其 L41 锚点上方插入 7 行新增条目（L41→约 L48），u1-l3 的 TransformerConfig 锚点因新增 import 下移一位且源码树新增 examples/mup、examples/completedp 目录与四个新库模块，u1-l4 与 u3-l2 引用的 transformer/config.py 大量行号偏移且 u3-l2 所讲的 TransformerConfig 类本身新增 completedp 字段，u2-l2 引用的 optim/config.py、adamw.py、recurrent.py 行号均有偏移，u3-l1 引用的 model.py 构造与初始化代码改动，这六篇标记 update 以刷新锚点并补充新内容；u3-l6 与 u5-l1 尚未生成，扩展其主题以覆盖 nanochat 与 mup/completedp 字段后保持 new；u3-l4 主题补充 LayerNorm.output_scale。另按\"新增重要机制需要新增讲义\"的规则，在高级主题单元新增 u10-l7（nanochat + muP，依赖 u3-l6/u5-l1）与 u10-l8（CompletedP，依赖 u10-l7/u3-l2）两篇，与 float8 等横切高级主题并列；其余未生成讲义的计划与引用文件均不受本次改动影响，保持 new。"
+  ]
 }
