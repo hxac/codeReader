@@ -68864,8 +68864,8 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/deepspeedai/DeepSpeed/DeepSpeed-tutorial",
       "last_head": "7681845b3e20b371e28f1affe6cd6b813f1aa237",
-      "last_run_at": "2026-11-23T13:02:58Z",
-      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"e00000d4-4792-4a72-bc4f-7130ad8171ad\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
+      "last_run_at": "2026-11-24T13:02:57Z",
+      "last_error": "ClaudeRunnerError: agent 非零退出（分类匹配）：\ncheCreationInputTokens\":0,\"webSearchRequests\":0,\"costUSD\":0.8970895999999999,\"contextWindow\":1000000,\"maxOutputTokens\":32000,\"thinkingTokens\":0,\"cacheCreationEphemeral5mInputTokens\":0,\"cacheCreationEphemeral1hInputTokens\":0,\"canonicalModel\":\"glm-5.3\",\"provider\":\"firstParty\",\"costBa"
     },
     "triple-mu/fast-ulysses": {
       "prompt_hash": "b21aef51792b02df",
@@ -69523,18 +69523,18 @@
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/open-instruct/open-instruct-tutorial",
       "last_head": "a4cd966a9e202843baba653115045e6fd6f473db",
-      "last_run_at": "2026-11-23T13:02:58Z",
-      "last_error": "quota exhausted; will resume next window"
+      "last_run_at": "2026-11-24T13:02:57Z",
+      "last_error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"1bff5443-3d6b-451a-920b-297178d9e18e\",\"total_cost_usd\":0,\"usage\":{\"output_tokens_details\":{\"thinking_tokens\":0},\"input_tokens\":0,\"cache_creation_in"
     },
     "allenai/OLMo-core": {
       "prompt_hash": "b21aef51792b02df",
       "lectures": {
         "u1-l1": {
-          "status": "done",
+          "status": "failed",
           "action": "update",
           "retries": 0,
-          "cost": 0.48442080000000004,
-          "error": null
+          "cost": null,
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"9bde67eb-7123-4f13-a36d-3a580db84715\",\"total_co"
         },
         "u1-l2": {
           "status": "keep",
@@ -69542,18 +69542,14 @@
           "retries": 0
         },
         "u1-l3": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 0.6630320000000003,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u1-l4": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 0.5710408,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l1": {
           "status": "keep",
@@ -69561,11 +69557,9 @@
           "retries": 0
         },
         "u2-l2": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 0.9197584,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u2-l3": {
           "status": "keep",
@@ -69573,158 +69567,114 @@
           "retries": 0
         },
         "u3-l1": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 0.9960872000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l2": {
-          "status": "done",
-          "action": "update",
-          "retries": 0,
-          "cost": 1.1740464000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3197264,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2866864,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l5": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2013128000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u3-l6": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0086304,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0461983999999998,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4334616,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u4-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2374656000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8970792000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u5-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9388096,
-          "error": null
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u5-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.0125567999999998,
-          "error": null
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u6-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.9791552000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2066656,
-          "error": null
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u6-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4235376,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u6-l4": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.3865040000000002,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.4757264,
-          "error": null
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u7-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.6350192,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u7-l3": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 0.8494560000000001,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u8-l1": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.2061312000000002,
-          "error": null
+          "status": "pending",
+          "action": "update",
+          "retries": 0
         },
         "u8-l2": {
-          "status": "done",
-          "action": "new",
-          "retries": 0,
-          "cost": 1.548928,
-          "error": null
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u9-l1": {
-          "status": "failed",
-          "action": "new",
-          "retries": 0,
-          "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"a77db41d-d63b-476c-ba6b-69ff1f1c36e9\",\"total_co"
+          "status": "keep",
+          "action": "keep",
+          "retries": 0
         },
         "u9-l2": {
           "status": "pending",
@@ -69777,13 +69727,13 @@
           "retries": 0
         }
       },
-      "manifest_head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
-      "prev_head": "075a7892d8a004242b085bf3c71b996389fd863c",
+      "manifest_head": "29ab5b92b94322dbd6e28e7d39af5068b89a23dc",
+      "prev_head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
       "phase": "workers",
       "mode": "incremental",
       "tutorial_path": "tutorials/allenai/OLMo-core/OLMo-core-tutorial",
-      "last_head": "704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e",
-      "last_run_at": "2026-11-23T13:02:58Z",
+      "last_head": "29ab5b92b94322dbd6e28e7d39af5068b89a23dc",
+      "last_run_at": "2026-11-24T13:02:57Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/olmocr": {
@@ -69899,7 +69849,7 @@
           "action": "new",
           "retries": 0,
           "cost": null,
-          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"61224fc9-56ce-4893-ae73-e71d341be92e\",\"total_co"
+          "error": "quota: API 额度/限流耗尽：\n[claude-code:unrecognized_model] {\"model\":\"glm-5.3\",\"query_source\":\"sdk\"}\n\n{\"duration_api_ms\":0,\"stop_reason\":\"stop_sequence\",\"session_id\":\"150c542b-e180-4214-a477-4727559c824b\",\"total_co"
         },
         "u3-l4": {
           "status": "pending",
@@ -69988,7 +69938,7 @@
       "mode": "full",
       "tutorial_path": "tutorials/allenai/olmocr/olmocr-tutorial",
       "last_head": "f7cfe4c22098b154c76b6ec950d1c0a464eecf8d",
-      "last_run_at": "2026-11-23T13:02:58Z",
+      "last_run_at": "2026-11-24T13:02:57Z",
       "last_error": "quota exhausted; will resume next window"
     },
     "allenai/OLMo": {
