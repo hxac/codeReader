@@ -1,98 +1,79 @@
-# vLLM 服务器生命周期管理
+# u3-l3 vLLM 服务器生命周期管理
 
 ## 1. 本讲目标
 
-学完本讲，你应该能够：
+本讲聚焦 `olmocr/pipeline.py` 中「服务器看护三件套」：`vllm_server_task`、`vllm_server_host`、`vllm_server_ready`。学完本讲，你应该能够：
 
-1. 说出 olmOCR 如何把 vLLM 推理服务作为**子进程**管理：拼装命令行、启动、看护日志、优雅退出。
-2. 逐个参数解释 `vllm serve` 命令，尤其是 `--limit-mm-per-prompt '{"video": 0}'` 为什么要关闭 video 通路。
-3. 理解 `process_line` 中两个 `re.search` 正则如何从服务器日志中「白嫖」队列深度指标，以及全局变量 `vllm_queued_requests` 如何反过来影响 `process_page` 的并行重试决策。
-4. 描述就绪探测（`vllm_server_ready`）的轮询逻辑与崩溃重启（`vllm_server_host`）的 5 次上限。
+1. 说出 `vllm serve` 命令行是如何被逐段拼装出来的，并解释每个参数对 GPU 显存、内存、GPU 数量等资源占用的影响（尤其是 `--limit-mm-per-prompt {"video": 0}` 为什么能省出内存）。
+2. 读懂 `process_line` 中两个 `re.search` 正则分别从服务器日志里捕获什么指标，以及全局变量 `vllm_queued_requests` 如何反过来影响 `process_page` 的并行重试决策。
+3. 描述服务器的就绪探测机制（HTTP 轮询 `/v1/models`）与崩溃自动重启策略（最多 5 次，耗尽即终止整个流水线）。
 
-承接关系：本讲是 [u2-l1 pipeline 主流程](u2-l1-pipeline-main-flow.md) 中「起 vLLM」这个检查点的展开。你在 u2-l6 已经见过重试体系的全貌、在 u2-l7 见过请求闸门与退避，本讲补上的是**服务器这一侧**的生命周期管理——它们共同构成完整的推理热路径。
+承接 u2-l1（main() 的编排主线）：本讲深入其中「起 vLLM」这一个检查点的前后实现。
 
 ## 2. 前置知识
 
-用通俗语言解释几个本讲会用到的概念：
-
-- **子进程（subprocess）**：一个 Python 程序可以在运行中启动另一个程序（这里是 `vllm` 命令），两者是操作系统层面的父子关系。父进程可以拿到子进程的标准输出/错误流（管道 PIPE），逐行读取。
-- **vLLM**：一个开源的大模型推理服务框架。执行 `vllm serve <模型>` 会启动一个 HTTP 服务，暴露与 OpenAI API 兼容的 `/v1/chat/completions` 等接口。olmOCR 的推理请求全部发给它。
-- **KV cache**：大模型推理时缓存注意力键值对的显存区域，越大能同时处理的请求越多。显存总量固定，所以「模型权重 + 视觉编码器 + KV cache」是在抢同一块蛋糕。
-- **日志即指标（log scraping）**：不给服务加监控接口，而是直接用正则从它打印的日志行里提取数字。简单粗暴，但零侵入。
-- **就绪探测（readiness probe）**：进程活着 ≠ 服务可用。模型加载、KV cache 分配可能耗时数分钟，所以要反复发 HTTP 请求直到拿到 200 才认为「就绪」。
-- **看护者模式（supervisor）**：一个循环包裹住子进程，子进程死了就重启，重启次数超上限就放弃并报错退出。
-- **`atexit` 钩子**：Python 进程退出时自动执行的回调，用来「带走」子进程，防止孤儿进程残留。
-
-一个重要的前置认知（来自 [u3-l1](u3-l1-workqueue-abstraction.md) 和 [u3-l2](u3-l2-local-and-s3-backends.md)）：**队列状态全在 workspace（本地或 S3）里，推理服务器是无状态的**。这是崩溃重启策略敢于「随便重启」的底气——重启后 worker 从队列继续领活即可，已完成的组有 done flag 兜底。
+- **vLLM 是什么**：一个开源的大模型推理引擎。`vllm serve <模型路径>` 会启动一个兼容 OpenAI Chat Completions API 的 HTTP 服务器，提供 PagedAttention、连续批处理（continuous batching）等高吞吐能力。olmOCR 的推理请求（u2-l7 的 `apost`）就是发给它的。
+- **为什么 olmOCR 要「自己管」服务器**：在默认模式下（不给 `--server`），olmOCR 不假设外部有人帮你把 vLLM 跑好，而是把 vLLM 当作一个**子进程**拉起，并额外做三件事：盯着它的 stdout 日志提取负载指标、崩溃后自动重启、自己退出时顺手杀掉子进程。这就是本讲的三个最小模块。
+- **子进程管理**：`asyncio.create_subprocess_exec` 在事件循环里启动一个外部命令，并通过 PIPE 拿到它的 stdout/stderr，逐行读取。
+- **健康探活**：判断「服务器好了没」不看进程是否存在，而是发一个真实的 HTTP GET 请求（`/v1/models` 端点），拿到 200 才算就绪。
+- **模块级全局变量**：Python 中一个模块顶层的变量可以被同模块内所有函数读写（配合 `global` 声明）。这里用它充当「服务器看护协程」与「worker 协程」之间的单向信息通道。
+- **术语**：KV cache（推理时缓存注意力中间结果的显存区域，越大越能同时服务更多请求）；TP/Tensor Parallel（把一个模型切到多张卡）；DP/Data Parallel（跑多个引擎副本）。
 
 ## 3. 本讲源码地图
 
-本讲只涉及少量文件，但每个引用点的行号都要精确：
+本讲几乎全部内容都在 `olmocr/pipeline.py` 一个文件里：
 
-| 文件 | 作用 |
-| --- | --- |
-| [olmocr/pipeline.py](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py) | 本讲主战场：`vllm_server_task` / `vllm_server_host` / `vllm_server_ready` 三件套、全局变量 `vllm_queued_requests`、`main()` 的集成点、`process_page` 的消费点 |
-| [olmocr/check.py](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/check.py) | `check_torch_gpu_available`：走内部服务器前的 GPU 体检 |
-| [README.md](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/README.md) | 外部服务器用法与独立 `vllm serve` 示例，是理解参数的对照材料 |
+| 位置 | 内容 | 在本讲中的角色 |
+|---|---|---|
+| [olmocr/pipeline.py:55-68](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L55-L68) | `logger` 与 `server_logger`（名为 "vllm"）的初始化 | 服务器原始日志的输出去向 |
+| [olmocr/pipeline.py:81-82](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L81-L82) | 全局变量 `vllm_queued_requests = None` | 指标通道的**生产端**定义 |
+| [olmocr/pipeline.py:334-374](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L334-L374) | `process_page` 的非旋转错误重试路径 | 指标通道的**消费端** |
+| [olmocr/pipeline.py:807-908](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L908) | `vllm_server_task` | 模块 4.1：拼命令、拉子进程、解析日志 |
+| [olmocr/pipeline.py:911-926](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L911-L926) | `vllm_server_host` | 模块 4.2：崩溃重启循环 |
+| [olmocr/pipeline.py:929-953](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L929-L953) | `vllm_server_ready` | 模块 4.3：HTTP 探活 |
+| [olmocr/pipeline.py:1225](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1225) | `--max_server_ready_timeout` 参数定义（默认 600） | 探活超时的来源 |
+| [olmocr/pipeline.py:1241-1258](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1241-L1258) | `--server`/`--api_key` 与 vLLM 参数组 | 各参数默认值来源 |
+| [olmocr/pipeline.py:1286](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1286) | `use_internal_server = not args.server` | 「内部起服务器」还是「外部已有服务器」的分叉 |
+| [olmocr/pipeline.py:1424-1467](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1424-L1467) | main() 中的装配与收尾 | 三件套的接线图 |
 
 ## 4. 核心概念与源码讲解
 
-### 4.1 vllm_server_task：拼装并看护一个 vLLM 子进程
+### 4.1 vllm_server_task：拼装命令、拉起子进程、解析日志
 
 #### 4.1.1 概念说明
 
-当用户**没有**提供 `--server` 参数时（即 `use_internal_server = not args.server`，见 [olmocr/pipeline.py:1286](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1286)），olmOCR 不去连远端 API，而是**自己拉起一个 vLLM 服务**当推理引擎。
+`vllm_server_task` 是「单次看护」的最小单元：它把 `vllm serve` 的命令行**逐段拼出来**，启动 vLLM 子进程，然后做两件长期工作——把服务器的每一行日志原样转录到 olmOCR 自己的日志体系里，并从日志中**用正则提取负载指标**（正在运行多少请求、队列里还压着多少请求）。
 
-`vllm_server_task` 是这个「拉起 + 看护」的最小单元，它承担四件事：
-
-1. 把用户的 CLI 参数翻译成一条 `vllm serve` 命令行；
-2. 用 `asyncio.create_subprocess_exec` 启动子进程，捕获 stdout/stderr；
-3. 逐行读取子进程日志：转发到独立 logger、探测致命错误、用正则提取队列深度指标；
-4. 响应取消（pipeline 结束时优雅终止子进程）。
-
-注意一个分工细节：`vllm_server_task` **不做**重启，也不做就绪判断——那是另外两个函数的职责（4.2 与 4.3 节）。三个函数各管一段生命周期，像接力棒。
+为什么值得专门写代码盯日志？因为 vLLM 会周期性打印一行类似 `Running: 4 reqs, Waiting: 12 reqs` 的指标日志，这是**免费得来的全局负载信息**：worker 协程可以据此判断「服务器现在闲不闲」，从而决定重试策略（见 4.1.4 实践 C）。不去解析日志的话，要获得同样信息就得额外调 vLLM 的 metrics API，成本更高。
 
 #### 4.1.2 核心流程
 
-用默认参数（单卡、模型 `allenai/olmOCR-2-7B-1025-FP8`）时，最终拼出的完整命令等价于：
-
-```bash
-vllm serve allenai/olmOCR-2-7B-1025-FP8 \
-  --port 30024 \
-  --disable-log-requests \
-  --uvicorn-log-level warning \
-  --served-model-name olmocr \
-  --tensor-parallel-size 1 \
-  --data-parallel-size 1 \
-  --limit-mm-per-prompt '{"video": 0}' \
-  --max-model-len 16384
 ```
-
-（`--gpu-memory-utilization` 默认不传，原因见下文。）
-
-执行时序：
-
-```text
-main()
-  └─ vllm_server_host(...)            # 4.2 节：外层重启循环
-       └─ vllm_server_task(...)       # 本节：单个服务器的一生
-            1. 拼命令行 cmd
-            2. create_subprocess_exec(cmd, stdout=PIPE, stderr=PIPE, OMP_NUM_THREADS=1)
-            3. atexit.register(_kill_proc)        # 父进程退出时带走子进程
-            4. 起 read_stream(stdout)、read_stream(stderr) 两个日志协程
-                 └─ 每行 → process_line(line)
-                      ├─ server_logger.info(line)              # 转发日志
-                      ├─ "Detected errors during sampling" → sys.exit(1)
-                      ├─ 就绪消息 → server_printed_ready_message = True
-                      ├─ re.search(r"Running: (\d+)")          # 正在运行的请求数
-                      └─ re.search(r"(?:Waiting|Pending):\s*(\d+)") → 全局 vllm_queued_requests
-            5. await proc.wait()                # 子进程退出（或被取消）
-            6. 被 cancel 时：proc.terminate() → 等 10 秒 → re-raise
+vllm_server_task(model_name_or_path, args, unknown_args):
+    1. 拼固定参数的命令行：
+       vllm serve <模型路径> --port <port> --disable-log-requests
+                  --uvicorn-log-level warning --served-model-name olmocr
+                  --tensor-parallel-size <tp> --data-parallel-size <dp>
+                  --limit-mm-per-prompt {"video": 0}
+    2. 可选追加：--gpu-memory-utilization（仅当用户显式给值）
+                 --max-model-len（仅当用户显式给值）
+    3. 把 unknown_args（olmocr 未识别的 CLI 参数）原样追加 → 透传给 vllm serve
+    4. create_subprocess_exec 启动子进程（PIPE 接管 stdout/stderr，OMP_NUM_THREADS=1）
+    5. atexit 注册退出钩子：本进程退出前先 terminate 子进程（防孤儿进程霸占 GPU）
+    6. 为 stdout、stderr 各起一个读行协程 read_stream → 逐行交给 process_line：
+       a. 每行写入 server_logger（名字叫 "vllm" 的 logger）
+       b. 看到 "Detected errors during sampling" → 认为模型权重损坏 → sys.exit(1)
+       c. 第一次看到就绪标语（"The server is fired up and ready to roll!"
+          或 "Starting vLLM API server"）→ 置位标志
+       d. 正则 r"Running: (\d+)" → 更新正在运行的请求数（并记录峰值）
+       e. 正则 r"(?:Waiting|Pending):\s*(\d+)" → 更新全局 vllm_queued_requests
+    7. await proc.wait()   ← 整个函数阻塞在这里，子进程活着期间不返回
+       （若被 cancel：terminate 子进程，最多再等 10 秒，然后把 CancelledError 抛回去）
 ```
 
 #### 4.1.3 源码精读
 
-**（1）命令行拼装**。[olmocr/pipeline.py:807-825](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L825) 构造固定部分的参数列表：
+**（a）命令拼装**——[olmocr/pipeline.py:807-825](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L825)：这段代码构造了 `cmd` 列表。注意 `--limit-mm-per-prompt` 的值 `'{"video": 0}'` 是一个 Python 字符串；由于最终用 `create_subprocess_exec`（不经过 shell）执行，它会被原样作为**一个** argv 元素传给 vLLM，不存在 shell 引号转义问题。源码注释写明动机：禁用视频编码器省下的内存可以让给 KV cache（致谢 @charitarthchugh）。Qwen2.5-VL 是视觉语言模型，其多模态处理器默认会为「可能传入视频」预留编码器资源；OCR 场景每条请求只有一张图片，把 video 上限设为 0 即可让 vLLM 跳过这部分预留。
 
 ```python
 cmd = [
@@ -103,644 +84,352 @@ cmd = [
     "--served-model-name", "olmocr",
     "--tensor-parallel-size", str(args.tensor_parallel_size),
     "--data-parallel-size", str(args.data_parallel_size),
-    "--limit-mm-per-prompt",
-    '{"video": 0}',  # Disabling video encoder saves RAM that you can put towards the KV cache, thanks @charitarthchugh
+    "--limit-mm-per-prompt", '{"video": 0}',  # 禁用视频编码器，省内存给 KV cache
 ]
 ```
 
-逐参数注释（这是本讲实践任务的核心交付物）：
+**（b）条件追加与透传**——[olmocr/pipeline.py:827-834](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L827-L834)：`--gpu-memory-utilization` 与 `--max-model-len` 只在用户显式给值时才追加到命令里（`args.gpu_memory_utilization` 的 argparse 默认是 `None`，即不传，此时沿用 vLLM 自身的默认值；而 `args.max_model_len` 默认 16384，所以几乎总会传）。最后 `unknown_args` 被原样拼接——这就是 u1-l5 讲过的「olmocr 未识别的参数自动转发给 vLLM」机制在服务器侧的落点。
 
-| 参数 | 默认值（argparse 处） | 作用与资源影响 |
-| --- | --- | --- |
-| `serve <model>` | 位置参数 `--model` | 启动 OpenAI 兼容 HTTP 服务。`model_name_or_path` 已经过 `download_model` 解析成本地路径或 HF repo id |
-| `--port` | 30024（[L1258](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1258)） | HTTP 监听端口。`main()` 随后把 `args.server` 改写成 `http://localhost:{port}/v1` |
-| `--disable-log-requests` | 恒传 | 关闭每个请求一条日志的 verbose 输出。百万级请求下既省 I/O，也让 stdout 只剩引擎状态行——**这正是下一步正则解析的前提** |
-| `--uvicorn-log-level warning` | 恒传 | 压低 Web 框架层日志，进一步降噪 |
-| `--served-model-name olmocr` | 恒传 | 对外暴露的模型名固定为 `olmocr`。与 [olmocr/pipeline.py:1433](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1433) 的 `args.model = "olmocr"` 对应——不管本地模型路径多「奇怪」，请求体里的 model 名永远是 `olmocr` |
-| `--tensor-parallel-size` / `-tp` | 1（[L1256](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1256)） | 张量并行：把单次前向计算切到多张卡。`-tp 2` 会占用 2 张 GPU |
-| `--data-parallel-size` / `-dp` | 1（[L1257](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1257)） | 数据并行：起多份引擎副本分摊请求。`-dp 2` 同样占 2 张卡 |
-| `--limit-mm-per-prompt '{"video": 0}'` | 恒传 | **本讲的关键参数**：多模态模型默认会为每条提示预留 video 编码通路，而 OCR 只发图片。显式声明 video 数量为 0，把省下来的显存让给 KV cache（源码注释原话："Disabling video encoder saves RAM that you can put towards the KV cache"）——即「用不上就别占内存」 |
+**（c）子进程启动与退出钩子**——[olmocr/pipeline.py:836-851](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L836-L851)：用 `asyncio.create_subprocess_exec` 启动子进程并接管两个标准流。环境变量里强制 `OMP_NUM_THREADS=1`，源码注释解释：一台多 GPU 机器上同时跑多份 olmOCR 时，避免各进程的 CPU 线程互相争抢。`atexit.register(_kill_proc)` 保证：即使主进程走 `sys.exit(1)` 这类异常路径退出（本文件里有多处），也会先终止 vLLM 子进程，不会留下霸占显存的孤儿进程。
 
-**（2）条件参数与未知参数透传**。[olmocr/pipeline.py:827-834](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L827-L834)：
+**（d）日志解析 process_line**——[olmocr/pipeline.py:857-880](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L857-L880)：每行日志先交给 `server_logger`（在 [olmocr/pipeline.py:59-60](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L59-L60) 创建，logger 名就叫 `"vllm"`，`propagate=False`，挂的是与主 logger 相同的 console/file handler，所以 vLLM 原始日志会完整出现在 olmOCR 的控制台与 `--disk_logging` 文件里）。随后四个分支：
 
 ```python
-if args.gpu_memory_utilization is not None:
-    cmd.extend(["--gpu-memory-utilization", str(args.gpu_memory_utilization)])
+if "Detected errors during sampling" in line:        # 采样报错 → 权重疑似损坏，直接终止
+    logger.error("..."); sys.exit(1)
 
-if args.max_model_len is not None:
-    cmd.extend(["--max-model-len", str(args.max_model_len)])
+if not server_printed_ready_message and ("The server is fired up and ready to roll!" in line
+                                         or "Starting vLLM API server" in line):
+    server_printed_ready_message = True               # 记录服务器打印过就绪标语
 
-if unknown_args:
-    cmd.extend(unknown_args)
+if match := re.search(r"Running: (\d+)", line):       # 正则一：正在运行的请求数
+    current_running = int(match.group(1))
+    if current_running > peak_running_req: ...        # 追踪历史峰值，仅用于日志
+    last_running_req = current_running
+
+if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):  # 正则二：排队等待数
+    global vllm_queued_requests
+    last_queue_req = int(match.group(1))
+    vllm_queued_requests = last_queue_req             # 写入全局变量，供 process_page 消费
 ```
 
-- `--gpu-memory-utilization` 的 argparse 定义**没有默认值**（[L1252-1254](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1252-L1254)），所以默认不传，交给 vLLM 自己决定——显存预算留给用户调优。
-- `--max_model_len` 默认 16384（[L1255](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1255)），非 None，所以**总会**追加。它限制 KV cache 按多长上下文分配，调小能救活「KV cache is larger than available memory」的启动失败（[main() 在 L1282-1284 的提示日志](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1282-L1284)也印证了这一点）。
-- `unknown_args` 是 `parse_known_args` 没认出的参数（机制见 [u1-l5](u1-l5-cli-arguments.md)），在这里**原样追加**给 `vllm serve`——用户因此能用 olmOCR 不认识的任何 vLLM 参数（比如 `--swap-space`），这是「薄封装」设计的落点。
+两个正则的含义：
 
-**（3）子进程创建与环境变量**。[olmocr/pipeline.py:836-851](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L836-L851)：
+- **正则一 `r"Running: (\d+)"`**：捕获 vLLM 指标日志里 `Running: N` 中的 N，即**此刻正在被引擎处理的请求数**。代码用它维护 `last_running_req` 与峰值 `peak_running_req`（峰值只在刷新纪录时打一条日志，方便人眼观察吞吐上限）。
+- **正则二 `r"(?:Waiting|Pending):\s*(\d+)"`**：捕获 `Waiting: N` 或 `Pending: N` 中的 N，即**在队列里排队、尚未被引擎接手的请求数**。同时兼容两种写法是因为 vLLM 不同版本的日志字段名有变化（旧版 `Waiting`、新版 `Pending`）；`\s*` 允许冒号后空白数不固定。捕获值写入模块级全局变量 `vllm_queued_requests`（其定义在 [olmocr/pipeline.py:81-82](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L81-L82)，初始为 `None`）——这就是「服务器看护协程 → worker 协程」的指标通道。
 
-```python
-proc = await asyncio.create_subprocess_exec(
-    *cmd,
-    stdout=asyncio.subprocess.PIPE,
-    stderr=asyncio.subprocess.PIPE,
-    env={**os.environ, "OMP_NUM_THREADS": "1"},
-)
+另有一个诚实的观察：`server_printed_ready_message` 这个标志在当前代码里只被写入、不参与任何后续控制流（真正的就绪门控由 4.3 的 HTTP 探测完成），可以把它理解为「看过就绪标语」的状态记录。
 
-def _kill_proc():
-    try:
-        proc.terminate()
-    except:
-        logger.info("VLLM Process already terminated")
+**（e）读流与退出处理**——[olmocr/pipeline.py:882-908](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L882-L908)：`read_stream` 逐行读取并解码，单行解析抛异常只告警跳过（防脏数据中断整个看护器）。主流程 `await proc.wait()`——**子进程活着期间，`vllm_server_task` 就停在这里**；只有当服务器进程退出（崩溃/被杀）时才返回。若收到 `CancelledError`（流水线正常收尾时 main() 会 cancel 本任务，见 [olmocr/pipeline.py:1464-1466](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1464-L1466)），则先 `proc.terminate()`，再最多等 10 秒让其退出，然后重新抛出 `CancelledError`。
 
-atexit.register(_kill_proc)
-```
-
-两个细节：
-
-- `OMP_NUM_THREADS=1`：OpenMP 线程数压到 1。源码注释解释：同一台多卡机器上跑多份 olmOCR（每份管自己那张卡）时，若每份都开满 CPU 线程会互相争抢——与其各自内卷，不如各留 1 线程。
-- `atexit.register(_kill_proc)`：即使 Python 主进程异常退出，也尽力带走 vLLM 子进程，避免留下占着显存的孤儿。`except` 兜底意味着「已经死了也不报错」。
-
-**（4）日志解析协程**。共享变量初始化在 [olmocr/pipeline.py:853-855](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L853-L855)：`last_running_req, peak_running_req, last_queue_req = 0, 0, 0` 与 `server_printed_ready_message = False`。
-
-`process_line` 是每行日志的处理函数（[olmocr/pipeline.py:857-880](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L857-L880)），做四件事：
-
-```python
-async def process_line(line):
-    nonlocal last_running_req, last_queue_req, peak_running_req, server_printed_ready_message
-    server_logger.info(line)
-
-    if "Detected errors during sampling" in line:
-        logger.error("Cannot continue, sampling errors detected, model is probably corrupt")
-        sys.exit(1)
-
-    if not server_printed_ready_message and ("The server is fired up and ready to roll!" in line or "Starting vLLM API server" in line):
-        server_printed_ready_message = True
-
-    if match := re.search(r"Running: (\d+)", line):
-        current_running = int(match.group(1))
-        if current_running > peak_running_req:
-            peak_running_req = current_running
-            logger.info(f"New peak running requests: {peak_running_req}")
-        last_running_req = current_running
-
-    if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
-        global vllm_queued_requests
-        last_queue_req = int(match.group(1))
-        vllm_queued_requests = last_queue_req
-        logger.info(f"vllm running req: {last_running_req} queue req: {last_queue_req}")
-```
-
-逐条拆解：
-
-1. **日志转发**：`server_logger` 是名为 `"vllm"` 的独立 logger（[olmocr/pipeline.py:59-68](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L59-L68)），`propagate = False` 使它不冒泡到根 logger，从而与 olmOCR 自身日志分开；开启 `--disk_logging` 时它也会写文件（[L1280](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1280)）。
-2. **致命错误熔断**：日志出现 `Detected errors during sampling`（vLLM 检测到采样出错，通常意味着模型文件损坏）时直接 `sys.exit(1)` 终止整个进程。宁可整批停也不产出垃圾结果。
-3. **就绪消息标记**：见到 `"The server is fired up and ready to roll!"` 或 `"Starting vLLM API server"` 就把 `server_printed_ready_message` 置 True。**值得注意**：在当前 HEAD 这个标志只写不读（全仓库仅 [L855/L865-866](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L865-L866) 三处出现），真正决定「可以发请求了」的是 4.3 节的 HTTP 探测——它是从「日志判就绪」演化为「探活判就绪」后留下的历史形态，也是阅读源码时常见的「化石代码」样本。
-4. **两个正则提取指标**（本讲实践重点）：
-   - `r"Running: (\d+)"`：捕获**正在被引擎处理**的请求数。副作用是维护历史峰值 `peak_running_req`，破纪录时打一条日志——一个零成本的容量观测。
-   - `r"(?:Waiting|Pending):\s*(\d+)"`：捕获**排队等待**的请求数，兼容 `Waiting:` 与 `Pending:` 两种写法（不同 vLLM 版本的引擎状态行措辞不同），并写入全局变量 `vllm_queued_requests`——它的消费端在 4.4 节。
-
-vLLM 引擎会周期性打印一行「引擎状态」（含吞吐、Running/Waiting 请求数等），olmOCR 不调任何监控 API，就从这行日志里持续抠出队列深度。前提正是前面 `--disable-log-requests` + `--uvicorn-log-level warning` 做的降噪。
-
-`read_stream`（[olmocr/pipeline.py:882-891](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L882-L891)）是个循环：读一行、`decode("utf-8").rstrip()`、喂给 `process_line`；单行解析抛异常只警告不中断——**日志解析必须是 best-effort 的**，坏一行不能杀死看护循环。随后 stdout/stderr 各起一个协程（[L893-895](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L893-L895)）。
-
-**（5）等待与取消**。[olmocr/pipeline.py:897-908](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L897-L908)：`await proc.wait()` 正常情况下**永不返回**（服务器一直活着）。唯一常态出口是被 cancel：先 `proc.terminate()`，再限时 10 秒等它退干净，超时只警告，最后**重新抛出 CancelledError**（这是 asyncio 取消协议的正确姿势，保证外层 `gather` 能感知）。结尾 `gather(stdout_task, stderr_task, return_exceptions=True)` 把两个日志协程收尾。
+**（f）指标如何被消费**——[olmocr/pipeline.py:343-363](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L343-L363)：在 `process_page` 的非旋转错误重试路径里，每失败一次后都会检查 `remaining_attempts = retry_attempts[i+1:]`；若还有剩余尝试**且** `vllm_queued_requests == 0`，就把剩余尝试一次性全部并行发射（`asyncio.as_completed` 谁先成功谁赢，其余取消）。
 
 #### 4.1.4 代码实践
 
-**实践目标**：不改任何源码，把「命令拼装 + 正则解析」两件事在无 GPU 的轻量环境里亲手复现一遍。
+**实践目标**：把 `vllm_server_task` 拼出的完整命令整理成参数注释表；用可本地运行的正则实验验证两个指标提取正则；解释 `vllm_queued_requests` 对重试决策的影响。
 
 **操作步骤**：
 
-1. 打开 [olmocr/pipeline.py:807-834](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L834)，对照上面 4.1.3 的参数表，**亲手**画一张自己的参数注释表（以自己 repos 的默认参数为准算出完整命令）。
-2. 写一个脚本，把 `process_line` 里的两个正则原样抄下来，喂给它几行模拟的 vLLM 引擎状态日志。以下为**示例代码**（非项目源码）：
+1. **参数表（源码阅读）**：对照 [olmocr/pipeline.py:807-834](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L834) 与 argparse 定义 [olmocr/pipeline.py:1249-1258](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1249-L1258)，自己先写出完整命令与每个参数的注释，再对照下面的参考表（默认值情形）：
 
-```python
-# regex_lab.py —— 复现 process_line 的两个正则（示例代码）
-import re
+   ```text
+   vllm serve <model_name_or_path> \
+     --port 30024 \
+     --disable-log-requests \
+     --uvicorn-log-level warning \
+     --served-model-name olmocr \
+     --tensor-parallel-size 1 \
+     --data-parallel-size 1 \
+     --limit-mm-per-prompt {"video": 0} \
+     --max-model-len 16384
+   ```
 
-lines = [
-    'INFO 02-14 12:00:00 [EngineCore]: Avg prompt throughput: 123.4 tokens/s. Running: 12 reqs, Waiting: 34 reqs',
-    'INFO 02-14 12:00:05 [EngineCore]: Avg prompt throughput: 120.0 tokens/s. Running: 15 reqs, Pending: 0 reqs',
-    'INFO 02-14 12:00:10 [EngineCore]: Engine hit KV cache limit, will recompute prefix. Running: 8 reqs, Waiting: 2 reqs',
-    'INFO 02-14 12:00:12 [Launcher] The server is fired up and ready to roll!',
-]
+   | 参数 | 默认 | 注释（资源影响） |
+   |---|---|---|
+   | `serve <模型路径>` | 位置参数 | 启动 OpenAI 兼容推理服务，加载 download_model 下载好的本地权重 |
+   | `--port` | 30024 | HTTP 监听端口；main() 随后把 `args.server` 设为 `http://localhost:30024/v1` |
+   | `--disable-log-requests` | 固定开 | 不逐请求打日志：百万页场景下日志量可控，指标行不被淹没 |
+   | `--uvicorn-log-level warning` | 固定 warning | 压低 Web 层日志级别，进一步降噪 |
+   | `--served-model-name olmocr` | 固定 olmocr | 对外把模型注册为 `olmocr`，配合 main() 中 `args.model = "olmocr"`（[olmocr/pipeline.py:1430-1434](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1430-L1434)），屏蔽奇怪的本地模型路径 |
+   | `--tensor-parallel-size` | 1 | 单个引擎切分到几张 GPU（TP），决定一个副本占几张卡 |
+   | `--data-parallel-size` | 1 | 跑几个引擎副本（DP），显存与算力随其线性翻倍 |
+   | `--limit-mm-per-prompt {"video": 0}` | 固定 | 每条 prompt 的多模态输入上限：video 置 0 = 关闭视频编码器，省下的内存划给 KV cache，能同时服务更多请求 |
+   | `--gpu-memory-utilization` | 未给则不传 | vLLM 可预占的显存比例；显式传了才追加（配合 [olmocr/pipeline.py:1282-1284](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1282-L1284) 启动时的调参提示） |
+   | `--max-model-len` | 16384 | KV cache 按多大 token 上限分配；显存不够时调小它是最常见救急手段 |
+   | `unknown_args` 逐个追加 | — | olmocr 不认识的 CLI 参数原样透传给 vllm serve |
 
-vllm_queued_requests = None  # 模拟全局变量初值（pipeline.py:82）
+2. **正则实验室（可本地运行，示例代码）**：新建 `regex_lab.py`，用几条模拟的 vLLM 指标日志行验证两个正则的捕获行为：
 
-for line in lines:
-    if match := re.search(r"Running: (\d+)", line):
-        print(f"running  = {match.group(1)}")
-    if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
-        vllm_queued_requests = int(match.group(1))
-        print(f"queued   = {match.group(1)}  -> vllm_queued_requests = {vllm_queued_requests}")
-    if "The server is fired up and ready to roll!" in line:
-        print("ready message spotted")
-```
+   ```python
+   # 示例代码：非项目代码，仅用于验证 pipeline.py 中的两个正则
+   import re
 
-3. 运行：`python regex_lab.py`。
-4. 加一行 `'INFO ... Running: 99 reqs, Waiting: 1 reqs'` 再跑，观察第 3 行模拟日志里 `KV cache` 字样会不会干扰两个正则（答案：不会，正则只锚定 `Running:`/`Waiting|Pending:` 后面的数字）。
+   lines = [
+       "INFO ... Avg generation throughput: ... Running: 4 reqs, Waiting: 12 reqs",
+       "INFO ... Running: 2 reqs, Pending: 7 reqs",   # 新版 vLLM 用 Pending
+       "INFO ... Running: 0 reqs, Waiting: 0 reqs",
+       "The server is fired up and ready to roll!",
+   ]
 
-**需要观察的现象**：第 1 行同时命中两个正则；第 2 行用 `Pending:` 也能命中第二个正则（这正是 `(?:Waiting|Pending)` 兼容写法的意义）；第 4 行只触发 ready 消息分支。
+   for line in lines:
+       if m := re.search(r"Running: (\d+)", line):
+           print("running =", m.group(1))
+       if m := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
+           print("queue   =", m.group(1))
+   ```
 
-**预期结果**：`vllm_queued_requests` 从 `None` 变为 34，再变为 0——注意它**最后一次被赋的值**会一直留存，这正是全局变量传递「最新观测」的语义。
+3. **指标通道梳理（源码阅读）**：对照 [olmocr/pipeline.py:81-82](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L81-L82)、[olmocr/pipeline.py:876-880](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L876-L880)（生产端）与 [olmocr/pipeline.py:343-351](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L343-L351)（消费端），用自己的话写 3-5 句：`vllm_queued_requests` 从哪来、到哪去、什么时候是 `None`。
 
-（若想在真实服务器上验证，需要 `olmocr[gpu]` 环境与 GPU：直接跑 `olmocr ./localworkspace --pdfs tests/gnarly_pdfs/*.pdf` 并观察日志中的 `vllm running req: X queue req: Y` 行。**待本地验证**。）
+**需要观察的现象**：步骤 2 的脚本对前 3 行应各打出一对 `running`/`queue`，其中第 2 行走的是 `Pending` 分支；最后一行（就绪标语）两个正则都不匹配、什么都不打印。
+
+**预期结果**：`running = 4 / queue = 12`、`running = 2 / queue = 7`、`running = 0 / queue = 0`。若把 `Running:` 改成 `Running :`（冒号前加空格），正则一不再匹配——它要求冒号后恰好一个空格；正则二因为用了 `\s*` 对空白更宽容。
+
+**待本地验证**：真实 `vllm serve` 的指标日志格式（需要 `olmocr[gpu]` 环境与 GPU）请在本机跑一次流水线后，在 olmOCR 控制台中搜 `vllm running req` 观察；本讲不假装已运行过。
+
+**`vllm_queued_requests` 如何影响 process_page（步骤 3 的参考结论）**：
+
+- 它**只在内部服务器路径**被更新（`process_line` 只在 `vllm_server_task` 里运行），外部 `--server` 模式下永远是初始值 `None`。
+- 在非旋转错误的重试循环里（u2-l6 讲过：默认串行、逐档升温），每次失败后多问一句「队列空了吗」：`vllm_queued_requests == 0` 意味着服务器马上要闲下来了，此时把剩余重试**并行**打出去几乎没有边际成本，还能让这一页尽快结束；反过来，队列还压着请求时并行重试会跟其他页面的首次尝试抢算力，得不偿失，于是维持串行。
+- 初始值 `None` 时 `None == 0` 为 `False`，并行分支永不触发——这是一个**保守的安全默认**：信息不足时不激进。
 
 #### 4.1.5 小练习与答案
 
-**练习 1**：为什么 `--gpu-memory-utilization` 默认不传，而 `--max-model-len` 默认总是传？
+1. **为什么 `--limit-mm-per-prompt` 要把 video 设为 0？**
+   答：Qwen2.5-VL 的多模态处理器会为视频输入预留编码器与内存；OCR 每条请求只有一张图片，禁用视频编码器（`{"video": 0}`）让 vLLM 跳过这部分预留，省下的内存可划给 KV cache，提高并发容量。源码注释原话是 "Disabling video encoder saves RAM that you can put towards the KV cache"。
+2. **使用外部服务器（`--server http://...`）时，`vllm_queued_requests` 会是什么值？后果是什么？**
+   答：保持 `None`。因为只有内部服务器路径才会运行 `vllm_server_task`/`process_line`。后果是 `process_page` 的 `None == 0` 判定恒为 `False`，非旋转错误重试**全程串行**，不会触发「队列空时并行」的加速分支。
+3. **`peak_running_req` 被用在哪里？**
+   答：只在刷新纪录时打一条 `New peak running requests` 日志（[olmocr/pipeline.py:870-873](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L870-L873)），供运维观察这台服务器的历史吞吐上限，不参与任何控制流。
+4. **`OMP_NUM_THREADS=1` 是为了什么？**
+   答：源码注释说明：同一台多 GPU 机器上跑多份 olmOCR 时，如果每份的底层库都默认开满 CPU 线程，会发生线程争抢；钉死为 1 可避免这种 contention。
 
-答案：`--gpu-memory-utilization` 的 argparse 没有 default（[L1252-1254](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1252-L1254)），值为 None 时跳过追加，把显存预算的决定权留给 vLLM 默认值或用户；而 `--max-model-len` 默认 16384 非 None，永远追加——它是 olmOCR 想主动钉死的上下文上限（OCR 页面远用不到 16k+），也直接控制 KV cache 的分配规模。
-
-**练习 2**：如果不小心删掉了 `--disable-log-requests`，对本讲的日志解析会造成什么影响？
-
-答案：vLLM 会为每个请求打一条日志。百万级请求意味着 stdout 洪水：日志协程 CPU 与 I/O 压力剧增，引擎状态行被请求日志稀释（正则仍能匹配到，只是噪音变大），`--disk_logging` 时文件体积失控。所以它不只是「日志好看」，而是日志解析链路的性能前提。
-
-**练习 3**：`_kill_proc` 里的裸 `except` 为什么是合理（或至少可接受）的？
-
-答案：这个钩子只在「进程已经在退出」时运行，唯一职责是尽力带走子进程。`proc.terminate()` 对已退出的进程可能抛 `ProcessLookupError`，此时唯一合理动作就是什么都不做——`except` 吞掉并记一条日志。在 atexit 语境里再抛异常没有接收方，反而可能掩盖真正的退出原因。
-
-### 4.2 vllm_server_host：崩溃自动重启与 5 次上限
+### 4.2 vllm_server_host：崩溃自动重启与最多 5 次
 
 #### 4.2.1 概念说明
 
-`vllm_server_task` 只描述「一个服务器实例的一生」。它正常情况下**永不返回**——所以一个朴素的推论成立：**它一旦返回，就说明服务器死了**。
+`vllm_server_host` 把「单次看护」升级为「自愈循环」。关键洞察是：`vllm_server_task` 只有在**子进程退出**时才会返回（见 4.1.3 (e)）——所以「函数返回了」就等价于「服务器死了」。host 的重启策略因此可以写得极简：返回一次就算一次失败，重启一次；连续失败满 5 次就放弃，终止整个流水线。
 
-`vllm_server_host` 就是利用这个推论的看护者：一个 `while` 循环不断重新拉起 `vllm_server_task`，直到重启次数达到上限 `MAX_RETRIES = 5`，然后放弃整个作业（`sys.exit(1)`）。
+值得注意的设计取向：单页失败有 pdftotext 兜底、永不阻塞流水线（u2-l6），但**推理服务器死亡是全局致命事件**——没有它所有 worker 都干不了活，所以这里不做局部降级，而是快速失败（fail fast）。
 
-为什么敢重启、重启为什么便宜？承接 [u3-l1](u3-l1-workqueue-abstraction.md)/[u3-l2](u3-l2-local-and-s3-backends.md) 的结论：
-
-- 待办活在 WorkQueue（内存 `asyncio.Queue` + 持久化索引），已完成组有 done flag，正在处理的组有 worker 锁（锁会超时过期、可被抢）；
-- 服务器本身无状态——它死了，worker 的请求会失败，但 [u2-l7](u2-l7-async-http-client.md) 讲过的连接错误退避路径会扛住网络层抖动，等服务器回来后温度阶梯重试继续。
-
-于是「服务器挂了」从致命故障降级为**一次可自动恢复的抖动**。5 次上限是保险丝：短时间连挂 5 次说明是环境问题（显存不够、vLLM 版本不对），继续重试只是烧钱。
+还有一个跨模块的配合：服务器重启的几十秒窗口内，worker 的请求会连接失败，这由 u2-l7 的 `try_single_page_with_backoff` 指数退避（10·2ⁿ 秒）兜住——退避给了服务器重新起来的时间，两者合起来才构成完整的自愈故事。
 
 #### 4.2.2 核心流程
 
-```text
-vllm_server_host(model, args, unknown_args)
-  retry = 0
-  循环（最多执行 5 次循环体）:
-    vllm_server_task(...)        # 服务器活着时永远阻塞在这里
-    ↓ 到这里 = 服务器退出了
-    打 warning "VLLM server task ended"
-    retry += 1
-  循环耗尽:
-    打 error（含 vLLM 安装文档链接）
-    sys.exit(1)                  # 整个进程非零退出
+```
+vllm_server_host(model, args, unknown_args):
+    MAX_RETRIES = 5, retry = 0
+    while retry < MAX_RETRIES:
+        await vllm_server_task(...)      # 返回 = 服务器进程退出（崩溃/被杀）
+        logger.warning("VLLM server task ended")
+        retry += 1                        # 注意：没有 sleep，立即重启
+    # 循环耗尽：第 5 次启动的服务器也崩了
+    logger.error("Ended up starting the vllm server more than {retry} times, cancelling pipeline")
+    提示用户检查 vLLM 安装（给出官方文档链接）
+    sys.exit(1)                           # 终止整个流水线进程
 ```
 
-用公式表达重启预算：设首次启动为第 1 次实例，则最多启动的实例数 \( N_{\max} = \text{MAX\_RETRIES} = 5 \)，即**首次启动 + 最多 4 次自动重启**。
+**数量核对**：`retry` 从 0 起，循环条件 `retry < 5`，因此服务器最多被启动 **5 次**（第 1 次启动后崩→retry=1；……第 5 次启动后崩→retry=5，循环条件不再满足）。错误消息里的 `{retry}` 此时的值恰好是 5。
 
 #### 4.2.3 源码精读
 
-完整源码很短（[olmocr/pipeline.py:911-926](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L911-L926)）：
+[olmocr/pipeline.py:911-926](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L911-L926)：整个函数就是一个 while 循环加终止出口。逐行看：
 
-```python
-async def vllm_server_host(model_name_or_path, args, unknown_args=None):
-    MAX_RETRIES = 5
-    retry = 0
-
-    while retry < MAX_RETRIES:
-        await vllm_server_task(model_name_or_path, args, unknown_args)
-        logger.warning("VLLM server task ended")
-        retry += 1
-
-    if retry >= MAX_RETRIES:
-        logger.error(f"Ended up starting the vllm server more than {retry} times, cancelling pipeline")
-        logger.error("")
-        logger.error(
-            "Please make sure vllm is installed according to the latest instructions here: https://docs.vllm.ai/en/stable/getting_started/installation/gpu.html"
-        )
-        sys.exit(1)
-```
-
-三个值得咀嚼的细节：
-
-1. **`retry` 从 0 开始**，循环体最多执行 5 次（retry=0..4），每次执行一个完整的「服务器实例生命周期」。所以准确语义是「最多启动 5 个服务器实例」，报错日志里的 `more than {retry} times` 打出来是 5。
-2. **`if retry >= MAX_RETRIES` 是防御式写法**：`while` 正常退出的唯一方式就是耗尽重试，此时该条件必然为真。它存在的意义是让「退出即失败」的语义显式化，防止未来有人在循环里加 `break`（比如「正常关停」路径）时误入报错分支。
-3. **用 `sys.exit(1)` 而非抛异常**：SystemExit 会沿 asyncio 主循环传播并结束整个进程，让 worker、metrics 等所有协程一起终止，且 shell/Beaker/CI 能看到非零退出码。对比 [u2-l7](u2-l7-async-http-client.md) 的连接退避耗尽同样 `sys.exit(1)`——olmOCR 对「环境级不可恢复错误」统一选择硬退出。
-
-还有一层关系值得注意：`main()` 里 `vllm_server_host` 被包成 task（[olmocr/pipeline.py:1447-1449](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1447-L1449)），与 worker 协程**并行**运行。服务器死亡重启期间，worker 不会停——它们发出的请求失败后进入 u2-l7 的指数退避，最长可累计约 2.84 小时，这给了看护者充裕的恢复窗口（前提是重启成功）。
+- `await vllm_server_task(...)` 正常情况下**永不返回**（服务器一直活着就阻塞在 `proc.wait()`），所以这行的语义就是「看护一次，直到服务器退出」。
+- 服务器退出后**立即**重启，没有任何退避间隔——vLLM 崩溃的常见原因是启动配置/显存问题，重试价值有限，所以设计上选择了「快速连试 5 次、不行就撤」。
+- 5 次耗尽后先打两条 error（第二条给出 vLLM 官方安装文档链接，因为「反复起不来」大概率是 vLLM 版本/安装问题），然后 `sys.exit(1)`。
+- 正常收尾路径：main() 在所有 worker 结束后 `vllm_server.cancel()`（[olmocr/pipeline.py:1464-1466](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1464-L1466)），`CancelledError` 传入 `vllm_server_task` 的 `await proc.wait()` 处，走 4.1.3 (e) 的 terminate 分支后重新抛出，host 任务随之安静结束——**不会**把这当成一次「崩溃重启」。这里印证一个 asyncio 细节：取消信号会穿透 `await` 链逐层传播。
 
 #### 4.2.4 代码实践
 
-**实践目标**：用一个无 GPU 的迷你 asyncio 程序复刻「看护者 + 随机死亡的工人」，验证重启计数与放弃逻辑。
+**实践目标**：用一个不依赖 GPU 的模拟脚本，验证 host 循环的「最多启动 5 次」计数与退出行为。
 
-**操作步骤**：以下为**示例代码**（非项目源码）：
+**操作步骤**：新建 `host_sim.py`（示例代码，非项目代码）：
 
 ```python
-# supervisor_lab.py —— 复刻 vllm_server_host 的看护循环（示例代码）
-import asyncio, random
+# 示例代码：模拟 vllm_server_host 的重启循环（结构同 pipeline.py:911-926）
+import asyncio
 
-async def worker_instance(n):
-    # 模拟一个会随机死掉的服务器实例
-    life = random.uniform(0.2, 0.8)
-    await asyncio.sleep(life)
-    print(f"  instance #{n} died after {life:.2f}s")
-    return  # 返回 = 死亡，对应 vllm_server_task 返回
+MAX_RETRIES = 5
+
+async def fake_server_task(start_count):
+    print(f"第 {start_count} 次启动服务器")
+    await asyncio.sleep(0.05)   # 假装运行了一小会儿
+    print("服务器崩溃退出")      # 子进程退出 → vllm_server_task 返回
 
 async def host():
-    MAX_RETRIES = 5
     retry = 0
     while retry < MAX_RETRIES:
-        await worker_instance(retry + 1)
-        print(f"  host: warning, instance ended (retry={retry + 1})")
+        await fake_server_task(retry + 1)
+        print("VLLM server task ended")
         retry += 1
-    print(f"  host: giving up after {retry} instances, sys.exit(1) would fire here")
+    print(f"Ended up starting the vllm server more than {retry} times, cancelling pipeline")
+    # 真实代码此处是 sys.exit(1)，脚本里用 print 代替
 
 asyncio.run(host())
 ```
 
-**需要观察的现象**：实例一个接一个地「死」，host 每次都打 warning 并计数；总共恰好 5 个实例后放弃。
+**需要观察的现象**：`第 N 次启动服务器` 与 `服务器崩溃退出`、`VLLM server task ended` 交替出现，统计「启动」出现的次数；最后一条是放弃消息。
 
-**预期结果**：输出 5 次 `instance #N died`、5 次 warning、最后 1 次 giving up。再对照源码数一遍：`retry` 0→5，循环体恰好执行 5 次。
+**预期结果**：`第 1 次`…`第 5 次` 共 5 次启动，随后打印 `...more than 5 times...`。把 `fake_server_task` 改成「第 3 次起不再崩溃（改为 `await asyncio.sleep(3600)` 模拟健康运行）」，则只会看到 3 次启动（真实场景对应：流水线会一直陪着健康的服务器运行，直到 main() 收尾时 cancel 它）。
 
-**进阶（可选）**：把 `MAX_RETRIES` 改成 3、把 `worker_instance` 改成永不返回（`await asyncio.sleep(100)`），观察 host 永远阻塞在第一个实例上——对应「服务器一直活着」的正常情形。
+**待本地验证**：真实 vLLM 崩溃重启行为（例如故意把 `--max-model-len` 设到超出显存）请在有 GPU 的环境观察，本讲不假装已运行。
 
 #### 4.2.5 小练习与答案
 
-**练习 1**：服务器重启的瞬间，正在飞行中的请求会发生什么？谁负责兜住？
+1. **host 判断「服务器崩溃」的依据是什么？**
+   答：没有任何错误码或错误类型解析——`vllm_server_task` 返回即视为一次失败（其内部 `proc.wait()` 只在子进程退出时返回）。这是一种非常朴素的「进程活着=成功」心跳观。
+2. **重启之间有退避吗？为什么这样设计？**
+   答：没有，立即重启。崩溃通常是配置/显存/安装这类确定性原因，指数退避意义不大；设计取舍是「快速连试 5 次 + 硬上限」，上限防止无限重启掩盖环境问题，耗尽后快速失败并给出排查指引。
+3. **流水线正常跑完时，服务器是怎么被关掉的？走 host 的重启分支吗？**
+   答：不走。main() 末尾 `vllm_server.cancel()` 取消 host 任务，`CancelledError` 在 `vllm_server_task` 的 `await proc.wait()` 处被捕获：先 `proc.terminate()`，再最多等 10 秒，然后 `raise` 重新抛出。host 的 while 循环根本没机会执行 `retry += 1`。
 
-答案：连接会断开或超时，`apost` 抛出连接类异常（ConnectionError/OSError/TimeoutError），被 `try_single_page_with_backoff` 的指数退避接住（[u2-l7](u2-l7-async-http-client.md)），退避后重发；attempt 与温度不因退避递增，所以页面级进度不丢失。若退避 10 次都失败（约 2.84 小时）才会 `sys.exit(1)`。
-
-**练习 2**：为什么重启上限是 5 而不是 50？
-
-答案：上限的意义是区分「偶发崩溃」与「环境性故障」。偶发崩溃一两次就该恢复；连挂 5 次几乎必然是显存不足、版本不兼容等持续性问题，继续重试只会空烧机器时间。把上限设得过大，等于把确定性的失败拖成马拉松。（当然 5 本身是经验值，源码没有推导。）
-
-**练习 3**：`vllm_server_host` 内部 `await vllm_server_task(...)` 没有 try/except。如果 `vllm_server_task` 抛出普通异常（而非正常返回），会发生什么？
-
-答案：异常会沿 `await` 向上传播，跳出 while 循环、终结 `vllm_server_host` 这个 task，重启逻辑失效（但 `sys.exit(1)` 也不会执行，进程可能挂着其他协程继续跑）。看当前 `vllm_server_task` 实现：`proc.wait()` 与日志读取路径基本不抛普通异常，`read_stream` 又把单行异常吞成了 warning，所以「以返回代替死亡」的约定在实现上是成立的——这是隐式契约，值得在阅读时主动验证。
-
-### 4.3 vllm_server_ready：HTTP 就绪探测
+### 4.3 vllm_server_ready：HTTP 探活与超时
 
 #### 4.3.1 概念说明
 
-子进程起来了，只说明 Python 解释器加载了 vLLM；离「能处理请求」还差：加载 7B 模型权重、分配 KV cache、绑定端口。这一过程可能几分钟。
+「vLLM 子进程已经启动」不等于「推理 API 已经可用」——加载 7B 权重、初始化 KV cache、绑定端口需要几十秒甚至几分钟。`vllm_server_ready` 解决的问题是：**在服务器真正能服务之前，把流水线挡在起跑线上**。
 
-所以 `main()` 在拉起服务器 task 之后、启动 worker 之前，会**阻塞等待** `vllm_server_ready(args)`（[olmocr/pipeline.py:1446-1451](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1446-L1451)）：
+它的判定标准很务实：不解析日志、不猜状态，直接发 HTTP GET 请求到 OpenAI 兼容 API 的 `/models` 端点，拿到 200 就算就绪。轮询固定每 1 秒一次，最多 `--max_server_ready_timeout`（默认 600）次，超时则抛异常终止流水线。
 
-```python
-vllm_server = None
-if use_internal_server:
-    vllm_server = asyncio.create_task(vllm_server_host(model_name_or_path, args, unknown_args))
-
-await vllm_server_ready(args)
-```
-
-探测方式很简单：反复 `GET {server}/models`，拿到 200 就认为就绪。注意这里用的是 `httpx`——承接 [u2-l7](u2-l7-async-http-client.md) 的结论：**低频调用用 httpx，热路径才用 apost**，每 1 秒一次的探活完全没必要手写 socket。
-
-它对**外部服务器**同样适用：用户指定 `--server https://api.deepinfra.com/v1` 时（[README.md:320-324](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/README.md#L320-L324)），同一函数探测远端可用性，还能带 `Authorization: Bearer` 头。
+注意这个函数对**外部服务器模式同样生效**：main() 里 `await vllm_server_ready(args)` 是无条件调用的（[olmocr/pipeline.py:1451](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1451)），只是内部模式下探活对象是刚拉起的 localhost 服务器，外部模式下是你给的 `--server` 地址（还可带 `--api_key` Bearer 鉴权）。
 
 #### 4.3.2 核心流程
 
-```text
-url = args.server 去尾斜杠 + "/models"
-max_attempts = args.max_server_ready_timeout   # 默认 600
-for attempt in 1..max_attempts:
-    GET url（可选带 Bearer api_key）
-    ├─ 200  → log "vllm server is ready." → return
-    ├─ 非200 → log "Unexpected status code"
-    └─ 异常（连不上）→ warning "Please wait..."
-    sleep 1 秒
-全部失败 → raise Exception("vllm server did not become ready after waiting.")
 ```
-
-等待时间的上界近似为 \[ T_{\max} \approx N_{attempts} \times \Delta t = 600 \times 1\,\text{s} \]（忽略每次请求本身的耗时，实际略长）。
-
-**一个命名陷阱**：参数名叫 `max_server_ready_timeout`、help 写 "Number of seconds"（[olmocr/pipeline.py:1225](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1225)），但实现把它当**尝试次数**用，每次间隔固定 1 秒——两者数值上恰好近似等价（600 次 × 1 秒 ≈ 600 秒）。这是「名字说单位、实现数次数」的经典错位，读源码时要小心。
-
-#### 4.3.3 源码精读
-
-[olmocr/pipeline.py:929-953](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L929-L953)：
-
-```python
-async def vllm_server_ready(args):
-    max_attempts = args.max_server_ready_timeout
-    delay_sec = 1
-    url = f"{args.server.rstrip('/')}/models"
-
-    for attempt in range(1, max_attempts + 1):
+vllm_server_ready(args):
+    max_attempts = args.max_server_ready_timeout   # 默认 600
+    delay_sec = 1                                  # 固定 1 秒，不是指数退避
+    url = args.server.rstrip('/') + "/models"
+    for attempt in 1..max_attempts:
         try:
-            headers = {}
-            if args.server and hasattr(args, "api_key") and args.api_key:
-                headers["Authorization"] = f"Bearer {args.api_key}"
-
-            async with httpx.AsyncClient() as session:
-                response = await session.get(url, headers=headers)
-
-                if response.status_code == 200:
-                    logger.info("vllm server is ready.")
-                    return
-                else:
-                    logger.info(f"Attempt {attempt}: Unexpected status code {response.status_code}")
-        except Exception:
-            logger.warning(f"Attempt {attempt}: Please wait for vllm server to become ready...")
-
-        await asyncio.sleep(delay_sec)
-
+            GET url  （若设置了 api_key，带 Authorization: Bearer 头）
+            200  → "vllm server is ready." → return
+            非200 → 记录"Unexpected status code"
+        except → warning "Please wait for vllm server to become ready..."
+        await asyncio.sleep(1)
     raise Exception("vllm server did not become ready after waiting.")
 ```
 
-四个要点：
+一个值得玩味的单位耦合：参数名叫 `max_server_ready_timeout`（单位按 help 文本是「秒」），实现上是「最多 N 次尝试 × 每次间隔 1 秒」，所以等待时长约等于参数值——**次数被当秒数用**，改 delay 就会悄悄改变语义。
 
-1. **`rstrip('/')`**：`http://host:8000/v1/` 与 `http://host:8000/v1` 统一，防止拼出 `//models`。
-2. **`hasattr(args, "api_key")` 的防御**：如果 `args` 是外部构造的命名空间（比如测试里手工拼的对象），可能没有 `api_key` 属性——先 `hasattr` 再取值。
-3. **`except Exception` 一网打尽**：连接拒绝、DNS 失败、超时……启动期的一切网络异常都只是「还没好」，警告一句继续下一轮。对比热路径对异常的精细分流（[u2-l7](u2-l7-async-http-client.md)）：**启动期的失败没有分类价值，只有「好/没好」两个状态**。
-4. **耗尽后抛异常**（而不是 sys.exit）：这是「可预期的失败」，让 `main()` 的调用栈决定怎么处理；与 4.2 节「环境不可恢复才硬退」的分层一致。
+#### 4.3.3 源码精读
 
-**`/models` 为什么是好探针**：它是 OpenAI 兼容 API 的元数据端点，返回已加载模型列表。能返回 200 说明 HTTP 层、路由层、模型加载全部就位。
+**（a）探活循环**——[olmocr/pipeline.py:929-953](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L929-L953)：
 
-最后把 URL 链路接完整：内部服务器模式下，`main()` 在 [olmocr/pipeline.py:1430-1434](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1430-L1434) 把 `args.server` 改写为 `http://localhost:{args.port}/v1` 并把 `args.model` 固定为 `"olmocr"`（呼应 `--served-model-name olmocr`）；随后 `try_single_page` 在 [olmocr/pipeline.py:161-167](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L161-L167) 用 `{args.server}/chat/completions` 发推理请求。而这一步之前，`check_torch_gpu_available()`（[olmocr/pipeline.py:1424-1425](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1424-L1425)，实现在 [olmocr/check.py:30-42](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/check.py#L30-L42)，要求至少 15GB 显存）已经把「起服务器注定失败」的情形挡在前面。
+```python
+max_attempts = args.max_server_ready_timeout   # 默认 600（见 argparse）
+delay_sec = 1
+url = f"{args.server.rstrip('/')}/models"      # 如 http://localhost:30024/v1/models
 
-收尾对称：所有 worker 完成后，`main()` 在 [olmocr/pipeline.py:1464-1473](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1464-L1473) `cancel()` 掉 vllm_server task 与 metrics task，再 `gather(..., return_exceptions=True)` 等它们真正结束——cancel 信号传到 `vllm_server_task` 的 `CancelledError` 分支，优雅 terminate 子进程（4.1.3 第 5 点），加上 atexit 兜底，双保险不留孤儿进程。
+for attempt in range(1, max_attempts + 1):
+    try:
+        headers = {}
+        if args.server and hasattr(args, "api_key") and args.api_key:
+            headers["Authorization"] = f"Bearer {args.api_key}"   # 外部鉴权服务器
+        async with httpx.AsyncClient() as session:
+            response = await session.get(url, headers=headers)
+            if response.status_code == 200:
+                logger.info("vllm server is ready.")
+                return
+            ...
+    except Exception:
+        logger.warning(f"Attempt {attempt}: Please wait for vllm server to become ready...")
+    await asyncio.sleep(delay_sec)
+
+raise Exception("vllm server did not become ready after waiting.")
+```
+
+要点：
+
+- **`rstrip('/')`**：`http://host:30024/v1/` 和 `.../v1` 都能正确拼出 `/v1/models`，不产生 `//models`。
+- **`httpx` 而非手写 `apost`**：u2-l7 讲过热路径用约 95 行手写 HTTP 客户端规避连接池死锁，而这里是低频路径（每秒最多一次），稳定与便利优先，用 `httpx.AsyncClient` 完全合理——同文件里「高频手工、低频库调」的对照非常清晰。
+- **异常吞噬**：连接被拒（服务器还没绑上端口）会抛异常，这里只 warning 后继续下一轮——这本来就是「没就绪」的一种表现。
+- **超时即失败**：循环耗尽抛普通 `Exception`，沿 main() 向上冒泡终止流水线；vLLM 子进程由 u2-l1 讲过的收尾逻辑与 `atexit` 钩子（4.1.3 (c)）清理。
+
+**（b）相关默认值**——[olmocr/pipeline.py:1225](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1225)（`--max_server_ready_timeout` 默认 600，help 文本："Number of seconds to wait for vllm to become ready before exiting."）；[olmocr/pipeline.py:1241-1247](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1241-L1247)（`--server` 与 `--api_key` 的定义）。
+
+**（c）main() 中的接线**——[olmocr/pipeline.py:1286](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1286) 定下分叉 `use_internal_server = not args.server`；[olmocr/pipeline.py:1424-1434](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1424-L1434) 内部模式先 `check_torch_gpu_available()`、下载模型、把 `args.server` 改写为 localhost；[olmocr/pipeline.py:1446-1451](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L1446-L1451) 把 host 任务作为后台任务创建后**立刻探活**——探活通过之前，worker 一律不启动，避免对着没就绪的服务器白发请求。
 
 #### 4.3.4 代码实践
 
-**实践目标**：用系统自带的 `http.server` 亲眼看一次「探活从失败到成功」的轮询过程（无需 GPU，轻量安装即可，`httpx` 是核心依赖）。
+**实践目标**：在没有任何 GPU/真实 vLLM 的机器上，用 `python3 -m http.server` 伪装一个「就绪的推理服务器」，直接调用**项目真实的** `vllm_server_ready` 函数，验证其成功路径与超时失败路径。
 
 **操作步骤**：
 
-1. 以下为**示例代码**（非项目源码），保存为 `ready_lab.py`：
+1. 准备一个能对 `/v1/models` 返回 200 的假服务器（`http.server` 会把 URL 路径映射到本地文件）：
 
-```python
-# ready_lab.py —— 复刻 vllm_server_ready 的轮询逻辑（示例代码）
-import asyncio
-import sys
-import httpx
+   ```bash
+   mkdir -p /tmp/readylab/v1
+   touch /tmp/readylab/v1/models      # 使 GET /v1/models 命中文件 → 200
+   cd /tmp/readylab && python3 -m http.server 8000
+   ```
 
-async def probe(url: str, max_attempts: int, delay_sec: float = 1.0):
-    for attempt in range(1, max_attempts + 1):
-        try:
-            async with httpx.AsyncClient() as session:
-                response = await session.get(url)
-                if response.status_code == 200:
-                    print(f"attempt {attempt}: 200 -> ready!")
-                    return
-                print(f"attempt {attempt}: unexpected status {response.status_code}")
-        except Exception as e:
-            print(f"attempt {attempt}: waiting... ({type(e).__name__})")
-        await asyncio.sleep(delay_sec)
-    raise Exception("server did not become ready after waiting.")
+2. 新建 `ready_probe.py`（示例代码，但调用的是真实的 olmocr 函数）：
 
-url = sys.argv[1]           # 例: http://localhost:39999
-attempts = int(sys.argv[2]) # 例: 5
-asyncio.run(probe(url, attempts))
-```
+   ```python
+   # 示例代码：调用真实的 olmocr.pipeline.vllm_server_ready
+   import argparse, asyncio
+   from olmocr.pipeline import vllm_server_ready
 
-2. 先探测一个没人监听的端口：`python ready_lab.py http://localhost:39999 5`。
-3. 另开一个终端，启动一个静态服务器：`python -m http.server 39999`。
-4. 再跑一遍：`python ready_lab.py http://localhost:39999 5`。
+   ns = argparse.Namespace(server="http://localhost:8000/v1",
+                            api_key=None, max_server_ready_timeout=10)
+   asyncio.run(vllm_server_ready(ns))
+   print("=== 探活成功，流水线可以开工 ===")
+   ```
 
-**需要观察的现象**：第 2 步里每轮都打印 `waiting... (ConnectError)`（对应源码的 `except Exception` 分支）；第 4 步第一轮就打印 `200 -> ready!`。
+3. 运行 `python3 ready_probe.py`，观察日志。
+4. 做反例：把 `server` 改成一个没有服务的端口（如 `http://localhost:9999/v1`）、`max_server_ready_timeout=3`，再跑一次，数一数 warning 行数并用秒表感受节奏。
 
-**预期结果**：失败侧 5 次尝试后抛出 `Exception`（对应源码 [L953](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L953) 的行为）；成功侧立即返回。注意 `python -m http.server` 对 `/models` 子路径会返回 404——若把 url 换成 `http://localhost:39999/models`，你会看到「unexpected status 404」循环，恰好复现源码里 200 以外的分支。
+**需要观察的现象**：步骤 3 中应立刻（第 1 次尝试）出现 `vllm server is ready.`；步骤 4 中应出现 3 条 `Please wait for vllm server to become ready...`（每条约隔 1 秒），随后脚本报 `Exception: vllm server did not become ready after waiting.`。
+
+**预期结果**：成功路径秒过；失败路径严格等于「N 次 × 1 秒」后抛异常——印证 4.3.2 的单位耦合分析。
+
+**注意**：`import olmocr.pipeline` 需要轻量安装（u1-l2）加 httpx/boto3 等基础依赖；若提示缺 `tqdm`，执行 `pip install tqdm` 即可（该依赖在 `pyproject.toml` 中未显式声明，通常作为其他包的传递依赖出现）。
+
+**待本地验证**：真实 vLLM 从启动到 200 的等待时长因硬件而异，请在有 GPU 的环境观察日志中 `Attempt N` 出现到消失的实际次数。
 
 #### 4.3.5 小练习与答案
 
-**练习 1**：为什么就绪探测放在 `vllm_server_host` task **之外**（`main()` 直接 await），而不是放进 task 内部？
-
-答案：分离「启动服务器」与「确认就绪」两个关注点：`vllm_server_host` 是长驻看护协程，生命周期覆盖整个作业（包括后续重启）；就绪探测是一次性的启动期门槛。放外面还能让探测同时服务外部服务器场景——外部服务器没有 host task，但同样需要 `await vllm_server_ready`。
-
-**练习 2**：探测失败耗尽抛的是普通 `Exception`，而 4.2 节重启耗尽用的是 `sys.exit(1)`。这个不对称是随意的吗？
-
-答案：不是。就绪失败发生在作业「还没开始」时——`main()` 的调用栈（以及 Beaker/CI 的外层重试逻辑）可以捕获并决定处置；而重启耗尽发生在作业中途，其他协程还在飞行，唯有结束整个进程才能干净收场。失败时机不同、处置层级不同。
-
-**练习 3**：如果把 `delay_sec` 从 1 秒改成 0.01 秒，会有什么副作用？
-
-答案：等待上界从 ~600 秒缩到 ~6 秒（对大模型加载远远不够），更隐蔽的问题是「忙轮询」：数百次/秒的请求 + 每次新建 `AsyncClient`（含连接建立、TLS）对尚未就绪的服务器是雪上加霜。1 秒间隔是对「加载耗时分钟级」这个先验的合理折中。
-
-### 4.4 vllm_queued_requests：日志指标反向控制并行重试
-
-#### 4.4.1 概念说明
-
-前两讲（[u2-l6](u2-l6-page-retry-and-rotation.md)）建立了重试体系：非旋转错误默认**串行**重试，只有一种情况会切换成**并行发射**剩余重试——服务器队列空了。本讲补上「队列空了」这个信息**从哪来**：就是 4.1 节 `process_line` 的第二个正则。
-
-数据流是一条跨协程的单向链：
-
-```text
-vLLM 子进程 stdout
-  → read_stream 协程（每行）
-  → process_line 的 re.search(r"(?:Waiting|Pending):\s*(\d+)")
-  → 全局变量 vllm_queued_requests          [写入端，pipeline.py:877-879]
-  → process_page 的 if remaining_attempts and vllm_queued_requests == 0
-                                            [消费端，pipeline.py:345]
-  → asyncio.create_task 并行发射剩余重试    [pipeline.py:347-350]
-```
-
-为什么这个反馈值得做？重试的并行/串行选择本质是个调度决策：
-
-- **队列非空**：服务器还有积压，你为一个失败页并行发 4 个请求是在给队列火上浇油，加剧排队；
-- **队列为空**：服务器闲置，此时并行发射不再伤害任何人，而失败页能更快拿到多次采样，提高收敛速度。
-
-没有这个指标时只能盲选（一直串行或一直并行）；有了它，就变成「看服务器脸色」的自适应策略——而且获取成本几乎为零（解析本来就存在的日志行）。
-
-#### 4.4.2 核心流程
-
-关键代码在 `process_page` 的非旋转错误路径（[olmocr/pipeline.py:334-363](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L334-L363)，u2-l6 已精读过重试语义，这里只看联动点）：
-
-```python
-for i, attempt in enumerate(retry_attempts):
-    result = await try_single_page_with_backoff(...)
-    ...
-    # After each failed attempt, check if queue is empty - if so, fire remaining in parallel
-    remaining_attempts = retry_attempts[i + 1 :]
-    if remaining_attempts and vllm_queued_requests == 0:
-        logger.info(f"Queue empty, firing {len(remaining_attempts)} parallel retries for ...")
-        tasks = [asyncio.create_task(try_single_page_with_backoff(..., a, ...)) for a in remaining_attempts]
-        ...
-```
-
-判定条件是两个布尔量的与：
-
-1. `remaining_attempts` 非空——本轮之后还有重试额度；
-2. `vllm_queued_requests == 0`——日志观测到的**最新**队列深度为零。
-
-**一个微妙而重要的初值语义**：全局变量初值是 `None`（[olmocr/pipeline.py:81-82](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L81-L82)），而 `None == 0` 在 Python 里是 `False`。也就是说：**在日志还没打印过任何队列深度之前，并行重试永远不会触发**。这带来两个推论（属代码阅读结论，供你验证）：
-
-- 内部 vLLM 模式：服务器启动后要先打出至少一行引擎状态（含 Waiting/Pending），联动才生效——通常几秒内就会发生；
-- 外部 `--server` 模式：没有子进程、没有日志解析，`vllm_queued_requests` 恒为 `None`，并行重试**整场禁用**，非旋转错误一路串行。这是合理的保守策略：外部服务（DeepInfra 等）的内部队列本来就观测不到，而且按 token 计费，乱并行只烧钱。
-
-#### 4.4.3 源码精读
-
-**写入端**在 `process_line`（已在 4.1.3 引用过完整函数），核心两行见 [olmocr/pipeline.py:876-880](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L876-L880)：
-
-```python
-if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
-    global vllm_queued_requests
-    last_queue_req = int(match.group(1))
-    vllm_queued_requests = last_queue_req
-    logger.info(f"vllm running req: {last_running_req} queue req: {last_queue_req}")
-```
-
-注意 `global` 声明只在**这个分支**里出现——`process_line` 内的 `nonlocal` 管的是闭包变量，`global` 管的是模块级变量，两个关键字服务于两个作用域体系，混用会直接报语法/逻辑错。
-
-**消费端**见 [olmocr/pipeline.py:343-350](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L343-L350)（上面已引）。补充一个阅读技巧：模块级全局变量是最「松」的协程间通信方式——没有锁、没有类型约束、写入端与消费端可能相隔 1000 行。定位这类变量的完整读写面，用一次全文搜索 `vllm_queued_requests` 即可：定义（L82）、写入（L879）、读取（L345），三点一线，别多别少。这是审读全局状态时的标准动作。
-
-还有一点值得体会：这里**没有**用更「现代」的机制（如 `asyncio.Event` 或共享的指标对象）。原因很实际——`vllm_queued_requests` 的语义就是「最后一次观测值」，一个裸的 int 全局变量恰好是这个语义的最小实现；加 Event 反而要管理置位/清空的时序。
-
-#### 4.4.4 代码实践
-
-**实践目标**：完成一次「全局变量读写面」的源码追踪，并用一个无 GPU 的小实验验证 `None == 0` 初值语义对调度的影响。
-
-**操作步骤**：
-
-1. 在仓库根目录执行（只读操作）：
-
-```bash
-grep -n "vllm_queued_requests" olmocr/pipeline.py
-```
-
-2. 逐个打开命中的三处（预期：L82 定义、L879 写入、L345 读取），确认没有第四处。
-3. 以下为**示例代码**（非项目源码），验证初值语义：
-
-```python
-# none_semantics_lab.py —— 验证 None 初值如何屏蔽并行重试（示例代码）
-vllm_queued_requests = None   # 对应 pipeline.py:82 的初值
-
-def should_fire_parallel(remaining: bool) -> bool:
-    return remaining and vllm_queued_requests == 0  # 对应 pipeline.py:345 的判定
-
-print(should_fire_parallel(True))   # 场景1：还有重试额度，但从未观测过队列
-vllm_queued_requests = 5            # 模拟 process_line 抓到 Waiting: 5
-print(should_fire_parallel(True))   # 场景2：队列有积压
-vllm_queued_requests = 0            # 模拟 process_line 抓到 Waiting: 0
-print(should_fire_parallel(True))   # 场景3：队列空
-print(should_fire_parallel(False))  # 场景4：队列空但没有剩余额度
-```
-
-**需要观察的现象**：四个场景的输出分别是 `False / False / True / False`。
-
-**预期结果**：场景 1 与 2 都为 False——前者因为 `None == 0` 不成立（外部服务器模式永远如此），后者因为队列有积压；只有「队列空 且 还有剩余重试」才触发并行。
-
-4. （源码阅读型延伸）沿着 L345 往下读 15 行，确认并行发射用的是 `asyncio.as_completed`（[L352](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L352)）：谁先成功就先收谁，随后 cancel 掉其余 task——「并行赛跑，先到先得」。
-
-#### 4.4.5 小练习与答案
-
-**练习 1**：为什么写入端要同时维护 `last_queue_req`（nonlocal）和 `vllm_queued_requests`（global）两个变量？
-
-答案：`last_queue_req` 是**日志解析循环内部的**最新观测，与 `last_running_req`、`peak_running_req` 同属一族闭包状态，还用来拼每行的汇总日志；`vllm_queued_requests` 是**跨协程的**广播通道，给 `process_page` 消费。一个面向看护协程自己，一个面向整个进程——职责不同所以两个都留。
-
-**练习 2**：如果 vLLM 某个版本把日志改成 `Running: 12 reqs, Waiting: 34 reqs, GPU KV cache usage: 0.5`，本讲哪个环节会坏？
-
-答案：两个正则都不受影响（它们各自独立匹配，多余字段无害）。真正的脆弱点是措辞整体变更——比如把 `Waiting` 改名为 `Queued` 且不同时保留 `Pending` 写法，这时 `vllm_queued_requests` 停止更新、保持旧值或 None，并行重试静默失效（页面处理不报错，只是永远串行）。这正是日志解析式监控的固有风险：**契约是隐式的，坏掉时不出声**。
-
-**练习 3**：`vllm_queued_requests` 跨协程无锁读写，会有竞态问题吗？
-
-答案：不会有实质性竞态。这是单个 int 的「最后写入者胜」语义，且事件循环内所有读写点都是非抢占的（没有 await 夹在读与用之间——L345 的读取和紧随的决策在同一同步段内完成）。最坏情形是消费端读到「略旧」的观测值（例如刚变 0 还没被读到），这只影响一次重试策略选择，不破坏正确性。
+1. **把 `--max_server_ready_timeout` 从 600 改成 60，含义是什么？**
+   答：最多进行 60 次探活、每次间隔 1 秒，即约 60 秒内服务器还不就绪就抛异常退出流水线。适合启动很快的小模型；对 7B 模型+慢盘的环境 600 秒更稳妥。
+2. **为什么探 `/v1/models`，而不是只看「vLLM 进程是否存在」？**
+   答：进程存在不代表权重加载完、KV cache 分配好、HTTP 路由挂载好；`/models` 是 OpenAI 兼容 API 的标准端点，返回 200 说明推理 API 已真正可用。就绪的判定必须基于「业务能应答」，这是分布式系统里典型的 readiness 探针思想。
+3. **外部服务器模式（`--server` + `--api_key`）下，探活请求有什么不同？**
+   答：[olmocr/pipeline.py:937-938](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L937-L938) 会在设置了 `api_key` 时给请求加上 `Authorization: Bearer <key>` 头，适配 DeepInfra 这类带鉴权的远程推理服务。
 
 ## 5. 综合实践
 
-把三件套串成一个微缩「模拟器」，在**无 GPU 环境**里观察完整的生命周期协作。以下为**示例代码**（非项目源码），综合了 4.1 的日志解析、4.2 的看护循环、4.3 的探活轮询：
+**任务：给「服务器看护三件套」做一次全链路故障推演。** 不需要任何环境，只需对照源码填写下表的第三、四列（这是把 4.1-4.3 串起来的最好方式）：
 
-```python
-# vllm_life_lab.py —— 微缩版 vLLM 生命周期模拟器（示例代码）
-import asyncio, random, re
+| 故障场景 | 关键源码位置 | 系统行为（自己先填） | 最终结局（自己先填） |
+|---|---|---|---|
+| ① 服务器启动后 30 秒崩溃（第 1 次） | `proc.wait()` 返回 → host 循环 | | |
+| ② 服务器反复崩溃，连续 5 次 | host 循环耗尽 | | |
+| ③ 服务器进程活着，但 600 秒内 API 一直不就绪 | `vllm_server_ready` 循环耗尽 | | |
+| ④ 日志出现 `Detected errors during sampling` | `process_line` 分支 | | |
+| ⑤ 所有任务正常完成，main() 收尾 | `vllm_server.cancel()` | | |
 
-# ── 全局状态（对应 pipeline.py:81-82）────────────────────
-vllm_queued_requests = None
+**参考答案**（做完再对）：
 
-# ── 模拟的"vLLM 服务器"：一个会打日志、会死、会被探活的进程 ──
-async def fake_vllm_server(die_after: float):
-    await asyncio.sleep(0.2)                     # 模拟模型加载
-    print("[server] The server is fired up and ready to roll!")
-    life = random.uniform(die_after * 0.5, die_after)
-    start = asyncio.get_event_loop().time()
-    while asyncio.get_event_loop().time() - start < life:
-        await asyncio.sleep(0.3)
-        running, waiting = random.randint(0, 10), random.randint(0, 20)
-        # 这行日志的形状就是两个正则的解析对象
-        print(f"[server] INFO Engine: Running: {running} reqs, Waiting: {waiting} reqs")
-        await asyncio.sleep(0.2)
-    print("[server] (crashed)")
+- **①** `vllm_server_task` 从 `await proc.wait()` 处返回，host 打 `VLLM server task ended`、`retry=1` 并**立即重启**服务器；重启窗口内 worker 的在途请求连接失败，由 u2-l7 的 `try_single_page_with_backoff` 以 10·2ⁿ 秒指数退避重试，等服务器回来。流水线整体几乎无感。
+- **②** 第 5 次启动的实例也退出后 `retry=5`，循环条件失败：打印 `Ended up starting the vllm server more than 5 times, cancelling pipeline` 与 vLLM 官方安装文档链接，`sys.exit(1)` 终止整个流水线——服务器死亡被当作全局致命事件，不做局部降级。
+- **③** `vllm_server_ready` 在第 600 次探活后抛 `Exception("vllm server did not become ready after waiting.")`，异常沿 main() 上抛终止流水线；vLLM 子进程由 atexit 钩子 terminate，不留孤儿进程。
+- **④** `process_line` 检测到该字符串后打 error（"model is probably corrupt"）并 `sys.exit(1)`——权重损坏属于重试无意义的问题，直接快速失败；atexit 钩子同样负责清理子进程。
+- **⑤** main() 对 host 任务调用 `.cancel()`，`CancelledError` 在 `vllm_server_task` 的 `await proc.wait()` 处被捕获：`proc.terminate()` → 最多等 10 秒 → 重新抛出。host 的 while 循环没把这次当成崩溃，服务器被干净地关闭。
 
-# ── 对应 process_line 的解析（4.1）─────────────────────────
-def parse_line(line: str):
-    global vllm_queued_requests
-    if match := re.search(r"Running: (\d+)", line):
-        pass  # 本模拟器不追踪峰值
-    if match := re.search(r"(?:Waiting|Pending):\s*(\d+)", line):
-        vllm_queued_requests = int(match.group(1))
-        print(f"[parser] queue depth observed: {vllm_queued_requests}")
-
-# ── 对应 vllm_server_host 的看护（4.2）────────────────────
-async def host():
-    MAX_RETRIES, retry = 3, 0
-    while retry < MAX_RETRIES:
-        await fake_vllm_server(die_after=1.5)
-        print(f"[host] warning: server ended ({retry + 1}/{MAX_RETRIES})")
-        retry += 1
-    print("[host] exhausted retries, would sys.exit(1) here")
-
-async def main():
-    server_task = asyncio.create_task(host())
-
-    # 对应 vllm_server_ready 的探活（4.3）：等"ready"出现
-    for attempt in range(1, 11):
-        if any("fired up" in str(t) for t in [globals().get("_seen", "")]):
-            break
-        # 简化：直接轮询一个会被 server 打印的标志
-        await asyncio.sleep(0.1)
-        if "[server] The server" in (out := ""):
-            break
-    print("[main] server ready (simulated), workers would start now")
-
-    # 消费端演示（4.4）：模拟一次失败页的并行重试决策
-    await asyncio.sleep(1.0)
-    remaining = True
-    if remaining and vllm_queued_requests == 0:
-        print("[worker] queue empty -> fire parallel retries")
-    elif vllm_queued_requests is None:
-        print("[worker] never observed queue depth -> sequential (external-server behavior)")
-    else:
-        print(f"[worker] queue busy ({vllm_queued_requests}) -> sequential")
-
-    await server_task
-
-# 重定向 stdout 太繁琐，这里改为直接拦截 print 的简化版解析
-async def run():
-    real_print = print
-    def spy_print(*a, **k):
-        s = " ".join(str(x) for x in a)
-        parse_line(s) if "[server] INFO" in s else None
-        real_print(*a, **k)
-    builtins_print = __builtins__["print"] if isinstance(__builtins__, dict) else __builtins__.print
-    __builtins__["print"] if isinstance(__builtins__, dict) else None
-    globals()["__builtins__"].print = spy_print if not isinstance(globals()["__builtins__"], dict) else globals()["__builtins__"]
-    try:
-        await main()
-    finally:
-        if not isinstance(globals()["__builtins__"], dict):
-            globals()["__builtins__"].print = builtins_print
-
-asyncio.run(run())
-```
-
-> ⚠️ 上面脚本里对 `print` 的拦截写法在不同 Python 版本下并不稳健（`__builtins__` 的形态随模块而异），仅供演示思路。**推荐做法**：删掉 `run()` 与拦截逻辑，改为让 `fake_vllm_server` 在打印日志行的同时直接调用 `parse_line(line)`——一两行的改动，行为等价且无兼容性坑。
-
-**任务清单**：
-
-1. 按上面的推荐做法修正脚本，跑通一遍，观察 `[parser]`/`[host]`/`[worker]` 三类输出如何交错。
-2. 把 `die_after` 调大（比如 10 秒），验证看护循环会被 `main` 的 `await server_task` 一直阻塞——「服务器活着时 host 永不返回」。
-3. 回答：这个模拟器里，`[worker]` 的决策分支分别对应真实代码里 `vllm_queued_requests` 的哪三种取值（None / 正数 / 0）？
-4. **交付物**：把你修正后的脚本与 4.1.4 的参数注释表放在一起，就是本讲的完整学习档案。
-
-**预期结果**（第 3 问答案）：None → 从未观测（外部服务器或刚启动）；正数 → 队列有积压，串行；0 → 队列空，并行发射剩余重试。
+（选做）如果你想在无 GPU 的机器上更进一步：仿照 4.2.4 的思路，把「假服务器进程 + 日志指标行 + host 重启循环 + 就绪探活」写成一个 50 行左右的迷你看护器，人为让假服务器第 2 次启动才「就绪」、第 3 次彻底崩溃，观察三件套各自的行为是否与本表一致。
 
 ## 6. 本讲小结
 
-- **三件套分工**：`vllm_server_task` 管单个服务器实例的一生（拼命令、起子进程、逐行解析日志、优雅退出）；`vllm_server_host` 是外层看护循环，崩溃自动重启、5 次耗尽后 `sys.exit(1)`；`vllm_server_ready` 是启动期 HTTP 探活（`GET /models` 轮询到 200，默认上限 600 次 × 1 秒）。
-- **命令拼装**：固定参数 + 两个条件参数（`--gpu-memory-utilization` 默认不传、`--max-model-len` 默认恒传 16384）+ `parse_known_args` 剩余参数原样透传给 `vllm serve`；`--limit-mm-per-prompt '{"video": 0}'` 关闭用不上的 video 编码通路，把显存让给 KV cache。
-- **日志即指标**：`--disable-log-requests` 与 `--uvicorn-log-level warning` 降噪后，两个正则从引擎状态行抠出 Running（在途）与 Waiting/Pending（排队）两个深度；后者写入全局变量 `vllm_queued_requests`。
-- **指标反哺调度**：`process_page` 在非旋转错误重试时读取该全局变量——队列为 0 才并行发射剩余重试；初值 `None` 意味着外部服务器模式（无日志可解析）下并行重试整场禁用，保守且合理。
-- **可重启的底气来自无状态**：队列与进度全在 workspace（done flag + worker 锁），服务器崩了只是抖动，worker 靠连接退避扛过窗口期；重启便宜，所以上限只设 5。
-- **化石代码警训**：`server_printed_ready_message` 只写不读、`max_server_ready_timeout` 名为秒实为次数——读源码时要对「名字与行为错位」「残留状态位」保持警觉，用全文搜索验证读写面。
+- **`vllm_server_task`**（[pipeline.py:807-908](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L807-L908)）是单次看护单元：拼 `vllm serve` 命令（含透传 unknown_args、条件追加显存参数、`{"video": 0}` 关视频编码器省内存给 KV cache）、拉子进程（`OMP_NUM_THREADS=1`、atexit 兜底清理）、逐行解析日志。
+- **两个正则**是免费的负载遥测：`r"Running: (\d+)"` 抓在途请求数，`r"(?:Waiting|Pending):\s*(\d+)"` 抓排队请求数并写入全局 `vllm_queued_requests`，后者让 `process_page` 能在「队列空」时把剩余重试并行打出去。
+- **`vllm_server_host`**（[pipeline.py:911-926](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L911-L926)）= 极简自愈循环：「`vllm_server_task` 返回即崩溃」，立即重启，硬上限 5 次，耗尽 `sys.exit(1)`；正常收尾靠 cancel 信号走 terminate 分支，不算崩溃。
+- **`vllm_server_ready`**（[pipeline.py:929-953](https://github.com/allenai/olmocr/blob/f7cfe4c22098b154c76b6ec950d1c0a464eecf8d/olmocr/pipeline.py#L929-L953)）以 HTTP GET `/v1/models` 是否 200 判定就绪，固定 1 秒轮询、默认最多 600 次，超时抛异常；内部与外部服务器两种模式共用它。
+- 三件套与 u2-l7 的指数退避共同构成自愈体系：服务器重启窗口内 worker 靠连接退避活下来。
+- 设计哲学对照：单页失败 → 局部兜底（pdftotext fallback）；服务器失败 → 全局快速失败。错误的严重度决定兜底的层级。
 
 ## 7. 下一步学习建议
 
-- **下一讲 [u3-l4 Beaker 集群执行](u3-l4-beaker-cluster-execution.md)**：多个 GPU 副本各自管理自己的 vLLM 服务器时如何错峰下载模型、如何剥离参数——本讲的三件套会被多副本放大。
-- **回看 [u2-l6 单页重试](u2-l6-page-retry-and-rotation.md) 与 [u2-l7 异步 HTTP](u2-l7-async-http-client.md)**：把「服务器侧生命周期」与「客户端侧重试/退避」拼成完整闭环，试着不查资料画出从 `process_page` 发起请求到 `process_line` 更新指标的完整时序图。
-- **延伸阅读**：在装了 `olmocr[gpu]` 的机器上运行 `vllm serve --help`，对照 4.1.3 的参数表看 vLLM 还暴露了哪些与显存/并行相关的旋钮（如 `--swap-space`、`--enable-prefix-caching`），思考它们对 OCR 批处理各有什么利弊。
-- **动手验证（可选，需 GPU）**：跑一次真实 pipeline，用 `--disk_logging` 落盘，然后在日志里 grep `queue req:` 画一条队列深度曲线，观察它何时归零、归零时是否伴随 `firing N parallel retries` 日志。**待本地验证**。
+- 下一讲 **u3-l4（Beaker 集群执行）** 讲的仍然是 `pipeline.py`，但视角从「单机看护一个服务器」升级为「把整套流水线（含本讲的三件套）提交到 N 个 GPU 副本的集群」，与本讲首尾相接。
+- 回顾性建议：重读 u2-l6（`process_page` 的两条重试路径）中「队列空时并行」的那段，现在你应该能指出它的信息来源正是本讲的正则二。
+- 延伸阅读：vLLM 官方文档中 `vllm serve` 的参数页与 OpenAI 兼容 server 文档，可以逐个对照本讲参数表里「未由 olmOCR 包装、只能靠 unknown_args 透传」的参数（如 `--kv-cache-dtype`）。

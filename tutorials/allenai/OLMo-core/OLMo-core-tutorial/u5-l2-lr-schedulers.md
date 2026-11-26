@@ -26,13 +26,13 @@
 
 | 文件 | 作用 |
 | --- | --- |
-| [src/olmo_core/optim/scheduler.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py) | 全部调度器实现：`Scheduler` 基类 + 14 个具体调度器 + warmup/decay 辅助函数 |
-| [src/olmo_core/optim/\_\_init\_\_.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/__init__.py) | 门面：从 `scheduler` 子模块再导出全部调度器类与 `LR_FIELD`/`INITIAL_LR_FIELD` |
-| [src/olmo_core/optim/config.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/config.py) | 定义 `LR_FIELD = "lr"`、`INITIAL_LR_FIELD = "initial_lr"` 常量与 `fixed_fields` 默认值 |
-| [src/olmo_core/train/train_module/transformer/train_module.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py) | `optim_step()`：训练循环中调用 `scheduler.set_lr()` 的唯一位置 |
-| [src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py) | OLMo-2 32B 官方脚本：`CosWithWarmup(warmup_steps=2000)` |
-| [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py) / [-pretrain-2.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py) / [-midtrain.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py) | OLMo-3 7B 三个阶段的调度器选择：`CosWithWarmup` → `HalfCosWithWarmup` → `LinearWithWarmup` |
-| [src/test/optim/scheduler_test.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/scheduler_test.py) | 各调度器的单元测试，含用 Mock Trainer 驱动 `set_lr` 的集成测试 |
+| [src/olmo_core/optim/scheduler.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py) | 全部调度器实现：`Scheduler` 基类 + 14 个具体调度器 + warmup/decay 辅助函数 |
+| [src/olmo_core/optim/\_\_init\_\_.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/__init__.py) | 门面：从 `scheduler` 子模块再导出全部调度器类与 `LR_FIELD`/`INITIAL_LR_FIELD` |
+| [src/olmo_core/optim/config.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/config.py) | 定义 `LR_FIELD = "lr"`、`INITIAL_LR_FIELD = "initial_lr"` 常量与 `fixed_fields` 默认值 |
+| [src/olmo_core/train/train_module/transformer/train_module.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/train/train_module/transformer/train_module.py) | `optim_step()`：训练循环中调用 `scheduler.set_lr()` 的唯一位置 |
+| [src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py) | OLMo-2 32B 官方脚本：`CosWithWarmup(warmup_steps=2000)` |
+| [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py) / [-pretrain-2.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py) / [-midtrain.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py) | OLMo-3 7B 三个阶段的调度器选择：`CosWithWarmup` → `HalfCosWithWarmup` → `LinearWithWarmup` |
+| [src/test/optim/scheduler_test.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/test/optim/scheduler_test.py) | 各调度器的单元测试，含用 Mock Trainer 驱动 `set_lr` 的集成测试 |
 
 ## 4. 核心概念与源码讲解
 
@@ -78,28 +78,29 @@ Trainer 循环（每 step）
 
 基类定义与抽象方法（注意它同时继承 `Config` 与 `Registrable`，且有 `metaclass=ABCMeta`）：
 
-- [src/olmo_core/optim/scheduler.py:L32-L50](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L32-L50) — `Scheduler` 基类：`lr_field`/`initial_lr_field`/`units` 三个公共字段，以及必须由子类实现的抽象方法 `get_lr(initial_lr, current, t_max)`。
-- [src/olmo_core/optim/scheduler.py:L27-L29](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L27-L29) — `SchedulerUnits` 枚举，只有 `steps` 和 `tokens` 两个取值。
+- [src/olmo_core/optim/scheduler.py:L32-L50](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L32-L50) — `Scheduler` 基类：`lr_field`/`initial_lr_field`/`units` 三个公共字段，以及必须由子类实现的抽象方法 `get_lr(initial_lr, current, t_max)`。
+- [src/olmo_core/optim/scheduler.py:L27-L29](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L27-L29) — `SchedulerUnits` 枚举，只有 `steps` 和 `tokens` 两个取值。
 
 `set_lr` 的完整实现：
 
-- [src/olmo_core/optim/scheduler.py:L52-L102](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L52-L102) — 依次完成「字段检查 → 补 `initial_lr` → 按 units 读取 trainer 进度 → 调 `get_lr` → 写回（区分张量与浮点）」。L75-L78 和 L85-L88 是两条对 `max_steps`/`max_tokens` 的硬性校验：如果 Trainer 无法告知总进度，基于 step/token 的调度直接报配置错误。
+- [src/olmo_core/optim/scheduler.py:L52-L102](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L52-L102) — 依次完成「字段检查 → 补 `initial_lr` → 按 units 读取 trainer 进度 → 调 `get_lr` → 写回（区分张量与浮点）」。L75-L78 和 L85-L88 是两条对 `max_steps`/`max_tokens` 的硬性校验：如果 Trainer 无法告知总进度，基于 step/token 的调度直接报配置错误。
 
 字段名常量与 checkpoint 钉扎（承接 u5-l1）：
 
-- [src/olmo_core/optim/config.py:L43-L44](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/config.py#L43-L44) — `LR_FIELD = "lr"`、`INITIAL_LR_FIELD = "initial_lr"`：调度器与优化器配置共享这两个字符串常量，避免魔法字符串。
-- [src/olmo_core/optim/config.py:L82](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/config.py#L82) — `fixed_fields` 默认含 `initial_lr`：峰值学习率被钉进 checkpoint，续训换调度器时基准不丢。
+- [src/olmo_core/optim/config.py:L43-L44](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/config.py#L43-L44) — `LR_FIELD = "lr"`、`INITIAL_LR_FIELD = "initial_lr"`：调度器与优化器配置共享这两个字符串常量，避免魔法字符串。
+- [src/olmo_core/optim/config.py:L82](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/config.py#L82) — `fixed_fields` 默认含 `initial_lr`：峰值学习率被钉进 checkpoint，续训换调度器时基准不丢。
 
 训练循环中的调用点：
 
-- [src/olmo_core/train/train_module/transformer/train_module.py:L595-L602](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/train/train_module/transformer/train_module.py#L595-L602) — `optim_step()` 中「Maybe adjust learning rate」：遍历所有参数组调用 `set_lr`，把新 LR 记录为 `LR (group i)` 指标，然后才 `self.optim.step()`。这也解释了为什么 WandB/Comet 日志里每组参数都有一条 LR 曲线。
+- [src/olmo_core/train/train_module/transformer/train_module.py:L608-L615](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/train/train_module/transformer/train_module.py#L608-L615) — `optim_step()` 中「Maybe adjust learning rate」：遍历所有参数组调用 `set_lr`，把新 LR 记录为 `LR (group i)` 指标，然后才 `self.optim.step()`。这也解释了为什么 WandB/Comet 日志里每组参数都有一条 LR 曲线。
+- [src/olmo_core/train/train_module/transformer/train_module.py:L451-L463](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/train/train_module/transformer/train_module.py#L451-L463) — 行号对齐提示：`train_batch()` 中紧邻 `optim_step()` 之前新增了「按全局 loss token 数归一化损失」的逻辑（提交 #957：计数先在 DP 进程组内 all-reduce、再除以 DP world size），使本讲引用的 `optim_step` 锚点整体后移 13 行。该改动只影响损失目标、与调度器无交互，细节留到 u6-l2 展开。
 
 #### 4.1.4 代码实践：脱离训练循环手动驱动 `set_lr`
 
 测试文件里有一个非常好的范式：用 `Mock(spec=Trainer)` 伪造 trainer 状态，直接驱动 `set_lr`。我们照搬这个范式观察 `group` 字典的变化。
 
 1. **实践目标**：验证 `set_lr` 确实只依赖 `trainer.global_step` / `max_steps`，并亲眼看 `group["lr"]` 与 `group["initial_lr"]` 如何被写入。
-2. **操作步骤**（示例代码，参考 [src/test/optim/scheduler_test.py:L709-L763](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/scheduler_test.py#L709-L763) 的写法）：
+2. **操作步骤**（示例代码，参考 [src/test/optim/scheduler_test.py:L709-L763](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/test/optim/scheduler_test.py#L709-L763) 的写法）：
 
    ```python
    # 示例代码：set_lr_demo.py
@@ -130,9 +131,9 @@ Trainer 循环（每 step）
 #### 4.1.5 小练习与答案
 
 **练习 1**：如果把 `trainer.max_steps` 设为 `None` 会发生什么？
-**答案**：`set_lr` 在 [scheduler.py:L75-L78](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L75-L78) 抛出 `OLMoConfigurationError("'max_steps' must be known ...")`——基于 step 的调度必须知道总步数（horizon）才能确定曲线形状。
+**答案**：`set_lr` 在 [scheduler.py:L75-L78](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L75-L78) 抛出 `OLMoConfigurationError("'max_steps' must be known ...")`——基于 step 的调度必须知道总步数（horizon）才能确定曲线形状。
 
-**练习 2**：为什么 `set_lr` 写回时专门区分「`lr` 是张量」的情况（[scheduler.py:L97-L100](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L97-L100)）？
+**练习 2**：为什么 `set_lr` 写回时专门区分「`lr` 是张量」的情况（[scheduler.py:L97-L100](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L97-L100)）？
 **答案**：在 FSDP 等分布式包装下，参数组的 `lr` 可能被搬到了设备上成为 0 维张量；用 `fill_()` 原地更新可以避免每次 step 都新建张量、也避免 host↔device 同步开销。
 
 **练习 3**：调度器每个 step 都重算 `get_lr(initial_lr, ...)`，而不是在上一步的 lr 上做增量。这带来什么好处？
@@ -172,20 +173,20 @@ warmup 段（\(t < W\)，由共享辅助函数 `_linear_warmup` 计算）：
 
 #### 4.2.3 源码精读
 
-- [src/olmo_core/optim/scheduler.py:L455-L467](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L455-L467) — `CosWithWarmup` 的字段：`warmup`/`warmup_steps`（弃用别名）/`warmup_fraction`、`alpha_f=0.1`、`t_max=None`、`warmup_min_lr=0.0`。类上的注册装饰器 `@Scheduler.register("cos_with_warmup")` 让它能被 YAML 的 `type` 字段选中（承接 u2-l2）。
-- [src/olmo_core/optim/scheduler.py:L469-L485](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L469-L485) — `__post_init__` 校验：把弃用的 `warmup_steps` 迁移到 `warmup`（并发出 `DeprecationWarning`）；强制 `warmup` 与 `warmup_fraction` **恰好给一个**；`warmup_fraction` 必须在 [0, 1]。
-- [src/olmo_core/optim/scheduler.py:L487-L506](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L487-L506) — `get_lr` 主体。L490 用自己的 `t_max` 覆盖传入值；L491 算 \(\eta_{min}\)；L493-L497 解析热身长度（比例则 `round(t_max * warmup_fraction)`）；L499-L500 热身段；L501-L502 越过总步数后恒返回 \(\eta_{min}\)；L504-L506 做平移缩放后套余弦公式——与上面两段公式逐项对应。
-- [src/olmo_core/optim/scheduler.py:L836-L841](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L836-L841) — `_linear_warmup` 辅助函数，被 7 个调度器复用；`min(current, warmup)` 保证越界后钳制在峰值。
-- [src/test/optim/scheduler_test.py:L69-L83](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/scheduler_test.py#L69-L83) — `test_cos_with_warmup_scheduler`：用 `initial_lr=10, warmup=3000, alpha_f=0.2, T=10000` 断言了 4 个关键点：起点 4.0（`warmup_min_lr`）、热身中点 6.0、峰值 10.0、终点 2.0（= 10×0.2），以及余弦段中点等于手算的 `2 + 8·(1+cos(π·2000/7000))/2`。这份测试就是本讲公式的「可执行版」。
+- [src/olmo_core/optim/scheduler.py:L455-L467](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L455-L467) — `CosWithWarmup` 的字段：`warmup`/`warmup_steps`（弃用别名）/`warmup_fraction`、`alpha_f=0.1`、`t_max=None`、`warmup_min_lr=0.0`。类上的注册装饰器 `@Scheduler.register("cos_with_warmup")` 让它能被 YAML 的 `type` 字段选中（承接 u2-l2）。
+- [src/olmo_core/optim/scheduler.py:L469-L485](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L469-L485) — `__post_init__` 校验：把弃用的 `warmup_steps` 迁移到 `warmup`（并发出 `DeprecationWarning`）；强制 `warmup` 与 `warmup_fraction` **恰好给一个**；`warmup_fraction` 必须在 [0, 1]。
+- [src/olmo_core/optim/scheduler.py:L487-L506](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L487-L506) — `get_lr` 主体。L490 用自己的 `t_max` 覆盖传入值；L491 算 \(\eta_{min}\)；L493-L497 解析热身长度（比例则 `round(t_max * warmup_fraction)`）；L499-L500 热身段；L501-L502 越过总步数后恒返回 \(\eta_{min}\)；L504-L506 做平移缩放后套余弦公式——与上面两段公式逐项对应。
+- [src/olmo_core/optim/scheduler.py:L836-L841](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L836-L841) — `_linear_warmup` 辅助函数，被 7 个调度器复用；`min(current, warmup)` 保证越界后钳制在峰值。
+- [src/test/optim/scheduler_test.py:L69-L83](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/test/optim/scheduler_test.py#L69-L83) — `test_cos_with_warmup_scheduler`：用 `initial_lr=10, warmup=3000, alpha_f=0.2, T=10000` 断言了 4 个关键点：起点 4.0（`warmup_min_lr`）、热身中点 6.0、峰值 10.0、终点 2.0（= 10×0.2），以及余弦段中点等于手算的 `2 + 8·(1+cos(π·2000/7000))/2`。这份测试就是本讲公式的「可执行版」。
 
 官方真实用法（OLMo-2 32B，峰值 LR 6e-4）：
 
-- [src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py:L69-L79](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py#L69-L79) — `SkipStepAdamWConfig(lr=6e-4, ...)` 配 `scheduler=CosWithWarmup(warmup_steps=2000)`。注意它用的还是**弃用别名** `warmup_steps`——靠 `__post_init__` 自动迁移成 `warmup=2000` 并发 `DeprecationWarning`。读官方脚本时见到旧字段名不要困惑，机制就在上面 L469-L477。
+- [src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py:L69-L79](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo2/OLMo-2-0325-32B-train.py#L69-L79) — `SkipStepAdamWConfig(lr=6e-4, ...)` 配 `scheduler=CosWithWarmup(warmup_steps=2000)`。注意它用的还是**弃用别名** `warmup_steps`——靠 `__post_init__` 自动迁移成 `warmup=2000` 并发 `DeprecationWarning`。读官方脚本时见到旧字段名不要困惑，机制就在上面 L469-L477。
 
 #### 4.2.4 代码实践：复现 OLMo-2 32B 的学习率曲线
 
 1. **实践目标**：独立画出 OLMo-2 32B 同款调度曲线（`lr=6e-4`、`warmup=2000`、`alpha_f=0.1`），并验证 4.2.2 的公式。
-2. **操作步骤**（示例代码，只依赖 `olmo_core`，matplotlib 在 `pip install -e '.[all]'` 的 dev 依赖组里，见 [pyproject.toml:L44](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/pyproject.toml#L44)）：
+2. **操作步骤**（示例代码，只依赖 `olmo_core`，matplotlib 在 `pip install -e '.[all]'` 的 dev 依赖组里，见 [pyproject.toml:L44](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/pyproject.toml#L44)）：
 
    ```python
    # 示例代码：plot_cos_lr.py
@@ -220,7 +221,7 @@ warmup 段（\(t < W\)，由共享辅助函数 `_linear_warmup` 计算）：
 **答案**：终点是 \(\eta \times 0.1\)。设 `alpha_f=0.0` 即可衰到 0——OLMo-3 的 midtrain/long-context 阶段正是这么做的（见 4.3.3）。
 
 **练习 2**：`warmup` 和 `warmup_fraction` 同时给、或都不给，分别会发生什么？
-**答案**：都会在 `__post_init__` 抛 `OLMoConfigurationError`（[scheduler.py:L479-L480](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L479-L480) 的 `(None == None)` 恰好一个校验）。这是「二选一」字段的标准写法，WSD、PowerLR 等调度器同款。
+**答案**：都会在 `__post_init__` 抛 `OLMoConfigurationError`（[scheduler.py:L479-L480](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L479-L480) 的 `(None == None)` 恰好一个校验）。这是「二选一」字段的标准写法，WSD、PowerLR 等调度器同款。
 
 **练习 3**：同一份 `CosWithWarmup(warmup=2000)` 配置， trainer 的 `max_steps` 从 100k 改成 200k，step 1000 处的 LR 变吗？step 100_000 处呢？
 **答案**：step 1000 不变（热身段只依赖 `W` 和 \(\eta\)）；step 100_000 变——余弦段以 \(T-W\) 为分母，horizon 翻倍后该点的 \((t-W)/(T-W)\) 从 1 变成约 0.49，LR 还在高处。**余弦曲线是相对于总步数定义的**，这正是 4.3 要展开的「anneal 重设 lr」的根源。
@@ -271,20 +272,20 @@ OLMo-3 7B 的三阶段训练展示了「换阶段 = 换调度器 + 重设 lr」�
 
 `HalfCosWithWarmup`——本讲的主角之一：
 
-- [src/olmo_core/optim/scheduler.py:L509-L524](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L509-L524) — docstring 明说：「余弦调度的后半段，前面带一个 warmup。**假设配置的峰值 LR 是为完整余弦设定的**」。字段与 `CosWithWarmup` 相同。
-- [src/olmo_core/optim/scheduler.py:L542-L564](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L542-L564) — `get_lr`：warmup 段的目标不是 \(\eta\) 而是 L555 的 `max_lr = eta_min + (initial_lr - eta_min) / 2`（余弦中点值）；余弦段在 L560-L563 先平移（减 warmup），再 `current += t_max; t_max *= 2`——等价于在一条**两倍长**的余弦上取后半段，起点恰为中点值、终点为 \(\eta_{min}\)。
+- [src/olmo_core/optim/scheduler.py:L509-L524](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L509-L524) — docstring 明说：「余弦调度的后半段，前面带一个 warmup。**假设配置的峰值 LR 是为完整余弦设定的**」。字段与 `CosWithWarmup` 相同。
+- [src/olmo_core/optim/scheduler.py:L542-L564](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L542-L564) — `get_lr`：warmup 段的目标不是 \(\eta\) 而是 L555 的 `max_lr = eta_min + (initial_lr - eta_min) / 2`（余弦中点值）；余弦段在 L560-L563 先平移（减 warmup），再 `current += t_max; t_max *= 2`——等价于在一条**两倍长**的余弦上取后半段，起点恰为中点值、终点为 \(\eta_{min}\)。
 
 `SequentialScheduler` 的衔接机制：
 
-- [src/olmo_core/optim/scheduler.py:L913-L931](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L913-L931) — `_sequential_lr`：依次检查当前进度落在哪个子调度器的时间段；跨过某段时，L925 用该子调度器在自己 horizon 终点的 LR 作为下一段的 `initial_lr`，并把 `current`/`t_max` 都平移过去——阶段边界自动无缝。
-- [src/olmo_core/optim/scheduler.py:L1140-L1193](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L1140-L1193) — `PerGroupScheduler.set_lr` 直接把整个 `group` 转交给按 `scheduler_name` 选出的子调度器（L1192-L1193），其 docstring 给了与 `OptimGroupOverride` 配合的完整示例，呼应 u5-l1。
+- [src/olmo_core/optim/scheduler.py:L913-L931](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L913-L931) — `_sequential_lr`：依次检查当前进度落在哪个子调度器的时间段；跨过某段时，L925 用该子调度器在自己 horizon 终点的 LR 作为下一段的 `initial_lr`，并把 `current`/`t_max` 都平移过去——阶段边界自动无缝。
+- [src/olmo_core/optim/scheduler.py:L1140-L1193](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L1140-L1193) — `PerGroupScheduler.set_lr` 直接把整个 `group` 转交给按 `scheduler_name` 选出的子调度器（L1192-L1193），其 docstring 给了与 `OptimGroupOverride` 配合的完整示例，呼应 u5-l1。
 
 三个官方脚本的调度器对照（均可在源码中逐行核对）：
 
-- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py:L72-L80](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py#L72-L80) — 阶段 1：`lr=LR`（[L42-L43](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py#L40-L43) 定义 `LR = 3e-4`、`GLOBAL_BATCH_SIZE = 8192 * 512`），`scheduler=CosWithWarmup(warmup_steps=2000)`。
-- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py:L70-L87](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py#L70-L87) — 阶段 2（anneal）：L71-L72 从第一段的常数复原出 `original_warmup_steps = 2000`、`original_max_steps = int(5e12) // GLOBAL_BATCH_SIZE`；L85-L87 换成 `HalfCosWithWarmup(warmup_steps=original_max_steps // 2 + original_warmup_steps // 2)`，注释明言是为了「extend lr from where we left off」。
-- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py:L100-L112](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py#L100-L112) — 同一脚本的 TrainerConfig：`load_path` 指向阶段 1 的 `step596047` checkpoint，`load_strategy=always` 且 `load_optim_state=True`（优化器动量一并恢复），`max_duration` 从 5T token 扩到 7T（L110）。
-- [src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py:L72-L80](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py#L72-L80) — 阶段 3：`LinearWithWarmup(warmup=0, alpha_f=0.0)`——不热身、线性衰到 0，是退火终点最彻底的形态（long-context 阶段则用 `warmup=200` 先短热身再衰到 0，见 [OLMo-3-1025-7B-long-context.py:L81](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/OLMo-3-1025-7B-long-context.py#L81)）。
+- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py:L72-L80](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py#L72-L80) — 阶段 1：`lr=LR`（[L42-L43](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-1.py#L40-L43) 定义 `LR = 3e-4`、`GLOBAL_BATCH_SIZE = 8192 * 512`），`scheduler=CosWithWarmup(warmup_steps=2000)`。
+- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py:L70-L87](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py#L70-L87) — 阶段 2（anneal）：L71-L72 从第一段的常数复原出 `original_warmup_steps = 2000`、`original_max_steps = int(5e12) // GLOBAL_BATCH_SIZE`；L85-L87 换成 `HalfCosWithWarmup(warmup_steps=original_max_steps // 2 + original_warmup_steps // 2)`，注释明言是为了「extend lr from where we left off」。
+- [src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py:L100-L112](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-pretrain-2.py#L100-L112) — 同一脚本的 TrainerConfig：`load_path` 指向阶段 1 的 `step596047` checkpoint，`load_strategy=always` 且 `load_optim_state=True`（优化器动量一并恢复），`max_duration` 从 5T token 扩到 7T（L110）。
+- [src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py:L72-L80](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-midtrain.py#L72-L80) — 阶段 3：`LinearWithWarmup(warmup=0, alpha_f=0.0)`——不热身、线性衰到 0，是退火终点最彻底的形态（long-context 阶段则用 `warmup=200` 先短热身再衰到 0，见 [OLMo-3-1025-7B-long-context.py:L81](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/OLMo-3-1025-7B-long-context.py#L81)）。
 
 一个漂亮的数字巧合可以帮你确认理解：`original_max_steps = int(5e12) // (8192 * 512) = 1_192_092`，其一半是 `596_046`，而阶段 2 载入的正是 `step596047`——**阶段 1 恰好在原计划余弦的中点收工**，与 `HalfCosWithWarmup`「从余弦中点接管」的语义严丝合缝。
 
@@ -328,10 +329,10 @@ OLMo-3 7B 的三阶段训练展示了「换阶段 = 换调度器 + 重设 lr」�
 **答案**：从峰值 \(\eta\) 直线降到 0 的线段（无热身、`eta_min = 0`），即纯线性退火；适合「从 checkpoint 继续、最后一步归零」的中/后训练阶段。
 
 **练习 2**：`SequentialScheduler` 里前一个子调度器结束时 LR 是 2e-4，后一个 `CosWithWarmup(warmup=0, alpha_f=0.1)` 的 `initial_lr` 是多少？
-**答案**：2e-4。见 [scheduler.py:L925](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L925)：前段终点的 `get_lr` 结果直接作为下一段的 `initial_lr` 传入，后段曲线的峰值与下限都按它缩放。
+**答案**：2e-4。见 [scheduler.py:L925](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L925)：前段终点的 `get_lr` 结果直接作为下一段的 `initial_lr` 传入，后段曲线的峰值与下限都按它缩放。
 
 **练习 3**：你想让 embedding 参数组用 500 步 warmup、其余参数用 2000 步，单靠给 `TransformerTrainModuleConfig.scheduler` 设一个 `CosWithWarmup` 能做到吗？
-**答案**：不能——训练模块对所有参数组调用同一个调度器对象。需要 `PerGroupScheduler(schedulers={"embed": CosWithWarmup(warmup=500)}, default=CosWithWarmup(warmup=2000))`，并用 u5-l1 的 `OptimGroupOverride(params=["embeddings.weight"], opts={"scheduler_name": "embed"})` 给对应组打标签（见 [scheduler.py:L1155-L1163](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/olmo_core/optim/scheduler.py#L1155-L1163) 的官方示例）。
+**答案**：不能——训练模块对所有参数组调用同一个调度器对象。需要 `PerGroupScheduler(schedulers={"embed": CosWithWarmup(warmup=500)}, default=CosWithWarmup(warmup=2000))`，并用 u5-l1 的 `OptimGroupOverride(params=["embeddings.weight"], opts={"scheduler_name": "embed"})` 给对应组打标签（见 [scheduler.py:L1155-L1163](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/olmo_core/optim/scheduler.py#L1155-L1163) 的官方示例）。
 
 ## 5. 综合实践
 
@@ -342,7 +343,7 @@ OLMo-3 7B 的三阶段训练展示了「换阶段 = 换调度器 + 重设 lr」�
 1. **阶段 1**：`CosWithWarmup(warmup=2000)`，`initial_lr=3e-4`，横轴 `0 → original_max_steps`（用 `int(5e12) // (8192*512)` 计算），标注出 step 596047 处的 LR（应 ≈ 1.65e-4）。
 2. **阶段 2**：`HalfCosWithWarmup(warmup=original_max_steps//2 + 1000)`，横轴从 step 596047 起继续画（`t_max` 取阶段 2 的示意步数），检查两段曲线在衔接点的数值关系，并解释为什么官方选择「先沿长 warmup 爬坡再走余弦后半段」而不是让曲线硬跳。
 3. **阶段 3**：`LinearWithWarmup(warmup=0, alpha_f=0.0)`，横轴为该阶段的全部步数，确认终点为 0。
-4. 把三条曲线画进同一张图（或打印对齐的数值表），用注释标出每个阶段用的数据类型（dolma3 → dolmino → longmino，见 [src/scripts/official/OLMo3/README.md](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/scripts/official/OLMo3/README.md)）。
+4. 把三条曲线画进同一张图（或打印对齐的数值表），用注释标出每个阶段用的数据类型（dolma3 → dolmino → longmino，见 [src/scripts/official/OLMo3/README.md](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/scripts/official/OLMo3/README.md)）。
 5. 最后运行 `pytest -v src/test/optim/scheduler_test.py`，确认本讲引用的所有公式都有测试守护（全部应通过，CPU 即可，无 GPU 标记）。
 
 **验收标准**：你能指着自己的图回答三个问题——warmup 段斜率由什么决定（`W` 与 \(\eta\)）；余弦段为什么不会降到 0（`alpha_f` 下限）；anneal 阶段为什么必须换调度器（曲线绑 horizon，不换则弹回峰值或僵死下限）。
@@ -360,4 +361,4 @@ OLMo-3 7B 的三阶段训练展示了「换阶段 = 换调度器 + 重设 lr」�
 
 - **下一讲 u5-l3（SkipStepOptimizer 与梯度调试）**：本讲已在 `optim_step` 源码里瞥见 `grad_norm` 与 `step skipped` 指标——当 loss 尖峰出现时跳过优化步，与调度器共同守护训练稳定性。
 - **u6-l1（Trainer 训练循环）**：`set_lr` 依赖的 `trainer.global_step` / `max_steps` / `max_tokens` 从哪里来？答案在 `Duration`（按 step/token/epoch 停训）与 Trainer 的进度管理。
-- **延伸阅读源码**：`scheduler.py` 里本讲未展开的 `WSD`、`PowerLR`、`ComposableScheduler`、`WSDS` 各有独立测试，读测试是最快的理解路径（[src/test/optim/scheduler_test.py](https://github.com/allenai/OLMo-core/blob/704625ad94a7c8bc93f9bea7a0b865b9a0c3d44e/src/test/optim/scheduler_test.py)）。
+- **延伸阅读源码**：`scheduler.py` 里本讲未展开的 `WSD`、`PowerLR`、`ComposableScheduler`、`WSDS` 各有独立测试，读测试是最快的理解路径（[src/test/optim/scheduler_test.py](https://github.com/allenai/OLMo-core/blob/29ab5b92b94322dbd6e28e7d39af5068b89a23dc/src/test/optim/scheduler_test.py)）。
